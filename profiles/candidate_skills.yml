@@ -1,0 +1,82 @@
+experience_years: 6
+
+strong_skills:
+  - java
+  - spring boot
+  - rest api
+  - microservices
+  - kafka
+  - postgresql
+  - oracle
+  - git
+  - unit testing
+  - integration testing
+  - code review
+
+practical_skills:
+  - kotlin
+  - docker
+  - kubernetes
+  - linux
+  - unix
+  - multithreading
+  - concurrency
+  - ci/cd
+  - sql optimization
+  - database query optimization
+  - mongodb
+  - grpc
+  - liquibase
+  - jenkins
+  - istio
+  - service mesh
+  - camunda
+
+absent_skills:
+  - redis
+  - spring webflux
+  - reactive programming
+  - production llm api integration
+  - python backend
+  - react
+
+aliases:
+  concurrency:
+    - multithreading
+    - concurrent programming
+  sql optimization:
+    - database query optimization
+    - sql tuning
+    - query performance optimization
+  ci cd:
+    - ci/cd
+    - ci/cd pipelines
+    - cicd
+  camunda:
+    - camunda bpm
+    - camunda workflow
+  spring webflux:
+    - webflux
+
+core_skills:
+  - java
+  - spring boot
+
+skill_weights:
+  java: 10
+  spring boot: 9
+  microservices: 8
+  kafka: 7
+  postgresql: 6
+  rest api: 6
+  kotlin: 5
+  docker: 4
+  kubernetes: 4
+  concurrency: 4
+  sql optimization: 3
+  distributed systems: 3
+  jvm: 3
+  performance tuning: 3
+  redis: 2
+  spring webflux: 2
+  camunda: 1
