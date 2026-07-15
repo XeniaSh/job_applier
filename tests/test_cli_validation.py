@@ -10,7 +10,7 @@ def test_empty_vacancy_input(tmp_path: Path) -> None:
     vacancy_file.write_text("   \n", encoding="utf-8")
 
     runner = CliRunner()
-    result = runner.invoke(app, [str(vacancy_file)])
+    result = runner.invoke(app, ["review", str(vacancy_file)])
 
     assert result.exit_code != 0
     assert "Файл вакансии пустой" in result.output
@@ -26,7 +26,7 @@ def test_missing_environment_variables(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("LLM_MODEL", raising=False)
 
     runner = CliRunner()
-    result = runner.invoke(app, [str(vacancy_file)])
+    result = runner.invoke(app, ["review", str(vacancy_file)])
 
     assert result.exit_code != 0
     assert "Отсутствует обязательная конфигурация LLM" in result.output
