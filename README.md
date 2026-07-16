@@ -23,6 +23,8 @@ uv sync
 - `LLM_API_URL`
 - `LLM_API_KEY`
 - `LLM_MODEL`
+- `HH_USER_AGENT`
+- `LINKEDIN_EMAIL_IMAP_*` (for LinkedIn Job Alert mailbox collection)
 
 ## Usage
 
@@ -47,6 +49,28 @@ python -m app review examples/vacancy.txt --json
 ```bash
 uv run pytest
 ```
+
+## LinkedIn Job Alert Email MVP
+
+1. Create LinkedIn Job Alerts manually.
+2. Route LinkedIn alert emails to a dedicated mailbox.
+3. Enable IMAP for that mailbox/provider.
+4. For Gmail with 2-Step Verification, create an app password.
+5. Copy `.env.example` to `.env`.
+6. Fill IMAP settings (`LINKEDIN_EMAIL_IMAP_*`).
+7. First run in dry-run mode:
+
+```bash
+uv run python -m app collect-linkedin-email --dry-run --limit 5
+```
+
+8. Then run real analysis:
+
+```bash
+uv run python -m app collect-linkedin-email --limit 5
+```
+
+Use app-specific passwords where supported instead of normal mailbox passwords.
 
 
 ## Quick start

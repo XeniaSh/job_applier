@@ -1,10 +1,21 @@
 from pathlib import Path
+from datetime import timezone
 
 import typer
 from pydantic import ValidationError
 
 from app.collectors.hh_client import HHClient
 from app.collectors.hh_collector import DEFAULT_HH_QUERIES, HHCollector, HHCollectReport
+from app.collectors.email_imap_client import (
+    EmailAuthenticationError,
+    EmailConnectionError,
+    EmailIMAPClient,
+)
+from app.collectors.linkedin_email_collector import (
+    LinkedInEmailCollectReport,
+    LinkedInEmailCollector,
+)
+from app.collectors.linkedin_email_parser import extract_email_text_parts, parse_linkedin_email
 from app.config import Settings
 from app.formatter import format_evaluation_ru
 from app.llm_client import LLMClient, LLMRequestError, LLMResponseError
@@ -174,3 +185,297 @@ def _print_summary(report: HHCollectReport) -> None:
             ]
         )
     )
+
+
+@app.command("collect-linkedin-email")
+def collect_linkedin_email(
+    limit: int = typer.Option(20, "--limit", min=1, help="Maximum new vacancies to analyze."),
+    include_ignore: bool = typer.Option(False, "--include-ignore", help="Print IGNORE results too."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Parse emails and print metadata without LLM analysis and without mark seen.",
+    ),
+) -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(
+            f"Отсутствует обязательная конфигурация LLM: {exc}",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2) from exc
+
+    analyzer = build_analyzer(settings)
+    seen_jobs = SeenJobsStorage()
+    email_client = EmailIMAPClient(
+        host=settings.linkedin_email_imap_host,
+        port=settings.linkedin_email_imap_port,
+        username=settings.linkedin_email_username,
+        password=settings.linkedin_email_password,
+        folder=settings.linkedin_email_folder,
+        search_days=settings.linkedin_email_search_days,
+        mark_as_read=settings.linkedin_email_mark_as_read,
+    )
+    collector = LinkedInEmailCollector(
+        email_client=email_client,
+        analyzer=analyzer,
+        seen_jobs=seen_jobs,
+    )
+
+    try:
+        report = collector.collect_and_analyze(limit=limit, dry_run=dry_run)
+    except (EmailConnectionError, EmailAuthenticationError) as exc:
+        _ = exc
+        typer.secho("Ошибка подключения к почте LinkedIn alerts.", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    _print_linkedin_results(report=report, include_ignore=include_ignore, dry_run=dry_run)
+    _print_linkedin_summary(report)
+
+
+def _print_linkedin_results(
+    report: LinkedInEmailCollectReport,
+    include_ignore: bool,
+    dry_run: bool,
+) -> None:
+    for item in report.processed:
+        if dry_run:
+            typer.echo(
+                "\n".join(
+                    [
+                        "Режим: DRY-RUN",
+                        f"Вакансия: {item.title}",
+                        f"Компания: {item.company or 'n/a'}",
+                        f"Локация: {item.location or 'n/a'}",
+                        f"URL: {item.url}",
+                        f"Content completeness: {item.content_completeness}",
+                        "",
+                    ]
+                ).strip()
+            )
+            continue
+
+        if item.evaluation is None:
+            continue
+        decision = item.evaluation.decision.value
+        if decision == "IGNORE" and not include_ignore:
+            continue
+        if decision not in {"STRONG_MATCH", "POTENTIAL_MATCH", "IGNORE"}:
+            continue
+
+        stack_value = (
+            f"{item.evaluation.match_percentage:.1f}%"
+            if item.evaluation.match_percentage is not None
+            else "n/a"
+        )
+        typer.echo(
+            "\n".join(
+                [
+                    f"Решение: {decision}",
+                    f"Вакансия: {item.title}",
+                    f"Компания: {item.company or 'n/a'}",
+                    f"Локация: {item.location or 'n/a'}",
+                    f"LinkedIn URL: {item.url}",
+                    f"Совпадение по стеку: {stack_value}",
+                    _format_short_list("Пробелы", item.evaluation.gaps, limit=3),
+                    _format_short_list("Нюансы", item.evaluation.nuances, limit=3),
+                    f"Рекомендуемое резюме: {item.evaluation.recommended_resume.value}",
+                    f"Content completeness: {item.content_completeness}",
+                    "",
+                ]
+            ).strip()
+        )
+
+
+def _print_linkedin_summary(report: LinkedInEmailCollectReport) -> None:
+    typer.echo(
+        "\n".join(
+            [
+                f"Найдено писем: {report.emails_found}",
+                f"Извлечено вакансий: {report.vacancies_extracted}",
+                f"Новых вакансий: {report.new_vacancies}",
+                f"Проанализировано: {report.analyzed}",
+                f"Сильных совпадений: {report.strong_matches}",
+                f"Потенциальных совпадений: {report.potential_matches}",
+                f"Отфильтровано по заголовку: {report.prefiltered}",
+                f"Пропущено: {report.ignored}",
+                f"Ошибок: {report.errors}",
+            ]
+        )
+    )
+
+
+@app.command("list-imap-folders")
+def list_imap_folders() -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(
+            f"Отсутствует обязательная конфигурация LLM: {exc}",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2) from exc
+
+    email_client = EmailIMAPClient(
+        host=settings.linkedin_email_imap_host,
+        port=settings.linkedin_email_imap_port,
+        username=settings.linkedin_email_username,
+        password=settings.linkedin_email_password,
+        folder=settings.linkedin_email_folder,
+        search_days=settings.linkedin_email_search_days,
+        mark_as_read=settings.linkedin_email_mark_as_read,
+    )
+
+    try:
+        folders = email_client.list_mailboxes()
+    except (EmailConnectionError, EmailAuthenticationError) as exc:
+        _ = exc
+        typer.secho("Ошибка подключения к IMAP.", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo("Available IMAP folders:\n")
+    for folder in folders:
+        typer.echo(folder)
+
+
+@app.command("preview-linkedin-email")
+def preview_linkedin_email(
+    limit_emails: int = typer.Option(3, "--limit-emails", min=1),
+    limit_vacancies: int = typer.Option(20, "--limit-vacancies", min=1),
+    save_html: bool = typer.Option(False, "--save-html"),
+) -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(
+            f"Отсутствует обязательная конфигурация LLM: {exc}",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2) from exc
+
+    email_client = EmailIMAPClient(
+        host=settings.linkedin_email_imap_host,
+        port=settings.linkedin_email_imap_port,
+        username=settings.linkedin_email_username,
+        password=settings.linkedin_email_password,
+        folder=settings.linkedin_email_folder,
+        search_days=settings.linkedin_email_search_days,
+        mark_as_read=False,
+    )
+
+    try:
+        messages = email_client.fetch_linkedin_messages()
+    except (EmailConnectionError, EmailAuthenticationError) as exc:
+        _ = exc
+        typer.secho("Ошибка подключения к IMAP.", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    limited_messages = messages[:limit_emails]
+    typer.echo("--------------------------------------------------\n")
+    typer.echo(f"Found {len(limited_messages)} LinkedIn Job Alert emails\n")
+
+    processed_emails = 0
+    vacancies_extracted = 0
+    duplicate_job_ids = 0
+    parsing_errors = 0
+    printed_vacancies = 0
+    structured_cards = 0
+    fallback_urls = 0
+    seen_job_ids: set[str] = set()
+    debug_dir = Path("data/debug")
+
+    for email_index, raw_message in enumerate(limited_messages, start=1):
+        processed_emails += 1
+        typer.echo(f"Email #{email_index}\n")
+        typer.echo("Subject:")
+        typer.echo(raw_message.subject or "n/a")
+        typer.echo("\nFrom:")
+        typer.echo(raw_message.from_address or "n/a")
+        typer.echo("\nReceived:")
+        typer.echo(_format_received(raw_message.received_at))
+
+        if save_html:
+            html_content, _ = extract_email_text_parts(raw_message.email_message)
+            if html_content.strip():
+                _save_debug_html(debug_dir=debug_dir, html_content=html_content)
+
+        try:
+            vacancies = parse_linkedin_email(raw_message)
+        except Exception as exc:  # noqa: BLE001
+            parsing_errors += 1
+            typer.echo(f"\nWarning: failed to parse email ({exc})")
+            typer.echo("\n--------------------------------------------------\n")
+            continue
+
+        vacancies_extracted += len(vacancies)
+        typer.echo(f"\nVacancies found: {len(vacancies)}\n")
+
+        for item in vacancies:
+            if printed_vacancies >= limit_vacancies:
+                break
+            if item.external_id in seen_job_ids:
+                duplicate_job_ids += 1
+                continue
+            seen_job_ids.add(item.external_id)
+            printed_vacancies += 1
+            typer.echo("--------------------------------\n")
+            typer.echo(f"{printed_vacancies}.\n")
+            typer.echo("Job ID:")
+            typer.echo(item.external_id)
+            typer.echo("\nTitle:")
+            typer.echo(item.title or "n/a")
+            typer.echo("\nCompany:")
+            typer.echo(item.company or "n/a")
+            typer.echo("\nLocation:")
+            typer.echo(item.location or "n/a")
+            typer.echo("\nURL:")
+            typer.echo(item.url or "n/a")
+            typer.echo("\nCompleteness:")
+            typer.echo(item.content_completeness.value)
+            typer.echo("\nParser source:")
+            typer.echo(item.parser_source.value)
+            typer.echo("")
+            if item.parser_source.value == "STRUCTURED_CARD":
+                structured_cards += 1
+            else:
+                fallback_urls += 1
+
+        typer.echo("--------------------------------------------------\n")
+        if printed_vacancies >= limit_vacancies:
+            break
+
+    typer.echo("Summary\n")
+    typer.echo(f"Emails processed: {processed_emails}")
+    typer.echo(f"Vacancies extracted: {vacancies_extracted}")
+    typer.echo(f"Duplicate job IDs: {duplicate_job_ids}")
+    typer.echo(f"Structured cards: {structured_cards}")
+    typer.echo(f"Fallback URLs: {fallback_urls}")
+    typer.echo(f"Parsing errors: {parsing_errors}")
+
+
+def _format_received(received_at) -> str:
+    if received_at is None:
+        return "n/a"
+    converted = received_at.astimezone(timezone.utc)
+    return converted.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _save_debug_html(debug_dir: Path, html_content: str) -> None:
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = _format_received_filename()
+    candidate = debug_dir / f"linkedin_email_{timestamp}.html"
+    counter = 1
+    while candidate.exists():
+        candidate = debug_dir / f"linkedin_email_{timestamp}_{counter}.html"
+        counter += 1
+    candidate.write_text(html_content, encoding="utf-8")
+
+
+def _format_received_filename() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")

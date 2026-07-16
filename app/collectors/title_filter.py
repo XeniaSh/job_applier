@@ -18,6 +18,9 @@ REJECT_KEYWORDS = (
     "c#",
     ".net",
     "php",
+    "mobile",
+    "data scientist",
+    "ml engineer",
 )
 
 

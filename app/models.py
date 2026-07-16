@@ -100,5 +100,7 @@ class VacancyEvaluation(BaseModel):
     match_percentage: float | None = None
     matched_score: float = 0.0
     total_possible_score: float = 0.0
+    explicit_skill_count: int = 0
+    evidence_sufficient: bool = False
     recommended_resume: RecommendedResume
     recommended_cover_template: RecommendedCoverTemplate
