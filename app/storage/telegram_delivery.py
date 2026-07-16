@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.storage.seen_jobs import DEFAULT_DB_PATH
-from app.telegram.models import TelegramDeliveryRecord, TelegramResumeCacheRecord
+from app.telegram.models import ApplicationHistoryRecord, TelegramDeliveryRecord, TelegramResumeCacheRecord
 
 STATUS_SENT = "SENT"
 STATUS_SKIPPED = "SKIPPED"
@@ -23,6 +23,7 @@ ALLOWED_STATUSES = {
     STATUS_PREPARATION_FAILED,
     STATUS_APPLIED,
 }
+HISTORY_STATUS_FOUND = "FOUND"
 
 
 class TelegramDeliveryStorage:
@@ -178,6 +179,274 @@ class TelegramDeliveryStorage:
                 (str(chat_id), status, int(limit)),
             ).fetchall()
         return [(str(source), str(external_id)) for source, external_id in rows]
+
+    def upsert_application_history(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        title: str | None,
+        company: str | None,
+        location: str | None,
+        url: str | None,
+        decision: str | None,
+        recommended_resume: str | None,
+    ) -> None:
+        first_seen_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into application_history (
+                    source, external_id, title, company, location, url, decision, recommended_resume, first_seen_at, current_status
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(source, external_id) do update set
+                    title = coalesce(application_history.title, excluded.title),
+                    company = coalesce(application_history.company, excluded.company),
+                    location = coalesce(application_history.location, excluded.location),
+                    url = coalesce(application_history.url, excluded.url),
+                    decision = coalesce(application_history.decision, excluded.decision),
+                    recommended_resume = coalesce(application_history.recommended_resume, excluded.recommended_resume)
+                """,
+                (
+                    source,
+                    external_id,
+                    title,
+                    company,
+                    location,
+                    url,
+                    decision,
+                    recommended_resume,
+                    first_seen_at,
+                    HISTORY_STATUS_FOUND,
+                ),
+            )
+            conn.commit()
+
+    def mark_history_status(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        status: str,
+        timestamp_field: str | None = None,
+    ) -> None:
+        timestamp_fields = {
+            "sent_at",
+            "prepared_at",
+            "applied_at",
+            "skipped_at",
+        }
+        if timestamp_field is not None and timestamp_field not in timestamp_fields:
+            raise ValueError(f"Unsupported history timestamp field: {timestamp_field}")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into application_history (
+                    source, external_id, first_seen_at, current_status
+                )
+                values (?, ?, ?, ?)
+                on conflict(source, external_id) do nothing
+                """,
+                (source, external_id, now, status),
+            )
+            if timestamp_field is None:
+                conn.execute(
+                    """
+                    update application_history
+                    set current_status = ?
+                    where source = ? and external_id = ?
+                    """,
+                    (status, source, external_id),
+                )
+            else:
+                conn.execute(
+                    f"""
+                    update application_history
+                    set current_status = ?, {timestamp_field} = coalesce({timestamp_field}, ?)
+                    where source = ? and external_id = ?
+                    """,
+                    (status, now, source, external_id),
+                )
+            conn.commit()
+
+    def update_delivery_and_history(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        chat_id: str,
+        delivery_status: str,
+        history_status: str,
+        timestamp_field: str | None = None,
+    ) -> None:
+        if delivery_status not in ALLOWED_STATUSES:
+            raise ValueError(f"Unknown status: {delivery_status}")
+        timestamp_fields = {"sent_at", "prepared_at", "applied_at", "skipped_at"}
+        if timestamp_field is not None and timestamp_field not in timestamp_fields:
+            raise ValueError(f"Unsupported history timestamp field: {timestamp_field}")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                update telegram_deliveries
+                set status = ?
+                where source = ? and external_id = ? and chat_id = ?
+                """,
+                (delivery_status, source, external_id, str(chat_id)),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"Delivery not found: {source}:{external_id}:{chat_id}")
+            conn.execute(
+                """
+                insert into application_history (
+                    source, external_id, first_seen_at, current_status
+                )
+                values (?, ?, ?, ?)
+                on conflict(source, external_id) do nothing
+                """,
+                (source, external_id, now, history_status),
+            )
+            if timestamp_field is None:
+                conn.execute(
+                    """
+                    update application_history
+                    set current_status = ?
+                    where source = ? and external_id = ?
+                    """,
+                    (history_status, source, external_id),
+                )
+            else:
+                conn.execute(
+                    f"""
+                    update application_history
+                    set current_status = ?, {timestamp_field} = coalesce({timestamp_field}, ?)
+                    where source = ? and external_id = ?
+                    """,
+                    (history_status, now, source, external_id),
+                )
+            conn.commit()
+
+    def list_application_history(
+        self,
+        *,
+        status: str | None = None,
+        source: str | None = None,
+        company: str | None = None,
+        limit: int = 50,
+    ) -> list[ApplicationHistoryRecord]:
+        safe_limit = max(1, int(limit))
+        clauses: list[str] = []
+        params: list[object] = []
+        if status:
+            clauses.append("current_status = ?")
+            params.append(status)
+        if source:
+            clauses.append("source = ?")
+            params.append(source)
+        if company:
+            clauses.append("lower(company) like ?")
+            params.append(f"%{company.strip().lower()}%")
+        where_sql = f" where {' and '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                select
+                    source, external_id, title, company, location, url, decision, recommended_resume,
+                    first_seen_at, sent_at, prepared_at, applied_at, skipped_at, current_status,
+                    coalesce(applied_at, skipped_at, prepared_at, sent_at, first_seen_at) as display_date
+                from application_history
+                {where_sql}
+                order by display_date desc, external_id desc
+                limit ?
+                """,
+                (*params, safe_limit),
+            ).fetchall()
+        return [
+            ApplicationHistoryRecord(
+                source=str(row[0]),
+                external_id=str(row[1]),
+                title=str(row[2]) if row[2] is not None else None,
+                company=str(row[3]) if row[3] is not None else None,
+                location=str(row[4]) if row[4] is not None else None,
+                url=str(row[5]) if row[5] is not None else None,
+                decision=str(row[6]) if row[6] is not None else None,
+                recommended_resume=str(row[7]) if row[7] is not None else None,
+                first_seen_at=str(row[8]),
+                sent_at=str(row[9]) if row[9] is not None else None,
+                prepared_at=str(row[10]) if row[10] is not None else None,
+                applied_at=str(row[11]) if row[11] is not None else None,
+                skipped_at=str(row[12]) if row[12] is not None else None,
+                current_status=str(row[13]),
+                display_date=str(row[14]),
+            )
+            for row in rows
+        ]
+
+    def get_application_stats(self, *, days: int, source: str | None = None) -> dict:
+        period_days = max(1, int(days))
+        cutoff = datetime.now(timezone.utc).timestamp() - (period_days * 24 * 60 * 60)
+        cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+        source_clause = " and source = ?" if source else ""
+        source_params: tuple[object, ...] = (source,) if source else ()
+        with self._connect() as conn:
+            found = conn.execute(
+                f"select count(*) from application_history where first_seen_at >= ?{source_clause}",
+                (cutoff_iso, *source_params),
+            ).fetchone()[0]
+            sent = conn.execute(
+                f"select count(*) from application_history where sent_at is not null and sent_at >= ?{source_clause}",
+                (cutoff_iso, *source_params),
+            ).fetchone()[0]
+            prepare_requested = conn.execute(
+                f"select count(*) from application_history where current_status = 'PREPARE_REQUESTED' and first_seen_at >= ?{source_clause}",
+                (cutoff_iso, *source_params),
+            ).fetchone()[0]
+            prepared = conn.execute(
+                f"select count(*) from application_history where prepared_at is not null and prepared_at >= ?{source_clause}",
+                (cutoff_iso, *source_params),
+            ).fetchone()[0]
+            applied = conn.execute(
+                f"select count(*) from application_history where applied_at is not null and applied_at >= ?{source_clause}",
+                (cutoff_iso, *source_params),
+            ).fetchone()[0]
+            skipped = conn.execute(
+                f"select count(*) from application_history where skipped_at is not null and skipped_at >= ?{source_clause}",
+                (cutoff_iso, *source_params),
+            ).fetchone()[0]
+            top_companies_rows = conn.execute(
+                f"""
+                select company, count(*) as cnt
+                from application_history
+                where first_seen_at >= ? and company is not null and trim(company) <> ''{source_clause}
+                group by company
+                order by cnt desc, company asc
+                limit 5
+                """,
+                (cutoff_iso, *source_params),
+            ).fetchall()
+            top_resumes_rows = conn.execute(
+                f"""
+                select recommended_resume, count(*) as cnt
+                from application_history
+                where first_seen_at >= ? and recommended_resume is not null and trim(recommended_resume) <> ''{source_clause}
+                group by recommended_resume
+                order by cnt desc, recommended_resume asc
+                limit 5
+                """,
+                (cutoff_iso, *source_params),
+            ).fetchall()
+        return {
+            "found": int(found),
+            "sent": int(sent),
+            "prepare_requested": int(prepare_requested),
+            "prepared": int(prepared),
+            "applied": int(applied),
+            "skipped": int(skipped),
+            "top_companies": [(str(row[0]), int(row[1])) for row in top_companies_rows],
+            "top_resumes": [(str(row[0]), int(row[1])) for row in top_resumes_rows],
+        }
 
     def get_resume_cache(self, resume_name: str) -> TelegramResumeCacheRecord | None:
         with self._connect() as conn:
@@ -405,6 +674,27 @@ class TelegramDeliveryStorage:
                     telegram_file_id text not null,
                     telegram_file_unique_id text,
                     cached_at text not null
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists application_history (
+                    source text not null,
+                    external_id text not null,
+                    title text,
+                    company text,
+                    location text,
+                    url text,
+                    decision text,
+                    recommended_resume text,
+                    first_seen_at text not null,
+                    sent_at text,
+                    prepared_at text,
+                    applied_at text,
+                    skipped_at text,
+                    current_status text not null,
+                    primary key (source, external_id)
                 )
                 """
             )

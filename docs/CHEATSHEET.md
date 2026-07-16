@@ -62,6 +62,22 @@ uv run python -m app telegram-debug
 
 Shows statuses such as `SENT`, `PREPARE_REQUESTED`, `PREPARED` and `APPLIED`.
 
+### Inspect application history
+
+```bash
+uv run python -m app application-history
+```
+
+Shows recent lifecycle events across vacancies.
+
+### Show application statistics
+
+```bash
+uv run python -m app application-stats --days 30
+```
+
+Shows found/sent/prepared/applied/skipped counts and conversion rates.
+
 ### Reset one vacancy
 
 ```bash

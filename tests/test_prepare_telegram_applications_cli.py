@@ -63,6 +63,9 @@ def test_prepare_dry_run_sends_nothing_and_updates_nothing(monkeypatch) -> None:
         def save_preparation(self, **kwargs):
             self.updated.append(kwargs)
 
+        def mark_history_status(self, **kwargs):
+            self.updated.append(kwargs)
+
     storage = FakeStorage()
     monkeypatch.setattr(cli_module, "PreparationService", FakeService)
     monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: storage)
@@ -109,6 +112,9 @@ def test_prepare_processed_oldest_first_and_success_updates_status(monkeypatch) 
 
         def save_preparation(self, **kwargs):
             self.meta.append(kwargs)
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
 
         def get_resume_cache(self, resume_name):
             _ = resume_name
@@ -212,6 +218,9 @@ def test_prepare_failure_sets_preparation_failed(monkeypatch) -> None:
         def save_preparation(self, **kwargs):
             _ = kwargs
 
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
     @dataclass
     class FakeClient:
         bot_token: str
@@ -254,6 +263,9 @@ def test_prepare_missing_pdf_does_not_fail(monkeypatch) -> None:
             _ = kwargs
 
         def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
             _ = kwargs
 
         def get_resume_cache(self, resume_name):
@@ -318,6 +330,9 @@ def test_dry_run_generated_never_zero_after_prepared(monkeypatch) -> None:
         def save_preparation(self, **kwargs):
             _ = kwargs
 
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
     monkeypatch.setattr(cli_module, "PreparationService", FakeService)
     monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: FakeStorage())
     monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: object())
@@ -356,6 +371,9 @@ def test_prepare_keeps_prepared_status_when_pdf_fails(monkeypatch) -> None:
             self.statuses.append(kwargs)
 
         def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
             _ = kwargs
 
         def get_resume_cache(self, resume_name):

@@ -25,6 +25,8 @@ uv run python -m app <command> [options]
 | `telegram-debug` | List delivery rows for troubleshooting | `uv run python -m app telegram-debug --status PREPARE_REQUESTED` | No | No | No | Always read-only |
 | `telegram-reset` | Reset delivery status for one row | `uv run python -m app telegram-reset 4439900667 --status PREPARE_REQUESTED` | No | Yes | No | No |
 | `telegram-delete-delivery` | Delete one delivery row (with confirmation) | `uv run python -m app telegram-delete-delivery 4439900667 --yes` | No | Yes | No | No |
+| `application-history` | Show compact application lifecycle history | `uv run python -m app application-history --status APPLIED` | No | No | No | Always read-only |
+| `application-stats` | Show lightweight period stats and conversion | `uv run python -m app application-stats --days 30` | No | No | No | Always read-only |
 | `run` | Start continuous automation service | `uv run python -m app run` | Yes | Yes | Yes | No |
 
 ## Status Lifecycle

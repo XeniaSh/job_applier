@@ -266,6 +266,8 @@ Primary commands:
 - `telegram-debug`
 - `telegram-reset`
 - `telegram-delete-delivery`
+- `application-history`
+- `application-stats`
 - `run`
 
 ## Quick Command Reference
@@ -294,6 +296,14 @@ Resume cache commands:
 uv run python -m app telegram-cache-resumes
 uv run python -m app telegram-resume-cache
 uv run python -m app telegram-clear-resume-cache java-backend
+```
+
+Application history commands:
+
+```bash
+uv run python -m app application-history
+uv run python -m app application-history --status APPLIED
+uv run python -m app application-stats --days 30
 ```
 
 ## Troubleshooting

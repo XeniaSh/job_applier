@@ -95,6 +95,12 @@ def test_send_linkedin_telegram_dry_run_no_telegram_and_no_delivery(monkeypatch)
             _ = kwargs
             self.saved += 1
 
+        def upsert_application_history(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
     storage = FakeDeliveryStorage()
     monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: storage)
 
@@ -172,6 +178,12 @@ def test_send_linkedin_telegram_continue_on_failure_and_deduplicate(monkeypatch)
 
         def save_sent(self, **kwargs):
             self.saved.append(kwargs["external_id"])
+
+        def upsert_application_history(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
 
     storage = FakeDeliveryStorage()
     monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: storage)
@@ -252,6 +264,12 @@ def test_send_dry_run_ignores_seen_and_delivered_but_reports_info(monkeypatch) -
             _ = kwargs
             self.saved += 1
 
+        def upsert_application_history(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
     monkeypatch.setattr(cli_module, "build_analyzer", lambda settings: object())
     monkeypatch.setattr(cli_module, "EmailIMAPClient", lambda **kwargs: object())
     monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: FakeSeen())
@@ -323,6 +341,12 @@ def test_send_real_allows_seen_jobs_but_skips_already_delivered(monkeypatch) -> 
 
         def save_sent(self, **kwargs):
             self.saved.append(kwargs["external_id"])
+
+        def upsert_application_history(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
 
     @dataclass
     class _Ref:
@@ -410,7 +434,16 @@ def test_verbose_outcome_and_prepared_cards_counter(monkeypatch) -> None:
     monkeypatch.setattr(
         cli_module,
         "TelegramDeliveryStorage",
-        lambda: type("D", (), {"was_sent": lambda self, s, e, c: False, "save_sent": lambda self, **k: None})(),
+        lambda: type(
+            "D",
+            (),
+            {
+                "was_sent": lambda self, s, e, c: False,
+                "save_sent": lambda self, **k: None,
+                "upsert_application_history": lambda self, **k: None,
+                "mark_history_status": lambda self, **k: None,
+            },
+        )(),
     )
     monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: None)
 
@@ -431,7 +464,7 @@ def test_poll_callbacks_skip_prepare_unknown_and_wrong_chat() -> None:
     calls = {"status": [], "answers": [], "edits": []}
 
     class FakeStorage:
-        def update_status(self, **kwargs):
+        def update_delivery_and_history(self, **kwargs):
             calls["status"].append(kwargs)
 
         def set_state(self, key, value):
@@ -536,12 +569,15 @@ def test_poll_callbacks_skip_prepare_unknown_and_wrong_chat() -> None:
         configured_chat_id="123",
     )
 
-    assert any(item["status"] == "SKIPPED" for item in calls["status"])
-    assert any(item["status"] == "PREPARE_REQUESTED" for item in calls["status"])
-    assert any(item["status"] == "APPLIED" for item in calls["status"])
+    assert any(item["delivery_status"] == "SKIPPED" and item["history_status"] == "SKIPPED" for item in calls["status"])
+    assert any(
+        item["delivery_status"] == "PREPARE_REQUESTED" and item["history_status"] == "PREPARE_REQUESTED"
+        for item in calls["status"]
+    )
+    assert any(item["delivery_status"] == "APPLIED" and item["history_status"] == "APPLIED" for item in calls["status"])
     assert ("cb1", "Вакансия пропущена") in calls["answers"]
     assert ("cb2", "Добавлено в очередь на подготовку отклика") in calls["answers"]
-    assert ("cb5", "Отмечено как отклик отправлен") in calls["answers"]
+    assert ("cb5", "Отклик отмечен как отправленный") in calls["answers"]
     assert ("cb3", "Некорректное действие") in calls["answers"]
     assert ("cb4", "Действие недоступно для этого чата") in calls["answers"]
     assert len(calls["edits"]) == 3
@@ -566,7 +602,7 @@ def test_poll_telegram_actions_persists_offset_and_repeated_updates(monkeypatch)
         def set_state(self, key, value):
             self.state[key] = value
 
-        def update_status(self, **kwargs):
+        def update_delivery_and_history(self, **kwargs):
             _ = kwargs
 
     storage = FakeStorage()

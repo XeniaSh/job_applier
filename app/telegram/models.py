@@ -59,3 +59,22 @@ class TelegramResumeCacheRecord:
     telegram_file_id: str
     telegram_file_unique_id: str | None
     cached_at: str
+
+
+@dataclass(frozen=True)
+class ApplicationHistoryRecord:
+    source: str
+    external_id: str
+    title: str | None
+    company: str | None
+    location: str | None
+    url: str | None
+    decision: str | None
+    recommended_resume: str | None
+    first_seen_at: str
+    sent_at: str | None
+    prepared_at: str | None
+    applied_at: str | None
+    skipped_at: str | None
+    current_status: str
+    display_date: str

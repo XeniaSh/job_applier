@@ -48,7 +48,13 @@ from app.telegram.client import (
     parse_callback_data,
     validate_linkedin_job_url,
 )
-from app.telegram.models import TelegramDeliveryRecord, TelegramInlineButton, TelegramResumeCacheRecord, TelegramVacancyCard
+from app.telegram.models import (
+    ApplicationHistoryRecord,
+    TelegramDeliveryRecord,
+    TelegramInlineButton,
+    TelegramResumeCacheRecord,
+    TelegramVacancyCard,
+)
 from app.vacancy_analyzer import VacancyAnalyzer
 
 app = typer.Typer(help="Personal job vacancy analyzer.")
@@ -265,6 +271,7 @@ def collect_linkedin_email(
         typer.secho("Ошибка подключения к почте LinkedIn alerts.", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
 
+    _sync_application_history(report.processed)
     _print_linkedin_results(report=report, include_ignore=include_ignore, dry_run=dry_run)
     _print_linkedin_summary(report)
 
@@ -323,6 +330,7 @@ def send_linkedin_telegram(
         typer.secho("Ошибка подключения к почте LinkedIn alerts.", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
 
+    _sync_application_history(report.processed)
     for item in report.processed:
         if item.evaluation is None:
             if verbose and item.skipped_by_prefilter:
@@ -402,6 +410,12 @@ def send_linkedin_telegram(
             external_id=item.external_id,
             chat_id=settings.telegram_chat_id,
             message_id=message_ref.message_id,
+        )
+        deliveries.mark_history_status(
+            source="linkedin-email",
+            external_id=item.external_id,
+            status="SENT",
+            timestamp_field="sent_at",
         )
         report.sent += 1
 
@@ -709,6 +723,63 @@ def telegram_debug(
         typer.echo("Telegram delivery records not found.")
         return
     _print_delivery_debug_table(rows)
+
+
+@app.command("application-history")
+def application_history(
+    status: str | None = typer.Option(None, "--status"),
+    source: str | None = typer.Option(None, "--source"),
+    company: str | None = typer.Option(None, "--company"),
+    limit: int = typer.Option(50, "--limit", min=1),
+) -> None:
+    rows = TelegramDeliveryStorage().list_application_history(
+        status=status.strip() if status else None,
+        source=source.strip() if source else None,
+        company=company.strip() if company else None,
+        limit=limit,
+    )
+    if not rows:
+        typer.echo("Application history is empty.")
+        return
+    _print_application_history_table(rows)
+
+
+@app.command("application-stats")
+def application_stats(
+    days: int = typer.Option(30, "--days", min=1),
+    source: str | None = typer.Option(None, "--source"),
+) -> None:
+    stats = TelegramDeliveryStorage().get_application_stats(
+        days=days,
+        source=source.strip() if source else None,
+    )
+    sent = stats["sent"]
+    prepared = stats["prepared"]
+    applied = stats["applied"]
+    sent_to_prepared = _safe_percent(prepared, sent)
+    prepared_to_applied = _safe_percent(applied, prepared)
+    typer.echo(f"Period: last {days} days\n")
+    typer.echo(f"Found: {stats['found']}")
+    typer.echo(f"Sent to Telegram: {sent}")
+    typer.echo(f"Prepare requested: {stats['prepare_requested']}")
+    typer.echo(f"Prepared: {prepared}")
+    typer.echo(f"Applied: {applied}")
+    typer.echo(f"Skipped: {stats['skipped']}\n")
+    typer.echo("Conversion:")
+    typer.echo(f"Sent -> Prepared: {sent_to_prepared:.1f}%")
+    typer.echo(f"Prepared -> Applied: {prepared_to_applied:.1f}%\n")
+    typer.echo("Top companies:")
+    if stats["top_companies"]:
+        for name, count in stats["top_companies"]:
+            typer.echo(f"{name}: {count}")
+    else:
+        typer.echo("n/a")
+    typer.echo("\nTop recommended resumes:")
+    if stats["top_resumes"]:
+        for name, count in stats["top_resumes"]:
+            typer.echo(f"{name}: {count}")
+    else:
+        typer.echo("n/a")
 
 
 @app.command("telegram-reset")
@@ -1129,36 +1200,47 @@ def _process_callback_update(
             client.answer_callback_query(callback_id, text="Некорректное действие")
         return
 
-    if action == "skip":
-        storage.update_status(
-            source=source,
-            external_id=external_id,
-            chat_id=configured_chat_id,
-            status=STATUS_SKIPPED,
-        )
-        if callback_id:
-            client.answer_callback_query(callback_id, text="Вакансия пропущена")
-    elif action == "applied":
-        storage.update_status(
-            source=source,
-            external_id=external_id,
-            chat_id=configured_chat_id,
-            status=STATUS_APPLIED,
-        )
-        if callback_id:
-            client.answer_callback_query(callback_id, text="Отмечено как отклик отправлен")
-    else:
-        storage.update_status(
-            source=source,
-            external_id=external_id,
-            chat_id=configured_chat_id,
-            status=STATUS_PREPARE_REQUESTED,
-        )
-        if callback_id:
-            client.answer_callback_query(
-                callback_id,
-                text="Добавлено в очередь на подготовку отклика",
+    try:
+        if action == "skip":
+            storage.update_delivery_and_history(
+                source=source,
+                external_id=external_id,
+                chat_id=configured_chat_id,
+                delivery_status=STATUS_SKIPPED,
+                history_status=STATUS_SKIPPED,
+                timestamp_field="skipped_at",
             )
+            if callback_id:
+                client.answer_callback_query(callback_id, text="Вакансия пропущена")
+        elif action == "applied":
+            storage.update_delivery_and_history(
+                source=source,
+                external_id=external_id,
+                chat_id=configured_chat_id,
+                delivery_status=STATUS_APPLIED,
+                history_status=STATUS_APPLIED,
+                timestamp_field="applied_at",
+            )
+            if callback_id:
+                client.answer_callback_query(callback_id, text="Отклик отмечен как отправленный")
+        else:
+            storage.update_delivery_and_history(
+                source=source,
+                external_id=external_id,
+                chat_id=configured_chat_id,
+                delivery_status=STATUS_PREPARE_REQUESTED,
+                history_status=STATUS_PREPARE_REQUESTED,
+                timestamp_field=None,
+            )
+            if callback_id:
+                client.answer_callback_query(
+                    callback_id,
+                    text="Добавлено в очередь на подготовку отклика",
+                )
+    except (ValueError, KeyError):
+        if callback_id:
+            client.answer_callback_query(callback_id, text="Не удалось обновить статус")
+        return
 
     message_id = int(message.get("message_id", 0))
     if message_id <= 0:
@@ -1273,6 +1355,54 @@ def _print_delivery_debug_table(rows: list[TelegramDeliveryRecord]) -> None:
             widths[idx] = max(widths[idx], len(value))
     header_line = "  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers))
     typer.echo(header_line)
+    typer.echo("  ".join("-" * width for width in widths))
+    for row in rendered_rows:
+        typer.echo("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
+
+
+def _sync_application_history(items: list[LinkedInProcessedVacancy]) -> None:
+    for item in items:
+        _upsert_history_item(item)
+
+
+def _upsert_history_item(item: LinkedInProcessedVacancy) -> None:
+    evaluation = item.evaluation
+    TelegramDeliveryStorage().upsert_application_history(
+        source="linkedin-email",
+        external_id=item.external_id,
+        title=item.title,
+        company=item.company,
+        location=item.location,
+        url=item.url,
+        decision=evaluation.decision.value if evaluation else None,
+        recommended_resume=evaluation.recommended_resume.value if evaluation else None,
+    )
+
+
+def _safe_percent(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return (numerator / denominator) * 100.0
+
+
+def _print_application_history_table(rows: list[ApplicationHistoryRecord]) -> None:
+    headers = ("date", "status", "title", "company", "source", "external_id")
+    rendered_rows = [
+        (
+            row.display_date,
+            row.current_status,
+            row.title or "n/a",
+            row.company or "n/a",
+            row.source,
+            row.external_id,
+        )
+        for row in rows
+    ]
+    widths = [len(header) for header in headers]
+    for row in rendered_rows:
+        for idx, value in enumerate(row):
+            widths[idx] = max(widths[idx], len(value))
+    typer.echo("  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers)))
     typer.echo("  ".join("-" * width for width in widths))
     for row in rendered_rows:
         typer.echo("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
@@ -1460,6 +1590,12 @@ def _prepare_requested_applications(
                     language=None,
                     error_message=str(exc),
                 )
+                storage.mark_history_status(
+                    source=source,
+                    external_id=external_id,
+                    status=STATUS_PREPARATION_FAILED,
+                    timestamp_field=None,
+                )
                 try:
                     telegram_client.send_text_message(  # type: ignore[union-attr]
                         f"❌ Не удалось подготовить отклик: {str(exc)}"
@@ -1507,6 +1643,12 @@ def _prepare_requested_applications(
                 language=prepared.language,
                 error_message=str(exc),
             )
+            storage.mark_history_status(
+                source=source,
+                external_id=external_id,
+                status=STATUS_PREPARATION_FAILED,
+                timestamp_field=None,
+            )
             continue
 
         prepared_successfully += 1
@@ -1524,6 +1666,12 @@ def _prepare_requested_applications(
             resume_name=prepared.recommended_resume,
             language=prepared.language,
             error_message=None,
+        )
+        storage.mark_history_status(
+            source=source,
+            external_id=external_id,
+            status=STATUS_PREPARED,
+            timestamp_field="prepared_at",
         )
         try:
             telegram_client.send_text_message("✅ Отклик подготовлен")  # type: ignore[union-attr]
@@ -1580,6 +1728,7 @@ def _send_processed_to_telegram(
 ) -> int:
     sent = 0
     for item in processed:
+        _upsert_history_item(item)
         if item.evaluation is None:
             continue
         decision = item.evaluation.decision.value
@@ -1609,6 +1758,12 @@ def _send_processed_to_telegram(
                 external_id=item.external_id,
                 chat_id=chat_id,
                 message_id=message_ref.message_id,
+            )
+            deliveries.mark_history_status(
+                source="linkedin-email",
+                external_id=item.external_id,
+                status="SENT",
+                timestamp_field="sent_at",
             )
             sent += 1
             if verbose:

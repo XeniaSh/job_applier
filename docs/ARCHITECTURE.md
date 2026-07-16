@@ -29,6 +29,7 @@ flowchart LR
 - `app/storage/seen_jobs.py`: deduplication state for collected vacancies.
 - `app/storage/telegram_delivery.py`: Telegram delivery lifecycle and queue state.
 - `telegram_resume_cache` table: resume metadata and Telegram reusable `file_id`.
+- `application_history` table: compact lifecycle timestamps and current status.
 - `app/telegram/client.py`: Telegram API integration and callback transport.
 - `app/application/preparation_service.py`: preparation package orchestration.
 - `app/application/resume_cache_service.py`: resume cache hit/miss detection and upload/reuse.
