@@ -271,7 +271,8 @@ def collect_linkedin_email(
         typer.secho("Ошибка подключения к почте LinkedIn alerts.", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
 
-    _sync_application_history(report.processed)
+    if not dry_run:
+        _sync_application_history(report.processed)
     _print_linkedin_results(report=report, include_ignore=include_ignore, dry_run=dry_run)
     _print_linkedin_summary(report)
 
@@ -283,6 +284,7 @@ def send_linkedin_telegram(
     include_potential: bool = typer.Option(True, "--include-potential/--no-include-potential"),
     dry_run: bool = typer.Option(False, "--dry-run"),
     verbose: bool = typer.Option(False, "--verbose"),
+    backfill: bool = typer.Option(False, "--backfill"),
 ) -> None:
     try:
         settings = Settings()
@@ -321,7 +323,7 @@ def send_linkedin_telegram(
         report = collector.collect_and_analyze(
             limit=limit,
             dry_run=dry_run,
-            skip_seen=False,
+            skip_seen=(not dry_run and not backfill),
             analyze_in_dry_run=dry_run,
             mark_seen=False,
         )
@@ -330,7 +332,8 @@ def send_linkedin_telegram(
         typer.secho("Ошибка подключения к почте LinkedIn alerts.", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
 
-    _sync_application_history(report.processed)
+    if not dry_run:
+        _sync_application_history(report.processed)
     for item in report.processed:
         if item.evaluation is None:
             if verbose and item.skipped_by_prefilter:
@@ -563,17 +566,22 @@ def run_pipeline(
                         mark_seen=True,
                         analyze_in_dry_run=False,
                     )
-                    if report.new_vacancies > 0:
-                        _run_log(f"LinkedIn: {report.new_vacancies} new vacancies")
-                    sent = _send_processed_to_telegram(
+                    _run_log(f"LinkedIn: extracted={report.vacancies_extracted} unique={report.unique_vacancies}")
+                    _run_log(
+                        "Analysis: "
+                        f"strong={report.strong_matches} "
+                        f"potential={report.potential_matches} "
+                        f"ignore={report.ignored} "
+                        f"title_filtered={report.prefiltered}"
+                    )
+                    sent, already_sent = _send_processed_to_telegram(
                         processed=report.processed,
                         deliveries=deliveries,
                         telegram_client=telegram_client,
                         chat_id=settings.telegram_chat_id,
                         verbose=verbose,
                     )
-                    if sent > 0:
-                        _run_log(f"Telegram: {sent} cards sent")
+                    _run_log(f"Telegram: sent={sent} already_sent={already_sent}")
                 except (EmailConnectionError, EmailAuthenticationError, LLMRequestError, LLMResponseError) as exc:
                     _run_log(f"Pipeline cycle failed: {exc}")
                 except Exception as exc:  # noqa: BLE001
@@ -1725,8 +1733,9 @@ def _send_processed_to_telegram(
     telegram_client: TelegramClient,
     chat_id: str,
     verbose: bool,
-) -> int:
+) -> tuple[int, int]:
     sent = 0
+    already_sent = 0
     for item in processed:
         _upsert_history_item(item)
         if item.evaluation is None:
@@ -1736,6 +1745,7 @@ def _send_processed_to_telegram(
             continue
         already_delivered = deliveries.was_sent("linkedin-email", item.external_id, chat_id)
         if already_delivered:
+            already_sent += 1
             continue
         card = TelegramVacancyCard(
             source=map_source_to_code("linkedin-email"),
@@ -1770,4 +1780,4 @@ def _send_processed_to_telegram(
                 _run_log(f"Telegram delivered {item.external_id}")
         except (TelegramRequestError, ValueError) as exc:
             logger.error("Telegram send failed for job %s: %s", item.external_id, exc)
-    return sent
+    return sent, already_sent

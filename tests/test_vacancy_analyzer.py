@@ -468,3 +468,215 @@ def test_repeated_evaluation_produces_identical_output() -> None:
     second = analyzer.analyze("Backend role", content_completeness="PARTIAL")
     assert first == second
     assert format_evaluation_ru(first) == format_evaluation_ru(second)
+
+
+def test_partial_generic_backend_developer_becomes_potential_not_ignore() -> None:
+    class GenericBackendClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=[],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority="Senior",
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Senior Backend Developer",
+                short_summary="Кратко",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=GenericBackendClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot"],
+            practical_skills=["kafka"],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9, "kafka": 7},
+        ),
+        prompt_loader=lambda: "PROMPT_CONTENT",
+    )
+    result = analyzer.analyze("Title: Senior Backend Developer", content_completeness="PARTIAL")
+    assert result.decision == Decision.POTENTIAL_MATCH
+    assert result.match_percentage is None
+    assert result.gaps == []
+    assert result.recommended_resume == RecommendedResume.JAVA_BACKEND
+    assert any("нет полного описания и стека" in nuance for nuance in result.nuances)
+
+
+def test_partial_generic_backend_platform_becomes_potential() -> None:
+    class GenericPlatformClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=[],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority="Senior",
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Senior Backend Engineer - Platform",
+                short_summary="Кратко",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=GenericPlatformClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java"],
+            practical_skills=[],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10},
+        ),
+        prompt_loader=lambda: "PROMPT_CONTENT",
+    )
+    result = analyzer.analyze("Title: Senior Backend Engineer - Platform", content_completeness="PARTIAL")
+    assert result.decision == Decision.POTENTIAL_MATCH
+    assert result.match_percentage is None
+    assert result.gaps == []
+
+
+def test_partial_jvm_explicit_title_uses_existing_jvm_handling() -> None:
+    class JavaExplicitClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["java", "spring boot", "kafka", "postgresql"],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority="Senior",
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Senior Java Engineer",
+                short_summary="Кратко",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=JavaExplicitClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot", "kafka", "postgresql"],
+            practical_skills=[],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9, "kafka": 7, "postgresql": 6},
+        ),
+        prompt_loader=lambda: "PROMPT_CONTENT",
+    )
+    result = analyzer.analyze("Title: Senior Java Engineer", content_completeness="PARTIAL")
+    assert result.decision in {Decision.STRONG_MATCH, Decision.POTENTIAL_MATCH}
+    assert "нет полного описания и стека" not in " ".join(result.nuances)
+
+
+def test_full_vacancy_without_java_kotlin_still_respects_core_guardrail() -> None:
+    class NonJvmFullClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["python", "django"],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority=None,
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Backend Engineer",
+                short_summary="Кратко",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=NonJvmFullClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot"],
+            practical_skills=[],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9},
+        ),
+        prompt_loader=lambda: "PROMPT_CONTENT",
+    )
+    result = analyzer.analyze("Title: Backend Engineer", content_completeness="FULL")
+    assert result.decision == Decision.IGNORE
+
+
+def test_partial_python_backend_and_frontend_remain_ignore() -> None:
+    class PythonBackendClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            role = "Python Backend Developer" if "Python" in vacancy else "Frontend Engineer"
+            return VacancyExtraction(
+                mandatory_skills=[],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority=None,
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type=role,
+                short_summary="Кратко",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=PythonBackendClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot"],
+            practical_skills=[],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9},
+        ),
+        prompt_loader=lambda: "PROMPT_CONTENT",
+    )
+    python_result = analyzer.analyze("Title: Python Backend Developer", content_completeness="PARTIAL")
+    frontend_result = analyzer.analyze("Title: Frontend Engineer", content_completeness="PARTIAL")
+    assert python_result.decision == Decision.IGNORE
+    assert frontend_result.decision == Decision.IGNORE
+
+
+def test_alert_context_is_weak_evidence_and_not_strong() -> None:
+    class WeakContextClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=[],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority=None,
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Software Engineer - Platform",
+                short_summary="Кратко",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=WeakContextClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot"],
+            practical_skills=[],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9},
+        ),
+        prompt_loader=lambda: "PROMPT_CONTENT",
+    )
+    result = analyzer.analyze(
+        "Title: Software Engineer - Platform\nAlert context: Kotlin Backend",
+        content_completeness="PARTIAL",
+    )
+    assert result.decision == Decision.POTENTIAL_MATCH
+    assert result.match_percentage is None

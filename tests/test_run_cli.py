@@ -95,6 +95,9 @@ def test_run_scheduler_interval_and_graceful_shutdown(monkeypatch, tmp_path: Pat
     assert collector.calls == 2
     assert "Job Applier started." in result.output
     assert "Press Ctrl+C to stop." in result.output
+    assert "LinkedIn: extracted=0 unique=0" in result.output
+    assert "Analysis: strong=0 potential=0 ignore=0 title_filtered=0" in result.output
+    assert "Telegram: sent=0 already_sent=0" in result.output
     assert "Job Applier stopped." in result.output
     assert (tmp_path / "data" / "job_applier.lock").exists() is False
 
@@ -135,7 +138,7 @@ def test_run_collector_and_telegram_failures_recover(monkeypatch, tmp_path: Path
         send_calls["count"] += 1
         if send_calls["count"] == 1:
             raise RuntimeError("telegram send failed")
-        return 1
+        return (1, 0)
 
     monkeypatch.setattr(cli_module, "_send_processed_to_telegram", fake_send)
 
@@ -168,7 +171,7 @@ def test_run_prepare_request_triggers_application_generation(monkeypatch, tmp_pa
     monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: object())
     monkeypatch.setattr(cli_module, "PreparationService", lambda **kwargs: object())
     monkeypatch.setattr(cli_module, "LinkedInEmailCollector", lambda **kwargs: type("C", (), {"collect_and_analyze": lambda self, **k: LinkedInEmailCollectReport()})())
-    monkeypatch.setattr(cli_module, "_send_processed_to_telegram", lambda **kwargs: 0)
+    monkeypatch.setattr(cli_module, "_send_processed_to_telegram", lambda **kwargs: (0, 0))
 
     prepare_calls = {"count": 0}
 

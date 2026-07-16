@@ -146,6 +146,7 @@ def parse_linkedin_email(raw_message: RawEmailMessage) -> list[LinkedInEmailVaca
                     email_message_id=raw_message.message_id,
                     received_at=raw_message.received_at,
                     content_completeness=completeness,
+                    alert_context=raw_message.subject or None,
                     parser_source=ParserSource.STRUCTURED_CARD,
                 )
             )
@@ -174,6 +175,7 @@ def parse_linkedin_email(raw_message: RawEmailMessage) -> list[LinkedInEmailVaca
                 location=None,
                 snippet=snippet,
             ),
+            alert_context=raw_message.subject or None,
             parser_source=ParserSource.FALLBACK_URL,
         )
         by_id[external_id] = vacancy

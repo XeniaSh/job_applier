@@ -376,6 +376,145 @@ def test_send_real_allows_seen_jobs_but_skips_already_delivered(monkeypatch) -> 
     assert "Уже отправлялись: 1" in result.output
 
 
+def test_send_with_backfill_includes_seen_jobs_for_analysis(monkeypatch) -> None:
+    _set_base_env(monkeypatch, with_telegram=True)
+    seen_flag = {"skip_seen": None}
+
+    class FakeCollector:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
+        def collect_and_analyze(self, **kwargs):
+            seen_flag["skip_seen"] = kwargs["skip_seen"]
+            report = LinkedInEmailCollectReport(emails_found=1, analyzed=1, unique_vacancies=1)
+            report.processed = [
+                LinkedInProcessedVacancy(
+                    external_id="55",
+                    title="Backend Developer",
+                    company="ACME",
+                    location="Remote",
+                    url="https://www.linkedin.com/jobs/view/55/",
+                    content_completeness="PARTIAL",
+                    evaluation=_evaluation(Decision.POTENTIAL_MATCH),
+                )
+            ]
+            return report
+
+    class FakeSeen:
+        def is_seen(self, source, external_id):
+            _ = source, external_id
+            return True
+
+    class FakeDeliveryStorage:
+        def __init__(self):
+            self.saved: list[str] = []
+
+        def was_sent(self, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return False
+
+        def save_sent(self, **kwargs):
+            self.saved.append(kwargs["external_id"])
+
+        def upsert_application_history(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    @dataclass
+    class _Ref:
+        chat_id: str
+        message_id: int
+
+    class FakeTelegramClient:
+        def __init__(self, bot_token, chat_id):
+            _ = bot_token, chat_id
+
+        def send_vacancy_card(self, card):
+            _ = card
+            return _Ref(chat_id="123", message_id=155)
+
+    monkeypatch.setattr(cli_module, "build_analyzer", lambda settings: object())
+    monkeypatch.setattr(cli_module, "EmailIMAPClient", lambda **kwargs: object())
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: FakeSeen())
+    monkeypatch.setattr(cli_module, "LinkedInEmailCollector", FakeCollector)
+    storage = FakeDeliveryStorage()
+    monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: storage)
+    monkeypatch.setattr(cli_module, "TelegramClient", FakeTelegramClient)
+
+    result = CliRunner().invoke(cli_module.app, ["send-linkedin-telegram", "--limit", "5", "--backfill"])
+    assert result.exit_code == 0
+    assert seen_flag["skip_seen"] is False
+    assert storage.saved == ["55"]
+
+
+def test_send_with_backfill_still_skips_already_delivered_records(monkeypatch) -> None:
+    _set_base_env(monkeypatch, with_telegram=True)
+
+    class FakeCollector:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
+        def collect_and_analyze(self, **kwargs):
+            _ = kwargs
+            report = LinkedInEmailCollectReport(emails_found=1, analyzed=1, unique_vacancies=1)
+            report.processed = [
+                LinkedInProcessedVacancy(
+                    external_id="56",
+                    title="Backend Developer",
+                    company="ACME",
+                    location="Remote",
+                    url="https://www.linkedin.com/jobs/view/56/",
+                    content_completeness="PARTIAL",
+                    evaluation=_evaluation(Decision.POTENTIAL_MATCH),
+                )
+            ]
+            return report
+
+    class FakeSeen:
+        def is_seen(self, source, external_id):
+            _ = source, external_id
+            return True
+
+    class FakeDeliveryStorage:
+        def __init__(self):
+            self.saved = 0
+
+        def was_sent(self, source, external_id, chat_id):
+            _ = source, chat_id
+            return external_id == "56"
+
+        def save_sent(self, **kwargs):
+            _ = kwargs
+            self.saved += 1
+
+        def upsert_application_history(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    class FakeTelegramClient:
+        def __init__(self, bot_token, chat_id):
+            _ = bot_token, chat_id
+
+        def send_vacancy_card(self, card):
+            raise AssertionError("Should not send already delivered cards")
+
+    monkeypatch.setattr(cli_module, "build_analyzer", lambda settings: object())
+    monkeypatch.setattr(cli_module, "EmailIMAPClient", lambda **kwargs: object())
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: FakeSeen())
+    monkeypatch.setattr(cli_module, "LinkedInEmailCollector", FakeCollector)
+    storage = FakeDeliveryStorage()
+    monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: storage)
+    monkeypatch.setattr(cli_module, "TelegramClient", FakeTelegramClient)
+
+    result = CliRunner().invoke(cli_module.app, ["send-linkedin-telegram", "--limit", "5", "--backfill"])
+    assert result.exit_code == 0
+    assert storage.saved == 0
+
+
 def test_verbose_outcome_and_prepared_cards_counter(monkeypatch) -> None:
     _set_base_env(monkeypatch, with_telegram=False)
 

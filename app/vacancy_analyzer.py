@@ -46,8 +46,13 @@ class VacancyAnalyzer:
         total_possible_score = comparison.total_possible_score
         explicit_skill_count = _count_explicit_skills(extraction)
         evidence_sufficient = True
+        recommended_resume = _recommend_resume(extraction.role_type)
 
         completeness = content_completeness.upper().strip()
+        title_text = _extract_title_from_vacancy_text(vacancy) or extraction.role_type
+        alert_context = _extract_alert_context(vacancy)
+        incomplete_title_class = _classify_incomplete_title(title=title_text, alert_context=alert_context)
+        has_explicit_jvm_evidence = _has_explicit_jvm_evidence(extraction)
         location_nuance, location_cap = _build_location_nuance(
             location_values=comparison.location_restrictions,
             uncertainty_values=comparison.uncertainties,
@@ -60,9 +65,21 @@ class VacancyAnalyzer:
         is_incomplete = completeness in {"PARTIAL", "MINIMAL"}
 
         if is_incomplete:
+            incomplete_description_nuance = "Описание вакансии неполное — требуется открыть LinkedIn"
+            stack_missing_nuance = "В email-карточке не указан стек — требуется открыть полное описание"
+            combined_incomplete_nuance = "В email-карточке нет полного описания и стека — требуется открыть LinkedIn"
+            generic_missing_stack = (
+                incomplete_title_class == "generic_backend"
+                and not has_explicit_jvm_evidence
+            )
+            if generic_missing_stack:
+                incomplete_nuance = combined_incomplete_nuance
+            else:
+                incomplete_nuance = incomplete_description_nuance
             nuances = _clean_and_limit(
                 [
-                    "Описание вакансии неполное — требуется открыть LinkedIn",
+                    incomplete_nuance,
+                    *([stack_missing_nuance] if generic_missing_stack else []),
                     *( [location_nuance] if location_nuance else []),
                     *( [lead_nuance] if lead_nuance else []),
                 ],
@@ -84,6 +101,16 @@ class VacancyAnalyzer:
                     extraction=extraction,
                 ):
                     decision = Decision.POTENTIAL_MATCH
+            if (
+                generic_missing_stack
+                and incomplete_title_class != "hard_negative"
+            ):
+                decision = Decision.POTENTIAL_MATCH
+                match_percentage = None
+                gaps = []
+                recommended_resume = RecommendedResume.JAVA_BACKEND
+            if incomplete_title_class == "hard_negative":
+                decision = Decision.IGNORE
             if lead_nuance and not _candidate_targets_lead_roles(skills):
                 decision = _cap_decision(decision, Decision.POTENTIAL_MATCH)
         else:
@@ -108,7 +135,7 @@ class VacancyAnalyzer:
             total_possible_score=total_possible_score,
             explicit_skill_count=explicit_skill_count,
             evidence_sufficient=evidence_sufficient,
-            recommended_resume=_recommend_resume(extraction.role_type),
+            recommended_resume=recommended_resume,
             recommended_cover_template=_recommend_cover_template(extraction.role_type, extraction.short_summary),
         )
 
@@ -312,3 +339,76 @@ def _cap_decision(current: Decision, cap: Decision) -> Decision:
         Decision.STRONG_MATCH: 2,
     }
     return cap if order[current] > order[cap] else current
+
+
+def _extract_title_from_vacancy_text(vacancy_text: str) -> str | None:
+    for line in vacancy_text.splitlines():
+        if line.lower().startswith("title:"):
+            value = " ".join(line.split(":", 1)[1].strip().split())
+            return value or None
+    return None
+
+
+def _extract_alert_context(vacancy_text: str) -> str | None:
+    for line in vacancy_text.splitlines():
+        if line.lower().startswith("alert context:"):
+            value = " ".join(line.split(":", 1)[1].strip().split())
+            return value or None
+    return None
+
+
+def _has_explicit_jvm_evidence(extraction: VacancyExtraction) -> bool:
+    all_skills = [*extraction.mandatory_skills, *extraction.optional_skills]
+    text = " ".join(all_skills).lower()
+    return any(token in text for token in ("java", "kotlin", "jvm", "spring"))
+
+
+def _classify_incomplete_title(*, title: str, alert_context: str | None) -> str:
+    text = title.lower()
+    hard_negative_markers = (
+        "frontend",
+        "front-end",
+        "react",
+        "angular",
+        "qa",
+        "tester",
+        "support",
+        "analyst",
+        "devops",
+        "python",
+        "php",
+        ".net",
+        "dotnet",
+        "mobile",
+        "ios",
+        "android",
+        "data science",
+        "data scientist",
+        "ml",
+        "machine learning",
+    )
+    jvm_explicit_markers = ("java", "kotlin", "jvm", "spring")
+    if any(marker in text for marker in hard_negative_markers):
+        if any(marker in text for marker in ("backend", "back-end", "back end")) and any(
+            marker in text for marker in jvm_explicit_markers
+        ):
+            return "jvm_explicit_backend"
+        return "hard_negative"
+
+    has_backend_marker = any(marker in text for marker in ("backend", "back-end", "back end"))
+    has_generic_backend_context = (
+        ("software engineer" in text or "software developer" in text)
+        and any(marker in text for marker in ("platform", "server-side", "distributed", "microservices", "infrastructure"))
+    )
+    if any(marker in text for marker in jvm_explicit_markers) and (has_backend_marker or "engineer" in text or "developer" in text):
+        return "jvm_explicit_backend"
+    if has_backend_marker or has_generic_backend_context:
+        return "generic_backend"
+
+    if alert_context:
+        weak_context = alert_context.lower()
+        if any(marker in weak_context for marker in jvm_explicit_markers) and any(
+            marker in text for marker in ("engineer", "developer", "platform")
+        ):
+            return "generic_backend"
+    return "other"
