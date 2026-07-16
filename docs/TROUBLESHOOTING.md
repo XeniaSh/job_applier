@@ -99,6 +99,29 @@ uv run python -m app telegram-debug
 uv run python -m app telegram-debug --status PREPARE_REQUESTED
 ```
 
+## Resume PDF Was Updated but Old Version Is Sent
+
+- Cache invalidates automatically by path/size/mtime.
+- If needed, force refresh:
+
+```bash
+uv run python -m app telegram-cache-resumes --force
+```
+
+- Or clear one cache record:
+
+```bash
+uv run python -m app telegram-clear-resume-cache java-backend --yes
+```
+
+## Resume Cache Diagnostics
+
+Inspect cache metadata safely (without full `file_id` output):
+
+```bash
+uv run python -m app telegram-resume-cache
+```
+
 ## Service Reports Already Running
 
 - Another instance is active, or stale lock file exists:

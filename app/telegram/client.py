@@ -4,7 +4,7 @@ import httpx
 from pathlib import Path
 
 from app.telegram.formatter import format_prepared_application_html, format_telegram_card_html
-from app.telegram.models import TelegramInlineButton, TelegramMessageRef, TelegramVacancyCard
+from app.telegram.models import TelegramDocumentRef, TelegramInlineButton, TelegramMessageRef, TelegramVacancyCard
 
 
 class TelegramRequestError(Exception):
@@ -114,7 +114,7 @@ class TelegramClient:
             message_id=int(result.get("message_id", 0)),
         )
 
-    def send_document(self, *, file_path: str, caption: str) -> TelegramMessageRef:
+    def send_document(self, *, file_path: str, caption: str) -> TelegramDocumentRef:
         timeout = httpx.Timeout(connect=5.0, read=15.0, write=20.0, pool=5.0)
         url = f"{self._base_url}/sendDocument"
         try:
@@ -140,11 +140,20 @@ class TelegramClient:
             raise TelegramRequestError("Telegram sendDocument invalid JSON response.") from exc
         if not data.get("ok", False):
             raise TelegramRequestError(f"Telegram sendDocument API error (HTTP {response.status_code}).")
-        result = data.get("result", {})
-        return TelegramMessageRef(
-            chat_id=str(result.get("chat", {}).get("id", self._chat_id)),
-            message_id=int(result.get("message_id", 0)),
-        )
+        return self._extract_document_ref(data=data)
+
+    def send_document_by_file_id(
+        self,
+        *,
+        chat_id: str,
+        file_id: str,
+        caption: str | None = None,
+    ) -> TelegramDocumentRef:
+        payload: dict[str, str] = {"chat_id": str(chat_id), "document": file_id}
+        if caption:
+            payload["caption"] = caption
+        data = self._post_json("sendDocument", payload=payload, read_timeout=15.0)
+        return self._extract_document_ref(data=data)
 
     def _post_json(self, endpoint: str, payload: dict, read_timeout: float) -> dict:
         timeout = httpx.Timeout(connect=5.0, read=read_timeout, write=10.0, pool=5.0)
@@ -166,6 +175,20 @@ class TelegramClient:
         if not data.get("ok", False):
             raise TelegramRequestError(f"Telegram {endpoint} API error (HTTP {response.status_code}).")
         return data
+
+    def _extract_document_ref(self, *, data: dict) -> TelegramDocumentRef:
+        result = data.get("result", {})
+        document = result.get("document", {}) if isinstance(result, dict) else {}
+        file_id = document.get("file_id") if isinstance(document, dict) else None
+        file_unique_id = document.get("file_unique_id") if isinstance(document, dict) else None
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise TelegramRequestError("Telegram sendDocument response missing file_id.")
+        return TelegramDocumentRef(
+            chat_id=str(result.get("chat", {}).get("id", self._chat_id)),
+            message_id=int(result.get("message_id", 0)),
+            file_id=file_id,
+            file_unique_id=str(file_unique_id) if isinstance(file_unique_id, str) else None,
+        )
 
 
 def build_action_buttons(source: str, external_id: str, url: str) -> list[list[TelegramInlineButton]]:

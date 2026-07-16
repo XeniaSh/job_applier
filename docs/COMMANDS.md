@@ -19,6 +19,9 @@ uv run python -m app <command> [options]
 | `telegram-chat-id` | Discover private Telegram chat IDs | `uv run python -m app telegram-chat-id` | No | No | Reads Telegram | Always read-only |
 | `poll-telegram-actions` | Process callback actions from Telegram | `uv run python -m app poll-telegram-actions --once` | No | Yes | Yes (callback answers/markup edits) | N/A |
 | `prepare-telegram-applications` | Build and send application packages from queue | `uv run python -m app prepare-telegram-applications --limit 5` | Yes | Yes | Yes | Yes (`--dry-run`) |
+| `telegram-cache-resumes` | Warm-up/refresh Telegram resume cache by `file_id` | `uv run python -m app telegram-cache-resumes --force` | No | Yes | Yes | No |
+| `telegram-resume-cache` | Inspect resume cache metadata | `uv run python -m app telegram-resume-cache` | No | No | No | Always read-only |
+| `telegram-clear-resume-cache` | Delete resume cache metadata | `uv run python -m app telegram-clear-resume-cache java-backend --yes` | No | Yes | No | No |
 | `telegram-debug` | List delivery rows for troubleshooting | `uv run python -m app telegram-debug --status PREPARE_REQUESTED` | No | No | No | Always read-only |
 | `telegram-reset` | Reset delivery status for one row | `uv run python -m app telegram-reset 4439900667 --status PREPARE_REQUESTED` | No | Yes | No | No |
 | `telegram-delete-delivery` | Delete one delivery row (with confirmation) | `uv run python -m app telegram-delete-delivery 4439900667 --yes` | No | Yes | No | No |
@@ -45,3 +48,10 @@ Alternative states:
 - `SKIPPED`: user pressed skip callback action.
 - `FAILED`: delivery/send failure.
 - `PREPARATION_FAILED`: preparation pipeline failed for queued item.
+
+## Resume Cache Notes
+
+- Telegram `file_id` is reusable by the same bot.
+- First send uploads local PDF and stores `file_id` metadata.
+- Later sends reuse cached `file_id`.
+- Local PDF changes (mtime/size/path) invalidate cache automatically.

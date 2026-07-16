@@ -74,7 +74,7 @@ def test_run_scheduler_interval_and_graceful_shutdown(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(
         cli_module,
         "_prepare_requested_applications",
-        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0),
+            lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0, 0),
     )
 
     monkeypatch.setattr(cli_module.time, "monotonic", _monotonic_stub([0.0, 1.0, 12.0, 13.0]))
@@ -109,7 +109,7 @@ def test_run_collector_and_telegram_failures_recover(monkeypatch, tmp_path: Path
     monkeypatch.setattr(
         cli_module,
         "_prepare_requested_applications",
-        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0),
+        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0, 0),
     )
 
     class FakeCollector:
@@ -175,7 +175,7 @@ def test_run_prepare_request_triggers_application_generation(monkeypatch, tmp_pa
     def fake_prepare(**kwargs):
         _ = kwargs
         prepare_calls["count"] += 1
-        return cli_module.PreparationRunResult(1, 1, 1, 1, 0, 1, 0)
+        return cli_module.PreparationRunResult(1, 1, 1, 1, 0, 0, 1, 0, 0)
 
     monkeypatch.setattr(cli_module, "_prepare_requested_applications", fake_prepare)
     monkeypatch.setattr(cli_module.time, "monotonic", lambda: 0.0)
@@ -219,7 +219,7 @@ def test_run_no_duplicate_processing_between_cycles(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(
         cli_module,
         "_prepare_requested_applications",
-        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0),
+        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0, 0),
     )
 
     vacancy = LinkedInProcessedVacancy(

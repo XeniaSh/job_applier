@@ -33,6 +33,14 @@ class TelegramMessageRef:
 
 
 @dataclass(frozen=True)
+class TelegramDocumentRef:
+    chat_id: str
+    message_id: int
+    file_id: str
+    file_unique_id: str | None
+
+
+@dataclass(frozen=True)
 class TelegramDeliveryRecord:
     source: str
     external_id: str
@@ -40,3 +48,14 @@ class TelegramDeliveryRecord:
     message_id: int
     sent_at: str
     status: str
+
+
+@dataclass(frozen=True)
+class TelegramResumeCacheRecord:
+    resume_name: str
+    file_path: str
+    file_mtime_ns: int
+    file_size: int
+    telegram_file_id: str
+    telegram_file_unique_id: str | None
+    cached_at: str

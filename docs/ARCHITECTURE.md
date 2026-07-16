@@ -15,7 +15,8 @@ flowchart LR
     G --> H[SQLite State]
     G --> I[Telegram]
     I --> J[Application Preparation]
-    J --> I
+    J --> K[Resume Cache file_id]
+    K --> I
     J --> H
 ```
 
@@ -27,8 +28,10 @@ flowchart LR
 - `app/llm_client.py`: LLM API client for structured extraction and cover letters.
 - `app/storage/seen_jobs.py`: deduplication state for collected vacancies.
 - `app/storage/telegram_delivery.py`: Telegram delivery lifecycle and queue state.
+- `telegram_resume_cache` table: resume metadata and Telegram reusable `file_id`.
 - `app/telegram/client.py`: Telegram API integration and callback transport.
 - `app/application/preparation_service.py`: preparation package orchestration.
+- `app/application/resume_cache_service.py`: resume cache hit/miss detection and upload/reuse.
 - `app/cli.py`: command layer and background `run` loop orchestration.
 
 ## Decision Model
@@ -50,6 +53,7 @@ SQLite stores operational metadata:
 - Telegram delivery statuses
 - preparation metadata
 - Telegram update offset
+- resume cache metadata (`file_id`, size, mtime)
 
 SQLite does not store full email bodies or cover letter text as a durable history table.
 

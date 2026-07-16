@@ -695,19 +695,19 @@ def test_telegram_debug_lists_records_newest_first_and_filters(monkeypatch, tmp_
 
     status_result = runner.invoke(cli_module.app, ["telegram-debug", "--status", "PREPARE_REQUESTED"])
     assert status_result.exit_code == 0
-    assert "301" not in status_result.output
-    assert "300" in status_result.output
-    assert "302" in status_result.output
+    assert "\n301          " not in status_result.output
+    assert "\n300          " in status_result.output
+    assert "\n302          " in status_result.output
 
     source_result = runner.invoke(cli_module.app, ["telegram-debug", "--source", "other-source"])
     assert source_result.exit_code == 0
-    assert "302" in source_result.output
-    assert "301" not in source_result.output
+    assert "\n302          " in source_result.output
+    assert "\n301          " not in source_result.output
 
     limit_result = runner.invoke(cli_module.app, ["telegram-debug", "--limit", "1"])
     assert limit_result.exit_code == 0
-    assert "302" in limit_result.output
-    assert "301" not in limit_result.output
+    assert "\n302          " in limit_result.output
+    assert "\n301          " not in limit_result.output
 
 
 def test_telegram_debug_empty_and_status_validation(monkeypatch, tmp_path) -> None:
@@ -755,3 +755,95 @@ def test_telegram_reset_rejects_unknown_status_and_missing_record(monkeypatch, t
     missing = runner.invoke(cli_module.app, ["telegram-reset", "4439900667"])
     assert missing.exit_code != 0
     assert "Delivery record not found" in missing.output
+
+
+def test_telegram_resume_cache_hides_full_file_id(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "jobs.db"
+    storage = TelegramDeliveryStorage(db_path=db_path)
+    storage.save_resume_cache(
+        resume_name="java-backend",
+        file_path=str(tmp_path / "resumes" / "java-backend.pdf"),
+        file_mtime_ns=10,
+        file_size=20,
+        telegram_file_id="FILE_ID_1234567890_LONG",
+        telegram_file_unique_id="UNIQ",
+    )
+    monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: TelegramDeliveryStorage(db_path=db_path))
+    result = CliRunner().invoke(cli_module.app, ["telegram-resume-cache"])
+    assert result.exit_code == 0
+    assert "FILE_ID_1234..." in result.output
+    assert "FILE_ID_1234567890_LONG" not in result.output
+
+
+def test_telegram_clear_resume_cache_removes_metadata_only(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "jobs.db"
+    resumes_dir = tmp_path / "resumes"
+    resumes_dir.mkdir(parents=True, exist_ok=True)
+    pdf = resumes_dir / "java-backend.pdf"
+    pdf.write_bytes(b"%PDF")
+    storage = TelegramDeliveryStorage(db_path=db_path)
+    storage.save_resume_cache(
+        resume_name="java-backend",
+        file_path=str(pdf),
+        file_mtime_ns=10,
+        file_size=20,
+        telegram_file_id="FILE_ID_1234567890_LONG",
+        telegram_file_unique_id="UNIQ",
+    )
+    monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: TelegramDeliveryStorage(db_path=db_path))
+    result = CliRunner().invoke(
+        cli_module.app,
+        ["telegram-clear-resume-cache", "java-backend", "--yes"],
+    )
+    assert result.exit_code == 0
+    assert "Deleted resume cache: java-backend" in result.output
+    assert pdf.exists() is True
+    assert TelegramDeliveryStorage(db_path=db_path).get_resume_cache("java-backend") is None
+
+
+def test_telegram_cache_resumes_warmup_and_force(monkeypatch, tmp_path) -> None:
+    _set_base_env(monkeypatch, with_telegram=True)
+    monkeypatch.setenv("RESUMES_DIR", str(tmp_path / "resumes"))
+    resumes_dir = tmp_path / "resumes"
+    resumes_dir.mkdir(parents=True, exist_ok=True)
+    (resumes_dir / "java-backend.pdf").write_bytes(b"%PDF one")
+    (resumes_dir / "kotlin-backend.pdf").write_bytes(b"%PDF two")
+    db_path = tmp_path / "jobs.db"
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+            self.calls = 0
+
+        def send_document(self, *, file_path, caption):
+            _ = file_path, caption
+            self.calls += 1
+            return type(
+                "DocRef",
+                (),
+                {
+                    "chat_id": "123",
+                    "message_id": 100 + self.calls,
+                    "file_id": f"FILE_ID_{self.calls}",
+                    "file_unique_id": f"UNIQ_{self.calls}",
+                },
+            )()
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: fake_client)
+    monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: TelegramDeliveryStorage(db_path=db_path))
+
+    first = CliRunner().invoke(cli_module.app, ["telegram-cache-resumes"])
+    assert first.exit_code == 0
+    assert "java-backend: uploaded" in first.output
+    assert "kotlin-backend: uploaded" in first.output
+    assert "fintech-backend: missing" in first.output
+
+    second = CliRunner().invoke(cli_module.app, ["telegram-cache-resumes"])
+    assert second.exit_code == 0
+    assert "java-backend: cached" in second.output
+    assert "kotlin-backend: cached" in second.output
+
+    forced = CliRunner().invoke(cli_module.app, ["telegram-cache-resumes", "--resume", "java-backend", "--force"])
+    assert forced.exit_code == 0
+    assert "java-backend: uploaded" in forced.output

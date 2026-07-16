@@ -12,6 +12,7 @@
 ## Local Data
 
 - `data/jobs.db` stores operational metadata (job IDs, statuses, Telegram message references).
+- Resume cache stores Telegram `file_id` metadata only (no PDF bytes).
 - Full email bodies and full cover letters are not stored in SQLite as durable records.
 - Debug HTML snapshots (when generated) may contain personal/job data.
 
@@ -25,6 +26,7 @@
 
 - Callback actions are accepted only from configured `TELEGRAM_CHAT_ID`.
 - Keep bot token private and rotate if exposed.
+- Do not print full Telegram `file_id` values in diagnostics/logs.
 
 ## LLM Data Exposure
 

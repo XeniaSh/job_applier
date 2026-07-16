@@ -25,6 +25,7 @@ from app.application.preparation_service import (
     PreparedApplication,
     PreparationService,
 )
+from app.application.resume_cache_service import KNOWN_RESUME_NAMES, ResumeCacheService
 from app.config import Settings
 from app.formatter import format_evaluation_ru
 from app.llm_client import CoverLetterValidationError, LLMClient, LLMRequestError, LLMResponseError
@@ -47,7 +48,7 @@ from app.telegram.client import (
     parse_callback_data,
     validate_linkedin_job_url,
 )
-from app.telegram.models import TelegramDeliveryRecord, TelegramInlineButton, TelegramVacancyCard
+from app.telegram.models import TelegramDeliveryRecord, TelegramInlineButton, TelegramResumeCacheRecord, TelegramVacancyCard
 from app.vacancy_analyzer import VacancyAnalyzer
 
 app = typer.Typer(help="Personal job vacancy analyzer.")
@@ -474,8 +475,10 @@ def prepare_telegram_applications(
     typer.echo(f"Подготовлено успешно: {result.prepared_successfully}")
     typer.echo(f"Отправлено в Telegram: {result.telegram_sent}")
     typer.echo(f"Ошибок: {result.errors_count}")
-    typer.echo(f"PDF найдено: {result.pdf_found}")
+    typer.echo(f"PDF отправлено из кэша: {result.pdf_cached}")
+    typer.echo(f"PDF загружено заново: {result.pdf_uploaded}")
     typer.echo(f"PDF отсутствует: {result.pdf_missing}")
+    typer.echo(f"Ошибок PDF: {result.pdf_errors}")
 
 
 @app.command("run")
@@ -590,8 +593,10 @@ def run_pipeline(
                 )
                 if result.generated_packages > 0:
                     _run_log("Application generated")
-                if result.pdf_found > 0:
+                if result.pdf_cached > 0 or result.pdf_uploaded > 0:
                     _run_log("Resume sent")
+                if result.pdf_errors > 0:
+                    _run_log(f"PDF warnings: {result.pdf_errors}")
                 if result.errors_count > 0:
                     _run_log(f"Preparation errors: {result.errors_count}")
     except KeyboardInterrupt:
@@ -759,6 +764,112 @@ def telegram_delete_delivery(
         )
         raise typer.Exit(code=1)
     typer.echo(f"Deleted delivery {normalized_source}:{normalized_external_id}")
+
+
+@app.command("telegram-cache-resumes")
+def telegram_cache_resumes(
+    resume: list[str] | None = typer.Option(None, "--resume"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(f"Ошибка конфигурации: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+    _require_telegram_settings(settings)
+
+    storage = TelegramDeliveryStorage()
+    client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    cache_service = ResumeCacheService(
+        resumes_dir=settings.resumes_dir,
+        storage=storage,
+        telegram_client=client,
+    )
+
+    selected = list(resume) if resume else list(KNOWN_RESUME_NAMES)
+    normalized_selected: list[str] = []
+    for item in selected:
+        normalized_selected.append(_normalize_resume_name_or_exit(item))
+
+    cached = 0
+    uploaded = 0
+    missing = 0
+    errors = 0
+    for resume_name in normalized_selected:
+        try:
+            result = cache_service.get_or_upload(
+                resume_name=resume_name,
+                chat_id=settings.telegram_chat_id,
+                force_upload=force,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors += 1
+            typer.echo(f"{resume_name}: error ({exc})")
+            continue
+
+        if result.missing:
+            missing += 1
+            typer.echo(f"{resume_name}: missing")
+        elif result.cache_hit:
+            cached += 1
+            typer.echo(f"{resume_name}: cached")
+        elif result.uploaded:
+            uploaded += 1
+            typer.echo(f"{resume_name}: uploaded")
+        else:
+            errors += 1
+            typer.echo(f"{resume_name}: error (unknown state)")
+
+    typer.echo(f"Cached: {cached}")
+    typer.echo(f"Uploaded: {uploaded}")
+    typer.echo(f"Missing: {missing}")
+    typer.echo(f"Errors: {errors}")
+
+
+@app.command("telegram-resume-cache")
+def telegram_resume_cache() -> None:
+    rows = TelegramDeliveryStorage().list_resume_cache()
+    if not rows:
+        typer.echo("Telegram resume cache is empty.")
+        return
+    _print_resume_cache_table(rows)
+
+
+@app.command("telegram-clear-resume-cache")
+def telegram_clear_resume_cache(
+    resume_name: str | None = typer.Argument(None),
+    all: bool = typer.Option(False, "--all"),
+    yes: bool = typer.Option(False, "--yes"),
+) -> None:
+    if not all and not resume_name:
+        typer.secho("Provide RESUME_NAME or --all.", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    storage = TelegramDeliveryStorage()
+    if all:
+        targets = [row.resume_name for row in storage.list_resume_cache()]
+        if not yes:
+            confirmed = typer.confirm(f"Clear all resume cache records ({len(targets)})?", default=False)
+            if not confirmed:
+                typer.echo("Cancelled.")
+                raise typer.Exit(code=1)
+        deleted = 0
+        for item in targets:
+            if storage.delete_resume_cache(item):
+                deleted += 1
+        typer.echo(f"Deleted resume cache rows: {deleted}")
+        return
+
+    normalized_name = _normalize_resume_name_or_exit(resume_name or "")
+    if not yes:
+        confirmed = typer.confirm(f"Delete resume cache {normalized_name}?", default=False)
+        if not confirmed:
+            typer.echo("Cancelled.")
+            raise typer.Exit(code=1)
+    deleted = storage.delete_resume_cache(normalized_name)
+    if not deleted:
+        typer.secho(f"Resume cache not found: {normalized_name}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.echo(f"Deleted resume cache: {normalized_name}")
 
 
 def _print_linkedin_results(
@@ -1167,6 +1278,48 @@ def _print_delivery_debug_table(rows: list[TelegramDeliveryRecord]) -> None:
         typer.echo("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
 
 
+def _normalize_resume_name_or_exit(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in KNOWN_RESUME_NAMES:
+        allowed = ", ".join(KNOWN_RESUME_NAMES)
+        typer.secho(
+            f"Unknown resume identifier: {value}. Allowed: {allowed}",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+    return normalized
+
+
+def _print_resume_cache_table(rows: list[TelegramResumeCacheRecord]) -> None:
+    headers = ("resume_name", "file_path", "file_size", "cached_at", "file_id")
+    rendered_rows = [
+        (
+            row.resume_name,
+            row.file_path,
+            str(row.file_size),
+            row.cached_at,
+            _preview_file_id(row.telegram_file_id),
+        )
+        for row in rows
+    ]
+    widths = [len(header) for header in headers]
+    for row in rendered_rows:
+        for idx, value in enumerate(row):
+            widths[idx] = max(widths[idx], len(value))
+    typer.echo("  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers)))
+    typer.echo("  ".join("-" * width for width in widths))
+    for row in rendered_rows:
+        typer.echo("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
+
+
+def _preview_file_id(value: str) -> str:
+    cleaned = value.strip()
+    if len(cleaned) <= 12:
+        return cleaned
+    return f"{cleaned[:12]}..."
+
+
 @dataclass(frozen=True)
 class PreparationRunResult:
     queue_items: int
@@ -1174,8 +1327,10 @@ class PreparationRunResult:
     prepared_successfully: int
     telegram_sent: int
     errors_count: int
-    pdf_found: int
+    pdf_cached: int
+    pdf_uploaded: int
     pdf_missing: int
+    pdf_errors: int
 
 
 class _JobApplierLock:
@@ -1253,6 +1408,7 @@ def _prepare_requested_applications(
     limit: int,
     dry_run: bool,
     print_dry_run_items: bool,
+    resume_cache_service: ResumeCacheService | None = None,
 ) -> PreparationRunResult:
     queue = storage.list_by_status(
         chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
@@ -1265,8 +1421,18 @@ def _prepare_requested_applications(
     prepared_successfully = 0
     telegram_sent = 0
     errors_count = 0
-    pdf_found = 0
+    pdf_cached = 0
+    pdf_uploaded = 0
     pdf_missing = 0
+    pdf_errors = 0
+
+    cache_service = resume_cache_service
+    if not dry_run and cache_service is None and telegram_client is not None:
+        cache_service = ResumeCacheService(
+            resumes_dir=settings.resumes_dir,
+            storage=storage,
+            telegram_client=telegram_client,
+        )
 
     for source, external_id in queue:
         try:
@@ -1305,12 +1471,10 @@ def _prepare_requested_applications(
             continue
 
         generated_packages += 1
-        if prepared.resume_path:
-            pdf_found += 1
-        else:
-            pdf_missing += 1
 
         if dry_run:
+            if prepared.resume_path is None:
+                pdf_missing += 1
             if print_dry_run_items:
                 _print_prepared_dry_run(prepared)
             continue
@@ -1366,14 +1530,32 @@ def _prepare_requested_applications(
         except Exception:  # noqa: BLE001
             pass
 
-        if prepared.resume_path:
-            try:
-                telegram_client.send_document(  # type: ignore[union-attr]
-                    file_path=prepared.resume_path,
+        if cache_service is None:
+            pdf_errors += 1
+            logger.warning("Resume cache service is unavailable for %s:%s", source, external_id)
+            continue
+
+        try:
+            resume_result = cache_service.get_or_upload(
+                resume_name=prepared.recommended_resume,
+                chat_id=settings.telegram_chat_id,
+            )
+            if resume_result.missing or resume_result.telegram_file_id is None:
+                pdf_missing += 1
+                continue
+
+            if resume_result.cache_hit:
+                telegram_client.send_document_by_file_id(  # type: ignore[union-attr]
+                    chat_id=settings.telegram_chat_id,
+                    file_id=resume_result.telegram_file_id,
                     caption=f"Резюме для отклика: {prepared.recommended_resume}",
                 )
-            except (TelegramRequestError, ValueError):
-                _ = None
+                pdf_cached += 1
+            elif resume_result.uploaded:
+                pdf_uploaded += 1
+        except (TelegramRequestError, ValueError, OSError) as exc:
+            pdf_errors += 1
+            logger.warning("Resume delivery warning for %s:%s: %s", source, external_id, exc)
 
     return PreparationRunResult(
         queue_items=queue_items,
@@ -1381,8 +1563,10 @@ def _prepare_requested_applications(
         prepared_successfully=prepared_successfully,
         telegram_sent=telegram_sent,
         errors_count=errors_count,
-        pdf_found=pdf_found,
+        pdf_cached=pdf_cached,
+        pdf_uploaded=pdf_uploaded,
         pdf_missing=pdf_missing,
+        pdf_errors=pdf_errors,
     )
 
 

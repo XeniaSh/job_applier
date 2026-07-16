@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.storage.seen_jobs import DEFAULT_DB_PATH
-from app.telegram.models import TelegramDeliveryRecord
+from app.telegram.models import TelegramDeliveryRecord, TelegramResumeCacheRecord
 
 STATUS_SENT = "SENT"
 STATUS_SKIPPED = "SKIPPED"
@@ -179,6 +179,97 @@ class TelegramDeliveryStorage:
             ).fetchall()
         return [(str(source), str(external_id)) for source, external_id in rows]
 
+    def get_resume_cache(self, resume_name: str) -> TelegramResumeCacheRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select resume_name, file_path, file_mtime_ns, file_size, telegram_file_id, telegram_file_unique_id, cached_at
+                from telegram_resume_cache
+                where resume_name = ?
+                """,
+                (resume_name,),
+            ).fetchone()
+        if row is None:
+            return None
+        return TelegramResumeCacheRecord(
+            resume_name=str(row[0]),
+            file_path=str(row[1]),
+            file_mtime_ns=int(row[2]),
+            file_size=int(row[3]),
+            telegram_file_id=str(row[4]),
+            telegram_file_unique_id=str(row[5]) if row[5] is not None else None,
+            cached_at=str(row[6]),
+        )
+
+    def save_resume_cache(
+        self,
+        *,
+        resume_name: str,
+        file_path: str,
+        file_mtime_ns: int,
+        file_size: int,
+        telegram_file_id: str,
+        telegram_file_unique_id: str | None,
+    ) -> None:
+        cached_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into telegram_resume_cache (
+                    resume_name, file_path, file_mtime_ns, file_size, telegram_file_id, telegram_file_unique_id, cached_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?)
+                on conflict(resume_name) do update set
+                    file_path = excluded.file_path,
+                    file_mtime_ns = excluded.file_mtime_ns,
+                    file_size = excluded.file_size,
+                    telegram_file_id = excluded.telegram_file_id,
+                    telegram_file_unique_id = excluded.telegram_file_unique_id,
+                    cached_at = excluded.cached_at
+                """,
+                (
+                    resume_name,
+                    file_path,
+                    int(file_mtime_ns),
+                    int(file_size),
+                    telegram_file_id,
+                    telegram_file_unique_id,
+                    cached_at,
+                ),
+            )
+            conn.commit()
+
+    def delete_resume_cache(self, resume_name: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "delete from telegram_resume_cache where resume_name = ?",
+                (resume_name,),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def list_resume_cache(self) -> list[TelegramResumeCacheRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select resume_name, file_path, file_mtime_ns, file_size, telegram_file_id, telegram_file_unique_id, cached_at
+                from telegram_resume_cache
+                order by resume_name asc
+                """
+            ).fetchall()
+        return [
+            TelegramResumeCacheRecord(
+                resume_name=str(row[0]),
+                file_path=str(row[1]),
+                file_mtime_ns=int(row[2]),
+                file_size=int(row[3]),
+                telegram_file_id=str(row[4]),
+                telegram_file_unique_id=str(row[5]) if row[5] is not None else None,
+                cached_at=str(row[6]),
+            )
+            for row in rows
+        ]
+
     def save_preparation(
         self,
         *,
@@ -301,6 +392,19 @@ class TelegramDeliveryStorage:
                     status text not null,
                     error_message text,
                     primary key (source, external_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists telegram_resume_cache (
+                    resume_name text primary key,
+                    file_path text not null,
+                    file_mtime_ns integer not null,
+                    file_size integer not null,
+                    telegram_file_id text not null,
+                    telegram_file_unique_id text,
+                    cached_at text not null
                 )
                 """
             )

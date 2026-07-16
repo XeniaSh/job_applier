@@ -161,3 +161,28 @@ def test_set_status_validation_and_missing_record(tmp_path: Path) -> None:
         storage.set_status("linkedin-email", "1", "WRONG_STATUS")
     with pytest.raises(KeyError):
         storage.set_status("linkedin-email", "404", STATUS_PREPARED)
+
+
+def test_resume_cache_crud(tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    assert storage.get_resume_cache("java-backend") is None
+
+    storage.save_resume_cache(
+        resume_name="java-backend",
+        file_path=str(tmp_path / "resumes" / "java-backend.pdf"),
+        file_mtime_ns=123,
+        file_size=456,
+        telegram_file_id="FILE_ID_1234567890",
+        telegram_file_unique_id="UNIQ_123",
+    )
+    record = storage.get_resume_cache("java-backend")
+    assert record is not None
+    assert record.file_size == 456
+    assert record.telegram_file_id == "FILE_ID_1234567890"
+
+    rows = storage.list_resume_cache()
+    assert [row.resume_name for row in rows] == ["java-backend"]
+
+    assert storage.delete_resume_cache("java-backend") is True
+    assert storage.delete_resume_cache("java-backend") is False
+    assert storage.get_resume_cache("java-backend") is None

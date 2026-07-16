@@ -10,6 +10,7 @@ Job Applier is a local CLI service that reads LinkedIn Job Alert emails via IMAP
 - Hybrid evaluation: LLM extracts structured facts; deterministic matcher makes final scoring/decision.
 - Telegram delivery with inline actions (`Skip`, `Prepare`, `Applied`, `Open LinkedIn`).
 - Cover letter generation and resume selection for requested applications.
+- Telegram resume caching by reusable `file_id` (first upload, then reuse).
 - SQLite state tracking for deliveries, statuses, and operational offsets.
 - Debug commands for visibility and safe local state correction.
 
@@ -214,6 +215,11 @@ Notes:
 - Missing PDF does not block cover-letter generation.
 - PDFs may include personal data and should be ignored by git.
 - Keep optional placeholder file: `resumes/.gitkeep`.
+- Telegram upload caching:
+  - first send uploads local PDF and stores Telegram `file_id`;
+  - next sends reuse `file_id` without uploading bytes;
+  - if local PDF changes (mtime/size), cache is invalidated and file uploads again.
+- Resume cache only optimizes Telegram delivery from this local app; final upload/selection in LinkedIn or ATS stays manual.
 
 ## Running the Background Service
 
@@ -254,10 +260,19 @@ Primary commands:
 - `telegram-chat-id`
 - `poll-telegram-actions`
 - `prepare-telegram-applications`
+- `telegram-cache-resumes`
+- `telegram-resume-cache`
+- `telegram-clear-resume-cache`
 - `telegram-debug`
 - `telegram-reset`
 - `telegram-delete-delivery`
 - `run`
+
+## Quick Command Reference
+
+For daily practical usage, see [`docs/CHEATSHEET.md`](docs/CHEATSHEET.md).
+
+Use [`docs/COMMANDS.md`](docs/COMMANDS.md) as the complete technical reference.
 
 ## Status Lifecycle
 
@@ -272,6 +287,14 @@ Alternative states:
 - `PREPARATION_FAILED`
 
 See transition details in [`docs/COMMANDS.md`](docs/COMMANDS.md).
+
+Resume cache commands:
+
+```bash
+uv run python -m app telegram-cache-resumes
+uv run python -m app telegram-resume-cache
+uv run python -m app telegram-clear-resume-cache java-backend
+```
 
 ## Troubleshooting
 
