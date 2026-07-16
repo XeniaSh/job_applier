@@ -1,5 +1,9 @@
 from pathlib import Path
 from datetime import timezone
+from dataclasses import dataclass
+import logging
+import os
+import time
 
 import typer
 from pydantic import ValidationError
@@ -16,15 +20,38 @@ from app.collectors.linkedin_email_collector import (
     LinkedInEmailCollector,
 )
 from app.collectors.linkedin_email_parser import extract_email_text_parts, parse_linkedin_email
+from app.application.preparation_service import (
+    ApplicationPreparationError,
+    PreparedApplication,
+    PreparationService,
+)
 from app.config import Settings
 from app.formatter import format_evaluation_ru
-from app.llm_client import LLMClient, LLMRequestError, LLMResponseError
+from app.llm_client import CoverLetterValidationError, LLMClient, LLMRequestError, LLMResponseError
 from app.prompt_loader import PromptLoadError, load_analysis_prompt
 from app.skills_profile_loader import SkillsProfileLoadError, load_candidate_skills
 from app.storage.seen_jobs import SeenJobsStorage
+from app.storage.telegram_delivery import (
+    ALLOWED_STATUSES,
+    STATUS_APPLIED,
+    STATUS_PREPARE_REQUESTED,
+    STATUS_PREPARED,
+    STATUS_PREPARATION_FAILED,
+    STATUS_SKIPPED,
+    TelegramDeliveryStorage,
+)
+from app.telegram.client import (
+    TelegramClient,
+    TelegramRequestError,
+    map_source_to_code,
+    parse_callback_data,
+    validate_linkedin_job_url,
+)
+from app.telegram.models import TelegramDeliveryRecord, TelegramInlineButton, TelegramVacancyCard
 from app.vacancy_analyzer import VacancyAnalyzer
 
 app = typer.Typer(help="Personal job vacancy analyzer.")
+logger = logging.getLogger(__name__)
 
 
 def _load_vacancy_text(path: Path) -> str:
@@ -225,7 +252,13 @@ def collect_linkedin_email(
     )
 
     try:
-        report = collector.collect_and_analyze(limit=limit, dry_run=dry_run)
+        report = collector.collect_and_analyze(
+            limit=limit,
+            dry_run=dry_run,
+            skip_seen=True,
+            mark_seen=True,
+            analyze_in_dry_run=False,
+        )
     except (EmailConnectionError, EmailAuthenticationError) as exc:
         _ = exc
         typer.secho("Ошибка подключения к почте LinkedIn alerts.", err=True, fg=typer.colors.RED)
@@ -233,6 +266,499 @@ def collect_linkedin_email(
 
     _print_linkedin_results(report=report, include_ignore=include_ignore, dry_run=dry_run)
     _print_linkedin_summary(report)
+
+
+@app.command("send-linkedin-telegram")
+def send_linkedin_telegram(
+    limit: int = typer.Option(20, "--limit", min=1),
+    include_strong: bool = typer.Option(True, "--include-strong/--no-include-strong"),
+    include_potential: bool = typer.Option(True, "--include-potential/--no-include-potential"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(f"Ошибка конфигурации: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+
+    if not dry_run:
+        _require_telegram_settings(settings)
+        telegram_client = TelegramClient(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+        )
+    else:
+        telegram_client = None
+
+    analyzer = build_analyzer(settings)
+    seen_jobs = SeenJobsStorage()
+    deliveries = TelegramDeliveryStorage()
+    email_client = EmailIMAPClient(
+        host=settings.linkedin_email_imap_host,
+        port=settings.linkedin_email_imap_port,
+        username=settings.linkedin_email_username,
+        password=settings.linkedin_email_password,
+        folder=settings.linkedin_email_folder,
+        search_days=settings.linkedin_email_search_days,
+        mark_as_read=settings.linkedin_email_mark_as_read,
+    )
+    collector = LinkedInEmailCollector(
+        email_client=email_client,
+        analyzer=analyzer,
+        seen_jobs=seen_jobs,
+    )
+
+    try:
+        report = collector.collect_and_analyze(
+            limit=limit,
+            dry_run=dry_run,
+            skip_seen=False,
+            analyze_in_dry_run=dry_run,
+            mark_seen=False,
+        )
+    except (EmailConnectionError, EmailAuthenticationError) as exc:
+        _ = exc
+        typer.secho("Ошибка подключения к почте LinkedIn alerts.", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    for item in report.processed:
+        if item.evaluation is None:
+            if verbose and item.skipped_by_prefilter:
+                typer.echo(f"SKIP TITLE_FILTER {item.title}")
+            continue
+        seen_info = seen_jobs.is_seen("linkedin-email", item.external_id)
+        delivered_info = deliveries.was_sent("linkedin-email", item.external_id, settings.telegram_chat_id)
+        if seen_info:
+            report.already_seen += 1
+            if dry_run and verbose:
+                typer.echo(f"INFO ALREADY_SEEN {item.title}")
+        if delivered_info:
+            report.already_delivered += 1
+            if dry_run and verbose:
+                typer.echo(f"INFO ALREADY_DELIVERED {item.title}")
+
+        decision = item.evaluation.decision.value
+        if decision == "STRONG_MATCH" and not include_strong:
+            if verbose:
+                typer.echo(f"SKIP {decision} {item.title}")
+            continue
+        if decision == "POTENTIAL_MATCH" and not include_potential:
+            if verbose:
+                typer.echo(f"SKIP {decision} {item.title}")
+            continue
+        if decision not in {"STRONG_MATCH", "POTENTIAL_MATCH"}:
+            if verbose:
+                typer.echo(f"SKIP {decision} {item.title}")
+            continue
+
+        try:
+            card = TelegramVacancyCard(
+                source=map_source_to_code("linkedin-email"),
+                external_id=item.external_id,
+                decision=decision,
+                title=item.title,
+                company=item.company,
+                location=item.location,
+                url=item.url,
+                match_percentage=item.evaluation.match_percentage,
+                gaps=item.evaluation.gaps,
+                nuances=item.evaluation.nuances,
+                recommended_resume=item.evaluation.recommended_resume.value,
+                content_completeness=item.content_completeness,
+            )
+            from app.telegram.formatter import format_telegram_card_html
+
+            formatted_card = format_telegram_card_html(card)
+        except ValueError as exc:
+            report.send_errors += 1
+            logger.error("Telegram card prepare failed for job %s: %s", item.external_id, exc)
+            continue
+
+        report.prepared_cards += 1
+
+        if dry_run:
+            if verbose:
+                typer.echo(f"WOULD_SEND {decision} {item.title}")
+            typer.echo("--------------------------------")
+            typer.echo(formatted_card)
+            continue
+
+        if delivered_info:
+            if verbose:
+                typer.echo(f"SKIP ALREADY_DELIVERED {item.title}")
+            continue
+
+        try:
+            message_ref = telegram_client.send_vacancy_card(card)  # type: ignore[union-attr]
+        except (TelegramRequestError, ValueError) as exc:
+            report.send_errors += 1
+            logger.error("Telegram send failed for job %s: %s", item.external_id, exc)
+            continue
+
+        deliveries.save_sent(
+            source="linkedin-email",
+            external_id=item.external_id,
+            chat_id=settings.telegram_chat_id,
+            message_id=message_ref.message_id,
+        )
+        report.sent += 1
+
+    typer.echo(f"Найдено писем: {report.emails_found}")
+    typer.echo(f"Извлечено вакансий: {report.vacancies_extracted}")
+    typer.echo(f"Уникальных вакансий: {report.unique_vacancies}")
+    typer.echo(f"Уже в seen_jobs: {report.already_seen}")
+    typer.echo(f"Проанализировано: {report.analyzed}")
+    typer.echo(f"Подготовлено карточек: {report.prepared_cards}")
+    typer.echo(f"Отправлено в Telegram: {report.sent}")
+    typer.echo(f"Уже отправлялись: {report.already_delivered}")
+    typer.echo(f"Ошибок отправки: {report.send_errors}")
+
+
+@app.command("prepare-telegram-applications")
+def prepare_telegram_applications(
+    limit: int = typer.Option(10, "--limit", min=1),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(f"Ошибка конфигурации: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+
+    if not dry_run:
+        _require_telegram_settings(settings)
+        telegram_client = TelegramClient(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+        )
+    else:
+        telegram_client = None
+
+    analyzer = build_analyzer(settings)
+    llm_client = LLMClient(
+        api_url=settings.llm_api_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+    )
+    email_client = EmailIMAPClient(
+        host=settings.linkedin_email_imap_host,
+        port=settings.linkedin_email_imap_port,
+        username=settings.linkedin_email_username,
+        password=settings.linkedin_email_password,
+        folder=settings.linkedin_email_folder,
+        search_days=settings.linkedin_email_search_days,
+        mark_as_read=False,
+    )
+    service = PreparationService(
+        analyzer=analyzer,
+        llm_client=llm_client,
+        email_client=email_client,
+        resumes_dir=settings.resumes_dir,
+        preferred_language=settings.candidate_preferred_language,
+        grammatical_gender=settings.candidate_grammatical_gender,
+    )
+    storage = TelegramDeliveryStorage()
+    result = _prepare_requested_applications(
+        settings=settings,
+        service=service,
+        storage=storage,
+        telegram_client=telegram_client,
+        limit=limit,
+        dry_run=dry_run,
+        print_dry_run_items=dry_run,
+    )
+
+    typer.echo(f"В очереди: {result.queue_items}")
+    typer.echo(f"Сгенерировано пакетов: {result.generated_packages}")
+    typer.echo(f"Подготовлено успешно: {result.prepared_successfully}")
+    typer.echo(f"Отправлено в Telegram: {result.telegram_sent}")
+    typer.echo(f"Ошибок: {result.errors_count}")
+    typer.echo(f"PDF найдено: {result.pdf_found}")
+    typer.echo(f"PDF отсутствует: {result.pdf_missing}")
+
+
+@app.command("run")
+def run_pipeline(
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(f"Ошибка конфигурации: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+    _require_telegram_settings(settings)
+
+    lock = _JobApplierLock(Path("data/job_applier.lock"))
+    if not lock.acquire():
+        typer.echo("Job Applier is already running.")
+        raise typer.Exit(code=1)
+
+    analyzer = build_analyzer(settings)
+    llm_client = LLMClient(
+        api_url=settings.llm_api_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+    )
+    email_client = EmailIMAPClient(
+        host=settings.linkedin_email_imap_host,
+        port=settings.linkedin_email_imap_port,
+        username=settings.linkedin_email_username,
+        password=settings.linkedin_email_password,
+        folder=settings.linkedin_email_folder,
+        search_days=settings.linkedin_email_search_days,
+        mark_as_read=settings.linkedin_email_mark_as_read,
+    )
+    seen_jobs = SeenJobsStorage()
+    deliveries = TelegramDeliveryStorage()
+    collector = LinkedInEmailCollector(
+        email_client=email_client,
+        analyzer=analyzer,
+        seen_jobs=seen_jobs,
+    )
+    telegram_client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    preparation_service = PreparationService(
+        analyzer=analyzer,
+        llm_client=llm_client,
+        email_client=email_client,
+        resumes_dir=settings.resumes_dir,
+        preferred_language=settings.candidate_preferred_language,
+        grammatical_gender=settings.candidate_grammatical_gender,
+    )
+
+    interval = max(1, int(settings.pipeline_interval_seconds))
+    poll_interval = max(1, int(settings.telegram_poll_interval_seconds))
+    next_cycle_monotonic = 0.0
+    offset_raw = deliveries.get_state("telegram_update_offset")
+    offset = int(offset_raw) if offset_raw and offset_raw.isdigit() else None
+
+    typer.echo("Job Applier started.")
+    typer.echo("Press Ctrl+C to stop.")
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= next_cycle_monotonic:
+                try:
+                    report = collector.collect_and_analyze(
+                        limit=20,
+                        dry_run=False,
+                        skip_seen=True,
+                        mark_seen=True,
+                        analyze_in_dry_run=False,
+                    )
+                    if report.new_vacancies > 0:
+                        _run_log(f"LinkedIn: {report.new_vacancies} new vacancies")
+                    sent = _send_processed_to_telegram(
+                        processed=report.processed,
+                        deliveries=deliveries,
+                        telegram_client=telegram_client,
+                        chat_id=settings.telegram_chat_id,
+                        verbose=verbose,
+                    )
+                    if sent > 0:
+                        _run_log(f"Telegram: {sent} cards sent")
+                except (EmailConnectionError, EmailAuthenticationError, LLMRequestError, LLMResponseError) as exc:
+                    _run_log(f"Pipeline cycle failed: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    _run_log(f"Pipeline cycle failed: {exc}")
+                next_cycle_monotonic = time.monotonic() + interval
+
+            try:
+                offset, prepare_requests = _poll_telegram_actions_once(
+                    client=telegram_client,
+                    storage=deliveries,
+                    configured_chat_id=str(settings.telegram_chat_id),
+                    offset=offset,
+                    timeout=poll_interval,
+                )
+                if prepare_requests > 0:
+                    _run_log("Prepare request received")
+            except TelegramRequestError as exc:
+                _run_log(f"Telegram poll failed: {exc}")
+                time.sleep(poll_interval)
+                continue
+
+            if prepare_requests > 0:
+                result = _prepare_requested_applications(
+                    settings=settings,
+                    service=preparation_service,
+                    storage=deliveries,
+                    telegram_client=telegram_client,
+                    limit=20,
+                    dry_run=False,
+                    print_dry_run_items=False,
+                )
+                if result.generated_packages > 0:
+                    _run_log("Application generated")
+                if result.pdf_found > 0:
+                    _run_log("Resume sent")
+                if result.errors_count > 0:
+                    _run_log(f"Preparation errors: {result.errors_count}")
+    except KeyboardInterrupt:
+        typer.echo("Job Applier stopped.")
+    finally:
+        lock.release()
+
+
+@app.command("poll-telegram-actions")
+def poll_telegram_actions(
+    once: bool = typer.Option(False, "--once"),
+    timeout: int = typer.Option(25, "--timeout", min=1, max=60),
+) -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(f"Ошибка конфигурации: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+    _require_telegram_settings(settings)
+
+    client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    storage = TelegramDeliveryStorage()
+    offset_raw = storage.get_state("telegram_update_offset")
+    offset = int(offset_raw) if offset_raw and offset_raw.isdigit() else None
+
+    try:
+        while True:
+            try:
+                offset, _ = _poll_telegram_actions_once(
+                    client=client,
+                    storage=storage,
+                    configured_chat_id=str(settings.telegram_chat_id),
+                    offset=offset,
+                    timeout=timeout,
+                )
+            except TelegramRequestError as exc:
+                typer.secho(f"Ошибка Telegram polling: {exc}", err=True, fg=typer.colors.RED)
+                if once:
+                    raise typer.Exit(code=1) from exc
+                continue
+            if once:
+                break
+    except KeyboardInterrupt:
+        typer.echo("Остановка polling по Ctrl+C")
+
+
+@app.command("telegram-chat-id")
+def telegram_chat_id() -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(f"Ошибка конфигурации: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+
+    if not settings.telegram_bot_token:
+        typer.secho("TELEGRAM_BOT_TOKEN не задан.", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+
+    client = TelegramClient(settings.telegram_bot_token, chat_id="0")
+    try:
+        updates = client.get_updates(offset=None, timeout=1)
+    except TelegramRequestError as exc:
+        typer.secho(f"Ошибка Telegram: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    seen_chat_ids: set[str] = set()
+    rows: list[str] = []
+    for update in updates:
+        message = update.get("message") or update.get("callback_query", {}).get("message") or {}
+        chat = message.get("chat", {}) if isinstance(message, dict) else {}
+        if chat.get("type") != "private":
+            continue
+        chat_id = str(chat.get("id", ""))
+        if not chat_id or chat_id in seen_chat_ids:
+            continue
+        seen_chat_ids.add(chat_id)
+        display_name = " ".join(
+            [str(chat.get("first_name", "")).strip(), str(chat.get("last_name", "")).strip()]
+        ).strip()
+        username = str(chat.get("username", "")).strip()
+        suffix = f" (@{username})" if username else ""
+        rows.append(f"{chat_id} — {display_name or 'Unknown'}{suffix}")
+
+    if not rows:
+        typer.echo("Обновления не найдены. Сначала отправьте любое сообщение вашему боту.")
+        return
+    typer.echo("Найдены чаты:")
+    for row in rows:
+        typer.echo(row)
+
+
+@app.command("telegram-debug")
+def telegram_debug(
+    status: str | None = typer.Option(None, "--status"),
+    source: str | None = typer.Option(None, "--source"),
+    limit: int = typer.Option(50, "--limit", min=1),
+) -> None:
+    normalized_status = _normalize_status_or_exit(status)
+    storage = TelegramDeliveryStorage()
+    try:
+        rows = storage.list_deliveries(
+            status=normalized_status,
+            source=source.strip() if source else None,
+            limit=limit,
+        )
+    except ValueError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+    if not rows:
+        typer.echo("Telegram delivery records not found.")
+        return
+    _print_delivery_debug_table(rows)
+
+
+@app.command("telegram-reset")
+def telegram_reset(
+    external_id: str = typer.Argument(...),
+    source: str = typer.Option("linkedin-email", "--source"),
+    status: str = typer.Option(STATUS_PREPARE_REQUESTED, "--status"),
+) -> None:
+    normalized_status = _normalize_status_or_exit(status)
+    normalized_source = source.strip()
+    normalized_external_id = external_id.strip()
+    storage = TelegramDeliveryStorage()
+    current = storage.get_delivery(normalized_source, normalized_external_id)
+    if current is None:
+        typer.secho(
+            f"Delivery record not found: {normalized_source}:{normalized_external_id}",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    try:
+        storage.set_status(normalized_source, normalized_external_id, normalized_status)
+    except ValueError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+    except KeyError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Updated {normalized_source}:{normalized_external_id}")
+    typer.echo(f"{current.status} -> {normalized_status}")
+
+
+@app.command("telegram-delete-delivery")
+def telegram_delete_delivery(
+    external_id: str = typer.Argument(...),
+    source: str = typer.Option("linkedin-email", "--source"),
+    yes: bool = typer.Option(False, "--yes"),
+) -> None:
+    normalized_source = source.strip()
+    normalized_external_id = external_id.strip()
+    if not yes:
+        confirmed = typer.confirm(f"Delete delivery {normalized_source}:{normalized_external_id}?", default=False)
+        if not confirmed:
+            typer.echo("Cancelled.")
+            raise typer.Exit(code=1)
+    storage = TelegramDeliveryStorage()
+    deleted = storage.delete_delivery(normalized_source, normalized_external_id)
+    if not deleted:
+        typer.secho(
+            f"Delivery record not found: {normalized_source}:{normalized_external_id}",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    typer.echo(f"Deleted delivery {normalized_source}:{normalized_external_id}")
 
 
 def _print_linkedin_results(
@@ -295,7 +821,9 @@ def _print_linkedin_summary(report: LinkedInEmailCollectReport) -> None:
             [
                 f"Найдено писем: {report.emails_found}",
                 f"Извлечено вакансий: {report.vacancies_extracted}",
+                f"Уникальных вакансий: {report.unique_vacancies}",
                 f"Новых вакансий: {report.new_vacancies}",
+                f"Уже в seen_jobs: {report.already_seen}",
                 f"Проанализировано: {report.analyzed}",
                 f"Сильных совпадений: {report.strong_matches}",
                 f"Потенциальных совпадений: {report.potential_matches}",
@@ -457,6 +985,129 @@ def preview_linkedin_email(
     typer.echo(f"Parsing errors: {parsing_errors}")
 
 
+def _process_callback_update(
+    *,
+    update: dict,
+    client: TelegramClient,
+    storage: TelegramDeliveryStorage,
+    configured_chat_id: str,
+) -> None:
+    callback = update.get("callback_query")
+    if not isinstance(callback, dict):
+        return
+
+    callback_id = str(callback.get("id", ""))
+    callback_data = str(callback.get("data", ""))
+    message = callback.get("message", {})
+    if not isinstance(message, dict):
+        return
+    chat = message.get("chat", {})
+    if not isinstance(chat, dict):
+        return
+    callback_chat_id = str(chat.get("id", ""))
+
+    if callback_chat_id != str(configured_chat_id):
+        if callback_id:
+            client.answer_callback_query(callback_id, text="Действие недоступно для этого чата")
+        return
+
+    try:
+        action, source, external_id = parse_callback_data(callback_data)
+    except ValueError:
+        if callback_id:
+            client.answer_callback_query(callback_id, text="Некорректное действие")
+        return
+
+    if action == "skip":
+        storage.update_status(
+            source=source,
+            external_id=external_id,
+            chat_id=configured_chat_id,
+            status=STATUS_SKIPPED,
+        )
+        if callback_id:
+            client.answer_callback_query(callback_id, text="Вакансия пропущена")
+    elif action == "applied":
+        storage.update_status(
+            source=source,
+            external_id=external_id,
+            chat_id=configured_chat_id,
+            status=STATUS_APPLIED,
+        )
+        if callback_id:
+            client.answer_callback_query(callback_id, text="Отмечено как отклик отправлен")
+    else:
+        storage.update_status(
+            source=source,
+            external_id=external_id,
+            chat_id=configured_chat_id,
+            status=STATUS_PREPARE_REQUESTED,
+        )
+        if callback_id:
+            client.answer_callback_query(
+                callback_id,
+                text="Добавлено в очередь на подготовку отклика",
+            )
+
+    message_id = int(message.get("message_id", 0))
+    if message_id <= 0:
+        return
+    url_button = _extract_url_button(message)
+    if url_button is None:
+        return
+    client.edit_message_reply_markup(
+        chat_id=configured_chat_id,
+        message_id=message_id,
+        buttons=[[TelegramInlineButton(text="🔗 Open LinkedIn", url=url_button)]],
+    )
+
+
+def _extract_url_button(message: dict) -> str | None:
+    markup = message.get("reply_markup", {})
+    if not isinstance(markup, dict):
+        return None
+    keyboard = markup.get("inline_keyboard", [])
+    if not isinstance(keyboard, list):
+        return None
+    for row in keyboard:
+        if not isinstance(row, list):
+            continue
+        for button in row:
+            if not isinstance(button, dict):
+                continue
+            url = button.get("url")
+            if isinstance(url, str):
+                try:
+                    return validate_linkedin_job_url(url)
+                except ValueError:
+                    continue
+    return None
+
+
+def _require_telegram_settings(settings: Settings) -> None:
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        return
+    typer.secho(
+        "Для этой команды требуются TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID.",
+        err=True,
+        fg=typer.colors.RED,
+    )
+    raise typer.Exit(code=2)
+
+
+def _print_prepared_dry_run(prepared: PreparedApplication) -> None:
+    typer.echo(f"PREPARED {prepared.title}")
+    typer.echo("Resume:")
+    typer.echo(
+        f"{prepared.recommended_resume} ({'found' if prepared.resume_path else 'PDF not found'})"
+    )
+    typer.echo(f"Language: {prepared.language}")
+    typer.echo("")
+    typer.echo("Cover letter:")
+    typer.echo(prepared.cover_letter)
+    typer.echo("")
+
+
 def _format_received(received_at) -> str:
     if received_at is None:
         return "n/a"
@@ -479,3 +1130,305 @@ def _format_received_filename() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+
+
+def _normalize_status_or_exit(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    if normalized not in ALLOWED_STATUSES:
+        allowed = ", ".join(sorted(ALLOWED_STATUSES))
+        typer.secho(f"Unknown status: {value}. Allowed: {allowed}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    return normalized
+
+
+def _print_delivery_debug_table(rows: list[TelegramDeliveryRecord]) -> None:
+    headers = ("external_id", "source", "status", "chat_id", "message_id", "sent_at")
+    rendered_rows = [
+        (
+            record.external_id,
+            record.source,
+            record.status,
+            record.chat_id,
+            str(record.message_id),
+            record.sent_at,
+        )
+        for record in rows
+    ]
+    widths = [len(header) for header in headers]
+    for row in rendered_rows:
+        for idx, value in enumerate(row):
+            widths[idx] = max(widths[idx], len(value))
+    header_line = "  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers))
+    typer.echo(header_line)
+    typer.echo("  ".join("-" * width for width in widths))
+    for row in rendered_rows:
+        typer.echo("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
+
+
+@dataclass(frozen=True)
+class PreparationRunResult:
+    queue_items: int
+    generated_packages: int
+    prepared_successfully: int
+    telegram_sent: int
+    errors_count: int
+    pdf_found: int
+    pdf_missing: int
+
+
+class _JobApplierLock:
+    def __init__(self, lock_path: Path) -> None:
+        self._path = lock_path
+        self._fd: int | None = None
+
+    def acquire(self) -> bool:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(self._fd, str(os.getpid()).encode("utf-8"))
+            return True
+        except FileExistsError:
+            return False
+
+    def release(self) -> None:
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                _ = None
+            self._fd = None
+        try:
+            self._path.unlink(missing_ok=True)
+        except OSError:
+            _ = None
+
+
+def _run_log(message: str) -> None:
+    stamp = time.strftime("%H:%M")
+    typer.echo(f"[{stamp}] {message}")
+
+
+def _poll_telegram_actions_once(
+    *,
+    client: TelegramClient,
+    storage: TelegramDeliveryStorage,
+    configured_chat_id: str,
+    offset: int | None,
+    timeout: int,
+) -> tuple[int | None, int]:
+    updates = client.get_updates(offset=offset, timeout=timeout)
+    next_offset = offset
+    prepare_requests = 0
+    for update in updates:
+        callback = update.get("callback_query", {})
+        callback_data = callback.get("data", "") if isinstance(callback, dict) else ""
+        if isinstance(callback_data, str):
+            try:
+                action, _source, _external_id = parse_callback_data(callback_data)
+                if action == "prepare":
+                    prepare_requests += 1
+            except ValueError:
+                _ = None
+        _process_callback_update(
+            update=update,
+            client=client,
+            storage=storage,
+            configured_chat_id=configured_chat_id,
+        )
+        update_id = int(update.get("update_id", 0))
+        next_offset = max(next_offset or 0, update_id + 1)
+    if updates and next_offset is not None:
+        storage.set_state("telegram_update_offset", str(next_offset))
+    return next_offset, prepare_requests
+
+
+def _prepare_requested_applications(
+    *,
+    settings: Settings,
+    service: PreparationService,
+    storage: TelegramDeliveryStorage,
+    telegram_client: TelegramClient | None,
+    limit: int,
+    dry_run: bool,
+    print_dry_run_items: bool,
+) -> PreparationRunResult:
+    queue = storage.list_by_status(
+        chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
+        status=STATUS_PREPARE_REQUESTED,
+        limit=limit,
+    )
+
+    queue_items = len(queue)
+    generated_packages = 0
+    prepared_successfully = 0
+    telegram_sent = 0
+    errors_count = 0
+    pdf_found = 0
+    pdf_missing = 0
+
+    for source, external_id in queue:
+        try:
+            prepared = service.prepare(source=source, external_id=external_id)
+        except (
+            ApplicationPreparationError,
+            LLMRequestError,
+            LLMResponseError,
+            CoverLetterValidationError,
+            PromptLoadError,
+        ) as exc:
+            errors_count += 1
+            if not dry_run:
+                storage.update_status(
+                    source=source,
+                    external_id=external_id,
+                    chat_id=settings.telegram_chat_id,
+                    status=STATUS_PREPARATION_FAILED,
+                )
+                storage.save_preparation(
+                    source=source,
+                    external_id=external_id,
+                    status=STATUS_PREPARATION_FAILED,
+                    resume_name=None,
+                    language=None,
+                    error_message=str(exc),
+                )
+                try:
+                    telegram_client.send_text_message(  # type: ignore[union-attr]
+                        f"❌ Не удалось подготовить отклик: {str(exc)}"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            elif print_dry_run_items:
+                typer.echo(f"FAILED {source}:{external_id} {exc}")
+            continue
+
+        generated_packages += 1
+        if prepared.resume_path:
+            pdf_found += 1
+        else:
+            pdf_missing += 1
+
+        if dry_run:
+            if print_dry_run_items:
+                _print_prepared_dry_run(prepared)
+            continue
+
+        try:
+            telegram_client.send_prepared_application(  # type: ignore[union-attr]
+                source=prepared.source,
+                external_id=prepared.external_id,
+                title=prepared.title,
+                company=prepared.company,
+                language=prepared.language,
+                recommended_resume=prepared.recommended_resume,
+                cover_letter=prepared.cover_letter,
+                warnings=prepared.warnings,
+                url=prepared.url,
+            )
+        except (TelegramRequestError, ValueError) as exc:
+            errors_count += 1
+            storage.update_status(
+                source=source,
+                external_id=external_id,
+                chat_id=settings.telegram_chat_id,
+                status=STATUS_PREPARATION_FAILED,
+            )
+            storage.save_preparation(
+                source=source,
+                external_id=external_id,
+                status=STATUS_PREPARATION_FAILED,
+                resume_name=prepared.recommended_resume,
+                language=prepared.language,
+                error_message=str(exc),
+            )
+            continue
+
+        prepared_successfully += 1
+        telegram_sent += 1
+        storage.update_status(
+            source=source,
+            external_id=external_id,
+            chat_id=settings.telegram_chat_id,
+            status=STATUS_PREPARED,
+        )
+        storage.save_preparation(
+            source=source,
+            external_id=external_id,
+            status=STATUS_PREPARED,
+            resume_name=prepared.recommended_resume,
+            language=prepared.language,
+            error_message=None,
+        )
+        try:
+            telegram_client.send_text_message("✅ Отклик подготовлен")  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            pass
+
+        if prepared.resume_path:
+            try:
+                telegram_client.send_document(  # type: ignore[union-attr]
+                    file_path=prepared.resume_path,
+                    caption=f"Резюме для отклика: {prepared.recommended_resume}",
+                )
+            except (TelegramRequestError, ValueError):
+                _ = None
+
+    return PreparationRunResult(
+        queue_items=queue_items,
+        generated_packages=generated_packages,
+        prepared_successfully=prepared_successfully,
+        telegram_sent=telegram_sent,
+        errors_count=errors_count,
+        pdf_found=pdf_found,
+        pdf_missing=pdf_missing,
+    )
+
+
+def _send_processed_to_telegram(
+    *,
+    processed: list[LinkedInProcessedVacancy],
+    deliveries: TelegramDeliveryStorage,
+    telegram_client: TelegramClient,
+    chat_id: str,
+    verbose: bool,
+) -> int:
+    sent = 0
+    for item in processed:
+        if item.evaluation is None:
+            continue
+        decision = item.evaluation.decision.value
+        if decision not in {"STRONG_MATCH", "POTENTIAL_MATCH"}:
+            continue
+        already_delivered = deliveries.was_sent("linkedin-email", item.external_id, chat_id)
+        if already_delivered:
+            continue
+        card = TelegramVacancyCard(
+            source=map_source_to_code("linkedin-email"),
+            external_id=item.external_id,
+            decision=decision,
+            title=item.title,
+            company=item.company,
+            location=item.location,
+            url=item.url,
+            match_percentage=item.evaluation.match_percentage,
+            gaps=item.evaluation.gaps,
+            nuances=item.evaluation.nuances,
+            recommended_resume=item.evaluation.recommended_resume.value,
+            content_completeness=item.content_completeness,
+        )
+        try:
+            message_ref = telegram_client.send_vacancy_card(card)
+            deliveries.save_sent(
+                source="linkedin-email",
+                external_id=item.external_id,
+                chat_id=chat_id,
+                message_id=message_ref.message_id,
+            )
+            sent += 1
+            if verbose:
+                _run_log(f"Telegram delivered {item.external_id}")
+        except (TelegramRequestError, ValueError) as exc:
+            logger.error("Telegram send failed for job %s: %s", item.external_id, exc)
+    return sent

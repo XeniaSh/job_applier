@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
 
 
 class Settings(BaseSettings):
@@ -13,6 +14,13 @@ class Settings(BaseSettings):
     linkedin_email_folder: str = "INBOX"
     linkedin_email_search_days: int = 7
     linkedin_email_mark_as_read: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    resumes_dir: Path = Path("resumes")
+    candidate_preferred_language: str = "en"
+    candidate_grammatical_gender: str = "neutral"
+    pipeline_interval_seconds: int = 300
+    telegram_poll_interval_seconds: int = 2
 
     model_config = SettingsConfigDict(
         env_file=".env",

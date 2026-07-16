@@ -25,6 +25,7 @@ uv sync
 - `LLM_MODEL`
 - `HH_USER_AGENT`
 - `LINKEDIN_EMAIL_IMAP_*` (for LinkedIn Job Alert mailbox collection)
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (for Telegram delivery commands)
 
 ## Usage
 
@@ -71,6 +72,45 @@ uv run python -m app collect-linkedin-email --limit 5
 ```
 
 Use app-specific passwords where supported instead of normal mailbox passwords.
+
+## Telegram delivery setup (MVP)
+
+1. Open Telegram and message [@BotFather](https://t.me/BotFather).
+2. Run `/newbot`.
+3. Choose bot name and username.
+4. Copy token to `TELEGRAM_BOT_TOKEN`.
+5. Send any message to your new bot.
+6. Get `TELEGRAM_CHAT_ID` with:
+
+```bash
+uv run python -m app telegram-chat-id
+```
+
+7. Start automation service:
+
+```bash
+uv run python -m app run
+```
+
+8. Stop service with:
+
+```text
+Ctrl+C
+```
+
+### Telegram debug commands
+
+These commands are intended only for local development and troubleshooting.
+
+```bash
+uv run python -m app telegram-debug
+uv run python -m app telegram-debug --status PREPARE_REQUESTED
+uv run python -m app telegram-reset 4439900667
+uv run python -m app telegram-reset 4439900667 --status SENT
+uv run python -m app preview-linkedin-email --limit-emails 1 --limit-vacancies 5
+uv run python -m app poll-telegram-actions --once
+uv run python -m app prepare-telegram-applications --limit 5
+```
 
 
 ## Quick start

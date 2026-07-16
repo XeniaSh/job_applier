@@ -104,3 +104,9 @@ class VacancyEvaluation(BaseModel):
     evidence_sufficient: bool = False
     recommended_resume: RecommendedResume
     recommended_cover_template: RecommendedCoverTemplate
+
+
+class CoverLetterResult(BaseModel):
+    language: str
+    cover_letter: str
+    used_resume: str

@@ -30,7 +30,13 @@ class LinkedInProcessedVacancy:
 class LinkedInEmailCollectReport:
     emails_found: int = 0
     vacancies_extracted: int = 0
+    unique_vacancies: int = 0
+    already_seen: int = 0
+    already_delivered: int = 0
     new_vacancies: int = 0
+    prepared_cards: int = 0
+    sent: int = 0
+    send_errors: int = 0
     analyzed: int = 0
     strong_matches: int = 0
     potential_matches: int = 0
@@ -58,16 +64,15 @@ class LinkedInEmailCollector:
         *,
         limit: int = 20,
         dry_run: bool = False,
+        skip_seen: bool = True,
+        analyze_in_dry_run: bool = False,
+        mark_seen: bool = True,
     ) -> LinkedInEmailCollectReport:
         report = LinkedInEmailCollectReport()
-        seen_ids_in_run: set[str] = set()
-
         raw_messages = self._email_client.fetch_linkedin_messages()
         report.emails_found = len(raw_messages)
-
+        unique_vacancies: dict[str, LinkedInEmailVacancy] = {}
         for raw_message in raw_messages:
-            if report.new_vacancies >= limit:
-                break
             try:
                 vacancies = parse_linkedin_email(raw_message)
             except Exception as exc:  # noqa: BLE001
@@ -76,68 +81,24 @@ class LinkedInEmailCollector:
                 continue
 
             report.vacancies_extracted += len(vacancies)
-
             for vacancy in vacancies:
-                if report.new_vacancies >= limit:
-                    break
-                if vacancy.external_id in seen_ids_in_run:
-                    continue
-                seen_ids_in_run.add(vacancy.external_id)
+                if vacancy.external_id not in unique_vacancies:
+                    unique_vacancies[vacancy.external_id] = vacancy
 
-                if self._seen_jobs.is_seen(self.SOURCE, vacancy.external_id):
-                    continue
+        limited_vacancies = list(unique_vacancies.values())[:limit]
+        report.unique_vacancies = len(limited_vacancies)
+        report.new_vacancies = 0
 
-                report.new_vacancies += 1
-                if not should_accept_title(vacancy.title):
-                    report.prefiltered += 1
-                    report.processed.append(
-                        LinkedInProcessedVacancy(
-                            external_id=vacancy.external_id,
-                            title=vacancy.title,
-                            company=vacancy.company,
-                            location=vacancy.location,
-                            url=vacancy.url,
-                            content_completeness=vacancy.content_completeness.value,
-                            evaluation=None,
-                            skipped_by_prefilter=True,
-                        )
-                    )
-                    if not dry_run:
-                        self._seen_jobs.mark_seen(self.SOURCE, vacancy.external_id)
+        for vacancy in limited_vacancies:
+            is_seen = self._seen_jobs.is_seen(self.SOURCE, vacancy.external_id)
+            if is_seen:
+                report.already_seen += 1
+                if skip_seen:
                     continue
+            report.new_vacancies += 1
 
-                if dry_run:
-                    report.processed.append(
-                        LinkedInProcessedVacancy(
-                            external_id=vacancy.external_id,
-                            title=vacancy.title,
-                            company=vacancy.company,
-                            location=vacancy.location,
-                            url=vacancy.url,
-                            content_completeness=vacancy.content_completeness.value,
-                            evaluation=None,
-                        )
-                    )
-                    continue
-
-                try:
-                    evaluation = self._analyzer.analyze(
-                        vacancy.to_analysis_text(),
-                        content_completeness=vacancy.content_completeness.value,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    report.errors += 1
-                    logger.error("LinkedIn vacancy %s failed: %s", vacancy.external_id, exc)
-                    continue
-
-                self._seen_jobs.mark_seen(self.SOURCE, vacancy.external_id)
-                report.analyzed += 1
-                if evaluation.decision == Decision.STRONG_MATCH:
-                    report.strong_matches += 1
-                elif evaluation.decision == Decision.POTENTIAL_MATCH:
-                    report.potential_matches += 1
-                else:
-                    report.ignored += 1
+            if not should_accept_title(vacancy.title):
+                report.prefiltered += 1
                 report.processed.append(
                     LinkedInProcessedVacancy(
                         external_id=vacancy.external_id,
@@ -146,8 +107,57 @@ class LinkedInEmailCollector:
                         location=vacancy.location,
                         url=vacancy.url,
                         content_completeness=vacancy.content_completeness.value,
-                        evaluation=evaluation,
+                        evaluation=None,
+                        skipped_by_prefilter=True,
                     )
                 )
+                if mark_seen and not dry_run:
+                    self._seen_jobs.mark_seen(self.SOURCE, vacancy.external_id)
+                continue
+
+            if dry_run and not analyze_in_dry_run:
+                report.processed.append(
+                    LinkedInProcessedVacancy(
+                        external_id=vacancy.external_id,
+                        title=vacancy.title,
+                        company=vacancy.company,
+                        location=vacancy.location,
+                        url=vacancy.url,
+                        content_completeness=vacancy.content_completeness.value,
+                        evaluation=None,
+                    )
+                )
+                continue
+
+            try:
+                evaluation = self._analyzer.analyze(
+                    vacancy.to_analysis_text(),
+                    content_completeness=vacancy.content_completeness.value,
+                )
+            except Exception as exc:  # noqa: BLE001
+                report.errors += 1
+                logger.error("LinkedIn vacancy %s failed: %s", vacancy.external_id, exc)
+                continue
+
+            if mark_seen and not dry_run:
+                self._seen_jobs.mark_seen(self.SOURCE, vacancy.external_id)
+            report.analyzed += 1
+            if evaluation.decision == Decision.STRONG_MATCH:
+                report.strong_matches += 1
+            elif evaluation.decision == Decision.POTENTIAL_MATCH:
+                report.potential_matches += 1
+            else:
+                report.ignored += 1
+            report.processed.append(
+                LinkedInProcessedVacancy(
+                    external_id=vacancy.external_id,
+                    title=vacancy.title,
+                    company=vacancy.company,
+                    location=vacancy.location,
+                    url=vacancy.url,
+                    content_completeness=vacancy.content_completeness.value,
+                    evaluation=evaluation,
+                )
+            )
 
         return report

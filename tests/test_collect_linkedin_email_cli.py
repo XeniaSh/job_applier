@@ -55,8 +55,8 @@ def test_default_output_excludes_ignore(monkeypatch) -> None:
         def __init__(self, email_client, analyzer, seen_jobs) -> None:
             _ = (email_client, analyzer, seen_jobs)
 
-        def collect_and_analyze(self, *, limit, dry_run):
-            _ = (limit, dry_run)
+        def collect_and_analyze(self, **kwargs):
+            _ = kwargs
             return report
 
     monkeypatch.setattr(cli_module, "LinkedInEmailCollector", FakeCollector)
@@ -88,8 +88,8 @@ def test_include_ignore_prints_ignore(monkeypatch) -> None:
         def __init__(self, email_client, analyzer, seen_jobs) -> None:
             _ = (email_client, analyzer, seen_jobs)
 
-        def collect_and_analyze(self, *, limit, dry_run):
-            _ = (limit, dry_run)
+        def collect_and_analyze(self, **kwargs):
+            _ = kwargs
             return report
 
     monkeypatch.setattr(cli_module, "LinkedInEmailCollector", FakeCollector)
@@ -128,9 +128,11 @@ def test_dry_run_prints_metadata_only(monkeypatch) -> None:
         def __init__(self, email_client, analyzer, seen_jobs) -> None:
             _ = (email_client, analyzer, seen_jobs)
 
-        def collect_and_analyze(self, *, limit, dry_run):
-            assert dry_run is True
-            _ = limit
+        def collect_and_analyze(self, **kwargs):
+            assert kwargs["dry_run"] is True
+            assert kwargs["skip_seen"] is True
+            assert kwargs["mark_seen"] is True
+            assert kwargs["analyze_in_dry_run"] is False
             return report
 
     monkeypatch.setattr(cli_module, "LinkedInEmailCollector", FakeCollector)
@@ -149,8 +151,8 @@ def test_mailbox_password_never_logged(monkeypatch) -> None:
         def __init__(self, email_client, analyzer, seen_jobs) -> None:
             _ = (email_client, analyzer, seen_jobs)
 
-        def collect_and_analyze(self, *, limit, dry_run):
-            _ = (limit, dry_run)
+        def collect_and_analyze(self, **kwargs):
+            _ = kwargs
             raise EmailAuthenticationError("invalid credentials app-password")
 
     monkeypatch.setattr(cli_module, "LinkedInEmailCollector", FakeCollector)
