@@ -116,6 +116,10 @@ def test_prepare_processed_oldest_first_and_success_updates_status(monkeypatch) 
         def mark_history_status(self, **kwargs):
             _ = kwargs
 
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, chat_id
+            return ("123", 200 + int(external_id))
+
         def get_resume_cache(self, resume_name):
             _ = resume_name
             return None
@@ -127,27 +131,16 @@ def test_prepare_processed_oldest_first_and_success_updates_status(monkeypatch) 
     class FakeClient:
         bot_token: str
         chat_id: str
+        edit_calls: int = 0
         text_calls: int = 0
-        doc_upload_calls: int = 0
-        doc_cached_calls: int = 0
 
-        def send_prepared_application(self, **kwargs):
+        def edit_message_text(self, **kwargs):
             _ = kwargs
-            self.text_calls += 1
+            self.edit_calls += 1
 
         def send_text_message(self, text: str):
             _ = text
             self.text_calls += 1
-
-        def send_document(self, **kwargs):
-            _ = kwargs
-            self.doc_upload_calls += 1
-            return type("DocRef", (), {"chat_id": "123", "message_id": 100, "file_id": "FILE_ID_1", "file_unique_id": "UNIQ_1"})()
-
-        def send_document_by_file_id(self, **kwargs):
-            _ = kwargs
-            self.doc_cached_calls += 1
-            return type("DocRef", (), {"chat_id": "123", "message_id": 101, "file_id": "FILE_ID_1", "file_unique_id": "UNIQ_1"})()
 
     class FakeResumeCacheService:
         def __init__(self, **kwargs):
@@ -181,13 +174,13 @@ def test_prepare_processed_oldest_first_and_success_updates_status(monkeypatch) 
     assert order == ["2", "5"]
     assert len(storage.statuses) == 2
     assert all(item["status"] == STATUS_PREPARED for item in storage.statuses)
-    assert fake_client.doc_upload_calls == 0
-    assert fake_client.doc_cached_calls == 1
+    assert fake_client.edit_calls == 2
+    assert fake_client.text_calls == 0
     assert "Сгенерировано пакетов: 2" in result.output
     assert "Подготовлено успешно: 2" in result.output
     assert "Отправлено в Telegram: 2" in result.output
-    assert "PDF отправлено из кэша: 1" in result.output
-    assert "PDF загружено заново: 1" in result.output
+    assert "PDF отправлено из кэша: 0" in result.output
+    assert "PDF загружено заново: 0" in result.output
 
 
 def test_prepare_failure_sets_preparation_failed(monkeypatch) -> None:
@@ -221,13 +214,17 @@ def test_prepare_failure_sets_preparation_failed(monkeypatch) -> None:
         def mark_history_status(self, **kwargs):
             _ = kwargs
 
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 101)
+
     @dataclass
     class FakeClient:
         bot_token: str
         chat_id: str
 
-        def send_text_message(self, text: str):
-            _ = text
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
 
     storage = FakeStorage()
     monkeypatch.setattr(cli_module, "PreparationService", FakeService)
@@ -268,41 +265,33 @@ def test_prepare_missing_pdf_does_not_fail(monkeypatch) -> None:
         def mark_history_status(self, **kwargs):
             _ = kwargs
 
-        def get_resume_cache(self, resume_name):
-            _ = resume_name
-            return None
-
-        def save_resume_cache(self, **kwargs):
-            _ = kwargs
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 108)
 
     @dataclass
     class FakeClient:
         bot_token: str
         chat_id: str
-        doc_called: bool = False
+        edit_called: bool = False
 
-        def send_prepared_application(self, **kwargs):
+        def edit_message_text(self, **kwargs):
             _ = kwargs
-
-        def send_text_message(self, text: str):
-            _ = text
-
-        def send_document(self, **kwargs):
-            self.doc_called = True
+            self.edit_called = True
 
     client = FakeClient("token", "123")
     monkeypatch.setattr(cli_module, "PreparationService", FakeService)
     monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: FakeStorage())
     monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: client)
-    monkeypatch.setattr(cli_module, "ResumeCacheService", lambda **kwargs: type("S", (), {"get_or_upload": lambda self, **k: type("R", (), {"missing": True, "cache_hit": False, "uploaded": False, "telegram_file_id": None})()})())
+    monkeypatch.setattr(cli_module, "ResumeCacheService", lambda **kwargs: object())
 
     result = CliRunner().invoke(cli_module.app, ["prepare-telegram-applications"])
     assert result.exit_code == 0
-    assert "PDF отсутствует: 1" in result.output
+    assert "PDF отсутствует: 0" in result.output
     assert "Ошибок PDF: 0" in result.output
     assert "Сгенерировано пакетов: 1" in result.output
     assert "Подготовлено успешно: 1" in result.output
-    assert client.doc_called is False
+    assert client.edit_called is True
 
 
 def test_dry_run_generated_never_zero_after_prepared(monkeypatch) -> None:
@@ -376,28 +365,19 @@ def test_prepare_keeps_prepared_status_when_pdf_fails(monkeypatch) -> None:
         def mark_history_status(self, **kwargs):
             _ = kwargs
 
-        def get_resume_cache(self, resume_name):
-            _ = resume_name
-            return None
-
-        def save_resume_cache(self, **kwargs):
-            _ = kwargs
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 109)
 
     @dataclass
     class FakeClient:
         bot_token: str
         chat_id: str
-        text_sent: int = 0
+        edit_sent: int = 0
 
-        def send_prepared_application(self, **kwargs):
+        def edit_message_text(self, **kwargs):
             _ = kwargs
-            self.text_sent += 1
-
-        def send_text_message(self, text: str):
-            _ = text
-
-        def send_document(self, **kwargs):
-            raise cli_module.TelegramRequestError("upload failed")
+            self.edit_sent += 1
 
     storage = FakeStorage()
     client = FakeClient("token", "123")
@@ -408,9 +388,9 @@ def test_prepare_keeps_prepared_status_when_pdf_fails(monkeypatch) -> None:
 
     result = CliRunner().invoke(cli_module.app, ["prepare-telegram-applications"])
     assert result.exit_code == 0
-    assert client.text_sent == 1
+    assert client.edit_sent == 1
     assert any(item["status"] == STATUS_PREPARED for item in storage.statuses)
-    assert "Ошибок PDF: 1" in result.output
+    assert "Ошибок PDF: 0" in result.output
     assert "telegram-token" not in result.output
     assert "%PDF" not in result.output
 

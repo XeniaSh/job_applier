@@ -67,6 +67,40 @@ def format_prepared_application_html(
     return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
 
 
+def format_preparing_application_html(*, title: str, company: str | None) -> str:
+    lines = ["⏳ Preparing application...", "", _escape(title)]
+    if company:
+        lines.append(_escape(company))
+    rendered = "\n".join(lines).strip()
+    if len(rendered) <= MAX_MESSAGE_LEN:
+        return rendered
+    return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
+
+
+def format_application_ready_card_html(*, title: str, company: str | None, recommended_resume: str) -> str:
+    lines = ["✅ Application Ready", "", _escape(title)]
+    if company:
+        lines.append(_escape(company))
+    lines.append("")
+    lines.append("Resume:")
+    lines.append(_escape(_human_resume_name(recommended_resume)))
+    rendered = "\n".join(lines).strip()
+    if len(rendered) <= MAX_MESSAGE_LEN:
+        return rendered
+    return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
+
+
+def format_archived_vacancy_html(*, applied: bool, title: str, company: str | None) -> str:
+    header = "✅ Applied" if applied else "❌ Skipped"
+    lines = [header, "", _escape(title)]
+    if company:
+        lines.append(_escape(company))
+    rendered = "\n".join(lines).strip()
+    if len(rendered) <= MAX_MESSAGE_LEN:
+        return rendered
+    return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
+
+
 def _format_percentage(value: float | None) -> str:
     if value is None:
         return "n/a"

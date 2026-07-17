@@ -3,6 +3,7 @@ from datetime import timezone
 from dataclasses import dataclass
 import logging
 import os
+import re
 import time
 
 import typer
@@ -28,6 +29,7 @@ from app.application.preparation_service import (
     ApplicationPreparationError,
     PreparedApplication,
     PreparationService,
+    resolve_resume_path,
 )
 from app.application.resume_cache_service import KNOWN_RESUME_NAMES, ResumeCacheService
 from app.config import Settings
@@ -49,14 +51,19 @@ from app.storage.telegram_delivery import (
 from app.telegram.client import (
     TelegramClient,
     TelegramRequestError,
+    build_archived_buttons,
+    build_loading_buttons,
+    build_loading_text,
+    build_prepared_application_buttons,
+    build_ready_text,
     map_source_to_code,
     parse_callback_data,
     validate_linkedin_job_url,
 )
+from app.telegram.formatter import format_archived_vacancy_html
 from app.telegram.models import (
     ApplicationHistoryRecord,
     TelegramDeliveryRecord,
-    TelegramInlineButton,
     TelegramResumeCacheRecord,
     TelegramVacancyCard,
 )
@@ -592,6 +599,11 @@ def run_pipeline(
     if settings.greenhouse_boards:
         collectors.append(GreenhouseCollector(boards=settings.greenhouse_boards))
     telegram_client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    callback_resume_cache = ResumeCacheService(
+        resumes_dir=settings.resumes_dir,
+        storage=deliveries,
+        telegram_client=telegram_client,
+    )
     preparation_service = PreparationService(
         analyzer=analyzer,
         llm_client=llm_client,
@@ -657,6 +669,8 @@ def run_pipeline(
                     configured_chat_id=str(settings.telegram_chat_id),
                     offset=offset,
                     timeout=poll_interval,
+                    resumes_dir=settings.resumes_dir,
+                    resume_cache_service=callback_resume_cache,
                 )
                 if prepare_requests > 0:
                     _run_log("Prepare request received")
@@ -715,6 +729,7 @@ def poll_telegram_actions(
                     configured_chat_id=str(settings.telegram_chat_id),
                     offset=offset,
                     timeout=timeout,
+                    resumes_dir=settings.resumes_dir,
                 )
             except TelegramRequestError as exc:
                 typer.secho(f"Ошибка Telegram polling: {exc}", err=True, fg=typer.colors.RED)
@@ -1336,6 +1351,8 @@ def _process_callback_update(
     client: TelegramClient,
     storage: TelegramDeliveryStorage,
     configured_chat_id: str,
+    resumes_dir: Path | None = None,
+    resume_cache_service: ResumeCacheService | None = None,
 ) -> None:
     callback = update.get("callback_query")
     if not isinstance(callback, dict):
@@ -1363,8 +1380,26 @@ def _process_callback_update(
             client.answer_callback_query(callback_id, text="Некорректное действие")
         return
 
+    message_id = int(message.get("message_id", 0))
+    title, company, url = _resolve_card_context(
+        storage=storage,
+        message=message,
+        source=source,
+        external_id=external_id,
+    )
+
+    get_delivery = getattr(storage, "get_delivery", None)
+    current_status = None
+    if callable(get_delivery):
+        current = get_delivery(source, external_id)
+        current_status = current.status if current is not None else None
+
     try:
         if action == "skip":
+            if current_status == STATUS_SKIPPED:
+                if callback_id:
+                    client.answer_callback_query(callback_id, text="Вакансия уже пропущена")
+                return
             storage.update_delivery_and_history(
                 source=source,
                 external_id=external_id,
@@ -1375,7 +1410,20 @@ def _process_callback_update(
             )
             if callback_id:
                 client.answer_callback_query(callback_id, text="Вакансия пропущена")
+            _edit_archived_card(
+                client=client,
+                chat_id=configured_chat_id,
+                message_id=message_id,
+                url=url,
+                title=title,
+                company=company,
+                applied=False,
+            )
         elif action == "applied":
+            if current_status == STATUS_APPLIED:
+                if callback_id:
+                    client.answer_callback_query(callback_id, text="Отклик уже отмечен")
+                return
             storage.update_delivery_and_history(
                 source=source,
                 external_id=external_id,
@@ -1386,7 +1434,20 @@ def _process_callback_update(
             )
             if callback_id:
                 client.answer_callback_query(callback_id, text="Отклик отмечен как отправленный")
-        else:
+            _edit_archived_card(
+                client=client,
+                chat_id=configured_chat_id,
+                message_id=message_id,
+                url=url,
+                title=title,
+                company=company,
+                applied=True,
+            )
+        elif action == "prepare":
+            if current_status == STATUS_PREPARE_REQUESTED:
+                if callback_id:
+                    client.answer_callback_query(callback_id, text="Уже в обработке")
+                return
             storage.update_delivery_and_history(
                 source=source,
                 external_id=external_id,
@@ -1400,22 +1461,146 @@ def _process_callback_update(
                     callback_id,
                     text="Добавлено в очередь на подготовку отклика",
                 )
-    except (ValueError, KeyError):
+            if message_id > 0 and url:
+                client.edit_message_text(
+                    chat_id=configured_chat_id,
+                    message_id=message_id,
+                    text=build_loading_text(title=title, company=company),
+                    buttons=build_loading_buttons(url),
+                )
+        elif action == "copy":
+            get_preparation = getattr(storage, "get_preparation", None)
+            prep = get_preparation(source, external_id) if callable(get_preparation) else None
+            if prep is None or prep.status != STATUS_PREPARED or not prep.cover_letter:
+                if callback_id:
+                    client.answer_callback_query(callback_id, text="Отклик еще не готов")
+                return
+            client.send_text_message(prep.cover_letter)
+            if callback_id:
+                client.answer_callback_query(callback_id, text="Cover letter sent")
+        else:  # action == "resume"
+            get_preparation = getattr(storage, "get_preparation", None)
+            prep = get_preparation(source, external_id) if callable(get_preparation) else None
+            if prep is None or prep.status != STATUS_PREPARED or not prep.resume_name:
+                if callback_id:
+                    client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                return
+            cache = resume_cache_service
+            if cache is None:
+                if resumes_dir is None:
+                    if callback_id:
+                        client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                    return
+                cache = ResumeCacheService(
+                    resumes_dir=resumes_dir,
+                    storage=storage,
+                    telegram_client=client,
+                )
+            resume_result = cache.get_or_upload(
+                resume_name=prep.resume_name,
+                chat_id=configured_chat_id,
+            )
+            if resume_result.missing or resume_result.telegram_file_id is None:
+                if callback_id:
+                    client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                return
+            client.send_document_by_file_id(
+                chat_id=configured_chat_id,
+                file_id=resume_result.telegram_file_id,
+                caption=None,
+            )
+            if callback_id:
+                client.answer_callback_query(callback_id, text="Resume sent")
+    except (ValueError, KeyError, TelegramRequestError, OSError):
         if callback_id:
             client.answer_callback_query(callback_id, text="Не удалось обновить статус")
         return
 
-    message_id = int(message.get("message_id", 0))
+    if action in {"copy", "resume", "prepare"}:
+        return
+
+
+def _edit_archived_card(
+    *,
+    client: TelegramClient,
+    chat_id: str,
+    message_id: int,
+    url: str | None,
+    title: str,
+    company: str | None,
+    applied: bool,
+) -> None:
     if message_id <= 0:
         return
-    url_button = _extract_url_button(message)
-    if url_button is None:
-        return
-    client.edit_message_reply_markup(
-        chat_id=configured_chat_id,
+    buttons = build_archived_buttons(url) if url else []
+    client.edit_message_text(
+        chat_id=chat_id,
         message_id=message_id,
-        buttons=[[TelegramInlineButton(text="🔗 Open LinkedIn", url=url_button)]],
+        text=format_archived_vacancy_html(applied=applied, title=title, company=company),
+        buttons=buttons,
     )
+
+
+def _resolve_card_context(
+    *,
+    storage: TelegramDeliveryStorage,
+    message: dict,
+    source: str,
+    external_id: str,
+) -> tuple[str, str | None, str | None]:
+    title: str | None = None
+    company: str | None = None
+    url: str | None = None
+
+    get_history = getattr(storage, "get_history_title_company_url", None)
+    if callable(get_history):
+        title, company, url = get_history(source, external_id)
+
+    get_preparation = getattr(storage, "get_preparation", None)
+    prep = get_preparation(source, external_id) if callable(get_preparation) else None
+    if prep is not None:
+        prep_title = getattr(prep, "vacancy_title", None)
+        prep_company = getattr(prep, "vacancy_company", None)
+        prep_url = getattr(prep, "vacancy_url", None)
+        if not title and prep_title:
+            title = prep_title
+        if not company and prep_company:
+            company = prep_company
+        if not url and prep_url:
+            url = prep_url
+
+    if not url:
+        url = _extract_url_button(message)
+
+    if not title:
+        parsed_title, parsed_company = _extract_title_company_from_message(message)
+        title = parsed_title or f"Vacancy {external_id}"
+        if not company:
+            company = parsed_company
+    return title, company, url
+
+
+def _extract_title_company_from_message(message: dict) -> tuple[str | None, str | None]:
+    raw_text = message.get("text")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return None, None
+    plain = re.sub(r"<[^>]+>", "", raw_text)
+    lines = [line.strip() for line in plain.splitlines() if line.strip()]
+    if not lines:
+        return None, None
+    filtered = [
+        line
+        for line in lines
+        if line
+        and not line.startswith(("✅", "❌", "⏳"))
+        and "Preparing application" not in line
+        and "Application Ready" not in line
+    ]
+    if not filtered:
+        return None, None
+    title = filtered[0]
+    company = filtered[1] if len(filtered) > 1 else None
+    return title, company
 
 
 def _extract_url_button(message: dict) -> str | None:
@@ -1665,6 +1850,8 @@ def _poll_telegram_actions_once(
     configured_chat_id: str,
     offset: int | None,
     timeout: int,
+    resumes_dir: Path | None = None,
+    resume_cache_service: ResumeCacheService | None = None,
 ) -> tuple[int | None, int]:
     updates = client.get_updates(offset=offset, timeout=timeout)
     next_offset = offset
@@ -1684,6 +1871,8 @@ def _poll_telegram_actions_once(
             client=client,
             storage=storage,
             configured_chat_id=configured_chat_id,
+            resumes_dir=resumes_dir,
+            resume_cache_service=resume_cache_service,
         )
         update_id = int(update.get("update_id", 0))
         next_offset = max(next_offset or 0, update_id + 1)
@@ -1719,13 +1908,7 @@ def _prepare_requested_applications(
     pdf_missing = 0
     pdf_errors = 0
 
-    cache_service = resume_cache_service
-    if not dry_run and cache_service is None and telegram_client is not None:
-        cache_service = ResumeCacheService(
-            resumes_dir=settings.resumes_dir,
-            storage=storage,
-            telegram_client=telegram_client,
-        )
+    _ = resume_cache_service
 
     for source, external_id in queue:
         try:
@@ -1752,6 +1935,10 @@ def _prepare_requested_applications(
                     resume_name=None,
                     language=None,
                     error_message=str(exc),
+                    cover_letter=None,
+                    vacancy_title=None,
+                    vacancy_company=None,
+                    vacancy_url=None,
                 )
                 storage.mark_history_status(
                     source=source,
@@ -1759,12 +1946,6 @@ def _prepare_requested_applications(
                     status=STATUS_PREPARATION_FAILED,
                     timestamp_field=None,
                 )
-                try:
-                    telegram_client.send_text_message(  # type: ignore[union-attr]
-                        f"❌ Не удалось подготовить отклик: {str(exc)}"
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
             elif print_dry_run_items:
                 typer.echo(f"FAILED {source}:{external_id} {exc}")
             continue
@@ -1778,17 +1959,53 @@ def _prepare_requested_applications(
                 _print_prepared_dry_run(prepared)
             continue
 
-        try:
-            telegram_client.send_prepared_application(  # type: ignore[union-attr]
-                source=prepared.source,
-                external_id=prepared.external_id,
-                title=prepared.title,
-                company=prepared.company,
+        message_ref = storage.get_message_ref(
+            source=source,
+            external_id=external_id,
+            chat_id=settings.telegram_chat_id,
+        )
+        if message_ref is None:
+            errors_count += 1
+            storage.update_status(
+                source=source,
+                external_id=external_id,
+                chat_id=settings.telegram_chat_id,
+                status=STATUS_PREPARATION_FAILED,
+            )
+            storage.save_preparation(
+                source=source,
+                external_id=external_id,
+                status=STATUS_PREPARATION_FAILED,
+                resume_name=prepared.recommended_resume,
                 language=prepared.language,
-                recommended_resume=prepared.recommended_resume,
+                error_message="Original Telegram card is missing.",
                 cover_letter=prepared.cover_letter,
-                warnings=prepared.warnings,
-                url=prepared.url,
+                vacancy_title=prepared.title,
+                vacancy_company=prepared.company,
+                vacancy_url=prepared.url,
+            )
+            storage.mark_history_status(
+                source=source,
+                external_id=external_id,
+                status=STATUS_PREPARATION_FAILED,
+                timestamp_field=None,
+            )
+            continue
+
+        try:
+            telegram_client.edit_message_text(  # type: ignore[union-attr]
+                chat_id=message_ref[0],
+                message_id=message_ref[1],
+                text=build_ready_text(
+                    title=prepared.title,
+                    company=prepared.company,
+                    recommended_resume=prepared.recommended_resume,
+                ),
+                buttons=build_prepared_application_buttons(
+                    source=prepared.source,
+                    external_id=prepared.external_id,
+                    url=prepared.url,
+                ),
             )
         except (TelegramRequestError, ValueError) as exc:
             errors_count += 1
@@ -1805,6 +2022,10 @@ def _prepare_requested_applications(
                 resume_name=prepared.recommended_resume,
                 language=prepared.language,
                 error_message=str(exc),
+                cover_letter=prepared.cover_letter,
+                vacancy_title=prepared.title,
+                vacancy_company=prepared.company,
+                vacancy_url=prepared.url,
             )
             storage.mark_history_status(
                 source=source,
@@ -1829,6 +2050,10 @@ def _prepare_requested_applications(
             resume_name=prepared.recommended_resume,
             language=prepared.language,
             error_message=None,
+            cover_letter=prepared.cover_letter,
+            vacancy_title=prepared.title,
+            vacancy_company=prepared.company,
+            vacancy_url=prepared.url,
         )
         storage.mark_history_status(
             source=source,
@@ -1836,37 +2061,6 @@ def _prepare_requested_applications(
             status=STATUS_PREPARED,
             timestamp_field="prepared_at",
         )
-        try:
-            telegram_client.send_text_message("✅ Отклик подготовлен")  # type: ignore[union-attr]
-        except Exception:  # noqa: BLE001
-            pass
-
-        if cache_service is None:
-            pdf_errors += 1
-            logger.warning("Resume cache service is unavailable for %s:%s", source, external_id)
-            continue
-
-        try:
-            resume_result = cache_service.get_or_upload(
-                resume_name=prepared.recommended_resume,
-                chat_id=settings.telegram_chat_id,
-            )
-            if resume_result.missing or resume_result.telegram_file_id is None:
-                pdf_missing += 1
-                continue
-
-            if resume_result.cache_hit:
-                telegram_client.send_document_by_file_id(  # type: ignore[union-attr]
-                    chat_id=settings.telegram_chat_id,
-                    file_id=resume_result.telegram_file_id,
-                    caption=f"Резюме для отклика: {prepared.recommended_resume}",
-                )
-                pdf_cached += 1
-            elif resume_result.uploaded:
-                pdf_uploaded += 1
-        except (TelegramRequestError, ValueError, OSError) as exc:
-            pdf_errors += 1
-            logger.warning("Resume delivery warning for %s:%s: %s", source, external_id, exc)
 
     return PreparationRunResult(
         queue_items=queue_items,

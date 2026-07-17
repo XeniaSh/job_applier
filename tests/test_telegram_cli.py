@@ -619,8 +619,8 @@ def test_poll_callbacks_skip_prepare_unknown_and_wrong_chat() -> None:
         def answer_callback_query(self, callback_query_id, text=None):
             calls["answers"].append((callback_query_id, text))
 
-        def edit_message_reply_markup(self, chat_id, message_id, buttons):
-            calls["edits"].append((chat_id, message_id, buttons))
+        def edit_message_text(self, **kwargs):
+            calls["edits"].append(kwargs)
 
     client = FakeClient()
     skip_update = {
@@ -720,7 +720,10 @@ def test_poll_callbacks_skip_prepare_unknown_and_wrong_chat() -> None:
     assert ("cb3", "Некорректное действие") in calls["answers"]
     assert ("cb4", "Действие недоступно для этого чата") in calls["answers"]
     assert len(calls["edits"]) == 3
-    for _, _, buttons in calls["edits"]:
+    assert any("❌ Skipped" in item["text"] for item in calls["edits"])
+    assert any("✅ Applied" in item["text"] for item in calls["edits"])
+    for item in calls["edits"]:
+        buttons = item["buttons"]
         assert len(buttons) == 1
         assert len(buttons[0]) == 1
         assert buttons[0][0].text == "🔗 Open LinkedIn"
@@ -769,8 +772,8 @@ def test_poll_telegram_actions_persists_offset_and_repeated_updates(monkeypatch)
         def answer_callback_query(self, callback_query_id, text=None):
             _ = callback_query_id, text
 
-        def edit_message_reply_markup(self, chat_id, message_id, buttons):
-            _ = chat_id, message_id, buttons
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
 
     monkeypatch.setattr(cli_module, "TelegramClient", FakeClient)
 
@@ -1022,3 +1025,189 @@ def test_telegram_cache_resumes_warmup_and_force(monkeypatch, tmp_path) -> None:
     forced = CliRunner().invoke(cli_module.app, ["telegram-cache-resumes", "--resume", "java-backend", "--force"])
     assert forced.exit_code == 0
     assert "java-backend: uploaded" in forced.output
+
+
+def test_prepare_callback_sets_loading_state(monkeypatch) -> None:
+    calls = {"updates": [], "answers": []}
+
+    class FakeStorage:
+        def update_delivery_and_history(self, **kwargs):
+            calls["updates"].append(kwargs)
+
+        def get_delivery(self, source, external_id):
+            _ = source, external_id
+            return type("D", (), {"status": "SENT"})()
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Backend Role", "ACME", "https://www.linkedin.com/jobs/view/1/")
+
+    class FakeClient:
+        def answer_callback_query(self, callback_query_id, text=None):
+            calls["answers"].append((callback_query_id, text))
+
+        def edit_message_text(self, **kwargs):
+            calls["edit"] = kwargs
+
+    update = {
+        "callback_query": {
+            "id": "cb1",
+            "data": "prepare:li:1",
+            "message": {
+                "chat": {"id": "123"},
+                "message_id": 10,
+                "text": "old",
+                "reply_markup": {"inline_keyboard": [[{"text": "open", "url": "https://www.linkedin.com/jobs/view/1/"}]]},
+            },
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=FakeClient(),
+        storage=FakeStorage(),
+        configured_chat_id="123",
+    )
+    assert calls["updates"][0]["delivery_status"] == "PREPARE_REQUESTED"
+    assert "⏳ Preparing application..." in calls["edit"]["text"]
+    assert calls["edit"]["buttons"][0][0].text == "🔗 Open LinkedIn"
+
+
+def test_copy_cover_letter_sends_only_text(monkeypatch) -> None:
+    calls = {"texts": [], "answers": [], "edited": 0}
+
+    class FakeStorage:
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type("P", (), {"status": "PREPARED", "cover_letter": "ONLY LETTER", "resume_name": "java-backend"})()
+
+    class FakeClient:
+        def answer_callback_query(self, callback_query_id, text=None):
+            calls["answers"].append((callback_query_id, text))
+
+        def send_text_message(self, text):
+            calls["texts"].append(text)
+
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+            calls["edited"] += 1
+
+    update = {
+        "callback_query": {
+            "id": "cb2",
+            "data": "copy:li:1",
+            "message": {"chat": {"id": "123"}, "message_id": 11},
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=FakeClient(),
+        storage=FakeStorage(),
+        configured_chat_id="123",
+    )
+    assert calls["texts"] == ["ONLY LETTER"]
+    assert calls["edited"] == 0
+
+
+def test_resume_button_sends_pdf_on_demand_and_missing_notifies(monkeypatch) -> None:
+    sent = {"count": 0, "answers": []}
+
+    class FakeClient:
+        def answer_callback_query(self, callback_query_id, text=None):
+            sent["answers"].append((callback_query_id, text))
+
+        def send_document_by_file_id(self, **kwargs):
+            _ = kwargs
+            sent["count"] += 1
+
+    class ReadyStorage:
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type("P", (), {"status": "PREPARED", "cover_letter": "x", "resume_name": "java-backend"})()
+
+    class MissingStorage:
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type("P", (), {"status": "PREPARED", "cover_letter": "x", "resume_name": "java-backend"})()
+
+    class CacheOk:
+        def get_or_upload(self, *, resume_name, chat_id, force_upload=False):
+            _ = resume_name, chat_id, force_upload
+            return type("R", (), {"missing": False, "telegram_file_id": "FILE123"})()
+
+    class CacheMissing:
+        def get_or_upload(self, *, resume_name, chat_id, force_upload=False):
+            _ = resume_name, chat_id, force_upload
+            return type("R", (), {"missing": True, "telegram_file_id": None})()
+
+    update = {
+        "callback_query": {
+            "id": "cb3",
+            "data": "resume:li:1",
+            "message": {"chat": {"id": "123"}, "message_id": 12},
+        }
+    }
+    client = FakeClient()
+    cli_module._process_callback_update(
+        update=update,
+        client=client,
+        storage=ReadyStorage(),
+        configured_chat_id="123",
+        resume_cache_service=CacheOk(),
+    )
+    assert sent["count"] == 1
+
+    cli_module._process_callback_update(
+        update=update,
+        client=client,
+        storage=MissingStorage(),
+        configured_chat_id="123",
+        resume_cache_service=CacheMissing(),
+    )
+    assert any(text == "Resume PDF not found." for _, text in sent["answers"])
+
+
+def test_prepare_callback_idempotency(monkeypatch) -> None:
+    calls = {"updates": 0, "answers": []}
+
+    class FakeStorage:
+        def __init__(self):
+            self.status = "SENT"
+
+        def get_delivery(self, source, external_id):
+            _ = source, external_id
+            return type("D", (), {"status": self.status})()
+
+        def update_delivery_and_history(self, **kwargs):
+            _ = kwargs
+            calls["updates"] += 1
+            self.status = "PREPARE_REQUESTED"
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Role", "Company", "https://www.linkedin.com/jobs/view/1/")
+
+    class FakeClient:
+        def answer_callback_query(self, callback_query_id, text=None):
+            calls["answers"].append((callback_query_id, text))
+
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    update = {
+        "callback_query": {
+            "id": "cb10",
+            "data": "prepare:li:1",
+            "message": {
+                "chat": {"id": "123"},
+                "message_id": 10,
+                "reply_markup": {"inline_keyboard": [[{"text": "open", "url": "https://www.linkedin.com/jobs/view/1/"}]]},
+            },
+        }
+    }
+    storage = FakeStorage()
+    client = FakeClient()
+    cli_module._process_callback_update(update=update, client=client, storage=storage, configured_chat_id="123")
+    cli_module._process_callback_update(update=update, client=client, storage=storage, configured_chat_id="123")
+
+    assert calls["updates"] == 1
+    assert any(text == "Уже в обработке" for _, text in calls["answers"])

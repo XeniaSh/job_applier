@@ -187,8 +187,8 @@ def test_callbacks_update_delivery_and_history(monkeypatch, tmp_path: Path) -> N
         def answer_callback_query(self, callback_query_id, text=None):
             calls["answers"].append((callback_query_id, text))
 
-        def edit_message_reply_markup(self, chat_id, message_id, buttons):
-            _ = chat_id, message_id, buttons
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
 
     update_applied = {
         "callback_query": {

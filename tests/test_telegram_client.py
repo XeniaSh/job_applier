@@ -78,8 +78,8 @@ def test_send_message_payload(monkeypatch) -> None:
     payload = request_kwargs["json"]
     assert payload["parse_mode"] == "HTML"
     assert payload["chat_id"] == "123"
-    assert payload["reply_markup"]["inline_keyboard"][1][0]["callback_data"] == "skip:li:4439013108"
-    assert payload["reply_markup"]["inline_keyboard"][1][1]["callback_data"] == "prepare:li:4439013108"
+    assert payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "prepare:li:4439013108"
+    assert payload["reply_markup"]["inline_keyboard"][0][1]["callback_data"] == "skip:li:4439013108"
 
 
 def test_url_validation_and_callback_limit() -> None:
@@ -96,6 +96,8 @@ def test_url_validation_and_callback_limit() -> None:
     assert map_code_to_source("gh") == "greenhouse"
     assert parse_callback_data("skip:li:4439013108") == ("skip", "linkedin-email", "4439013108")
     assert parse_callback_data("applied:li:4439013108") == ("applied", "linkedin-email", "4439013108")
+    assert parse_callback_data("copy:li:4439013108") == ("copy", "linkedin-email", "4439013108")
+    assert parse_callback_data("resume:li:4439013108") == ("resume", "linkedin-email", "4439013108")
     with pytest.raises(ValueError):
         parse_callback_data("bad:data")
 
@@ -104,9 +106,11 @@ def test_url_validation_and_callback_limit() -> None:
         "4439013108",
         "https://www.linkedin.com/jobs/view/4439013108/",
     )
-    assert prepared_buttons[0][0].callback_data == "applied:li:4439013108"
-    assert prepared_buttons[0][1].callback_data == "skip:li:4439013108"
-    assert prepared_buttons[1][0].url == "https://www.linkedin.com/jobs/view/4439013108/"
+    assert prepared_buttons[0][0].callback_data == "copy:li:4439013108"
+    assert prepared_buttons[1][0].callback_data == "resume:li:4439013108"
+    assert prepared_buttons[2][0].url == "https://www.linkedin.com/jobs/view/4439013108/"
+    assert prepared_buttons[3][0].callback_data == "applied:li:4439013108"
+    assert prepared_buttons[3][1].callback_data == "skip:li:4439013108"
 
 
 def test_send_prepared_application_payload_contains_buttons(monkeypatch) -> None:
@@ -140,9 +144,11 @@ def test_send_prepared_application_payload_contains_buttons(monkeypatch) -> None
     _, request_kwargs = calls[0]
     payload = request_kwargs["json"]
     keyboard = payload["reply_markup"]["inline_keyboard"]
-    assert keyboard[0][0]["callback_data"] == "applied:li:4439013108"
-    assert keyboard[0][1]["callback_data"] == "skip:li:4439013108"
-    assert keyboard[1][0]["url"] == "https://www.linkedin.com/jobs/view/4439013108/"
+    assert keyboard[0][0]["callback_data"] == "copy:li:4439013108"
+    assert keyboard[1][0]["callback_data"] == "resume:li:4439013108"
+    assert keyboard[2][0]["url"] == "https://www.linkedin.com/jobs/view/4439013108/"
+    assert keyboard[3][0]["callback_data"] == "applied:li:4439013108"
+    assert keyboard[3][1]["callback_data"] == "skip:li:4439013108"
 
 
 def test_telegram_error_does_not_leak_token(monkeypatch) -> None:

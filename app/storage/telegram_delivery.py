@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.storage.seen_jobs import DEFAULT_DB_PATH
-from app.telegram.models import ApplicationHistoryRecord, TelegramDeliveryRecord, TelegramResumeCacheRecord
+from app.telegram.models import (
+    ApplicationHistoryRecord,
+    ApplicationPreparationRecord,
+    TelegramDeliveryRecord,
+    TelegramResumeCacheRecord,
+)
 
 STATUS_SENT = "SENT"
 STATUS_SKIPPED = "SKIPPED"
@@ -548,15 +553,19 @@ class TelegramDeliveryStorage:
         resume_name: str | None,
         language: str | None,
         error_message: str | None,
+        cover_letter: str | None = None,
+        vacancy_title: str | None = None,
+        vacancy_company: str | None = None,
+        vacancy_url: str | None = None,
     ) -> None:
         prepared_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
                 insert or replace into application_preparations (
-                    source, external_id, prepared_at, resume_name, language, status, error_message
+                    source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url
                 )
-                values (?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source,
@@ -566,9 +575,58 @@ class TelegramDeliveryStorage:
                     language,
                     status,
                     error_message,
+                    cover_letter,
+                    vacancy_title,
+                    vacancy_company,
+                    vacancy_url,
                 ),
             )
             conn.commit()
+
+    def get_preparation(self, source: str, external_id: str) -> ApplicationPreparationRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url
+                from application_preparations
+                where source = ? and external_id = ?
+                """,
+                (source, external_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return ApplicationPreparationRecord(
+            source=str(row[0]),
+            external_id=str(row[1]),
+            prepared_at=str(row[2]) if row[2] is not None else None,
+            resume_name=str(row[3]) if row[3] is not None else None,
+            language=str(row[4]) if row[4] is not None else None,
+            status=str(row[5]),
+            error_message=str(row[6]) if row[6] is not None else None,
+            cover_letter=str(row[7]) if row[7] is not None else None,
+            vacancy_title=str(row[8]) if row[8] is not None else None,
+            vacancy_company=str(row[9]) if row[9] is not None else None,
+            vacancy_url=str(row[10]) if row[10] is not None else None,
+        )
+
+    def get_history_title_company_url(self, source: str, external_id: str) -> tuple[str | None, str | None, str | None]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select title, company, url
+                from application_history
+                where source = ? and external_id = ?
+                limit 1
+                """,
+                (source, external_id),
+            ).fetchone()
+        if row is None:
+            return None, None, None
+        return (
+            str(row[0]) if row[0] is not None else None,
+            str(row[1]) if row[1] is not None else None,
+            str(row[2]) if row[2] is not None else None,
+        )
 
     def get_message_ref(self, *, source: str, external_id: str, chat_id: str) -> tuple[str, int] | None:
         with self._connect() as conn:
@@ -660,10 +718,15 @@ class TelegramDeliveryStorage:
                     language text,
                     status text not null,
                     error_message text,
+                    cover_letter text,
+                    vacancy_title text,
+                    vacancy_company text,
+                    vacancy_url text,
                     primary key (source, external_id)
                 )
                 """
             )
+            self._ensure_preparation_columns(conn)
             conn.execute(
                 """
                 create table if not exists telegram_resume_cache (
@@ -699,3 +762,17 @@ class TelegramDeliveryStorage:
                 """
             )
             conn.commit()
+
+    def _ensure_preparation_columns(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("pragma table_info(application_preparations)").fetchall()
+        existing = {str(row[1]) for row in rows}
+        extra_columns = {
+            "cover_letter": "text",
+            "vacancy_title": "text",
+            "vacancy_company": "text",
+            "vacancy_url": "text",
+        }
+        for name, type_name in extra_columns.items():
+            if name in existing:
+                continue
+            conn.execute(f"alter table application_preparations add column {name} {type_name}")

@@ -78,3 +78,18 @@ class ApplicationHistoryRecord:
     skipped_at: str | None
     current_status: str
     display_date: str
+
+
+@dataclass(frozen=True)
+class ApplicationPreparationRecord:
+    source: str
+    external_id: str
+    prepared_at: str | None
+    resume_name: str | None
+    language: str | None
+    status: str
+    error_message: str | None
+    cover_letter: str | None
+    vacancy_title: str | None
+    vacancy_company: str | None
+    vacancy_url: str | None

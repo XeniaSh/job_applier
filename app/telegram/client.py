@@ -3,7 +3,12 @@ from __future__ import annotations
 import httpx
 from pathlib import Path
 
-from app.telegram.formatter import format_prepared_application_html, format_telegram_card_html
+from app.telegram.formatter import (
+    format_application_ready_card_html,
+    format_prepared_application_html,
+    format_preparing_application_html,
+    format_telegram_card_html,
+)
 from app.telegram.models import TelegramDocumentRef, TelegramInlineButton, TelegramMessageRef, TelegramVacancyCard
 
 
@@ -55,6 +60,27 @@ class TelegramClient:
             "reply_markup": {"inline_keyboard": _serialize_buttons(buttons)},
         }
         self._post_json("editMessageReplyMarkup", payload=payload, read_timeout=15.0)
+
+    def edit_message_text(
+        self,
+        *,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        buttons: list[list[TelegramInlineButton]] | None = None,
+        parse_mode: str | None = "HTML",
+    ) -> None:
+        payload: dict[str, object] = {
+            "chat_id": str(chat_id),
+            "message_id": int(message_id),
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if buttons is not None:
+            payload["reply_markup"] = {"inline_keyboard": _serialize_buttons(buttons)}
+        self._post_json("editMessageText", payload=payload, read_timeout=15.0)
 
     def get_updates(self, offset: int | None, timeout: int = 25) -> list[dict]:
         payload: dict[str, int] = {"timeout": timeout}
@@ -197,26 +223,52 @@ def build_action_buttons(source: str, external_id: str, url: str) -> list[list[T
     skip_data = _callback_data("skip", compact_source, external_id)
     prepare_data = _callback_data("prepare", compact_source, external_id)
     return [
-        [TelegramInlineButton(text="Открыть вакансию", url=validated_url)],
         [
-            TelegramInlineButton(text="Пропустить", callback_data=skip_data),
-            TelegramInlineButton(text="Подготовить отклик", callback_data=prepare_data),
+            TelegramInlineButton(text="Prepare application", callback_data=prepare_data),
+            TelegramInlineButton(text="Skip", callback_data=skip_data),
         ],
+        [TelegramInlineButton(text="Open LinkedIn", url=validated_url)],
     ]
 
 
 def build_prepared_application_buttons(source: str, external_id: str, url: str) -> list[list[TelegramInlineButton]]:
     validated_url = validate_vacancy_url(url)
     compact_source = map_source_to_code(source)
+    copy_data = _callback_data("copy", compact_source, external_id)
+    resume_data = _callback_data("resume", compact_source, external_id)
     applied_data = _callback_data("applied", compact_source, external_id)
     skip_data = _callback_data("skip", compact_source, external_id)
     return [
+        [TelegramInlineButton(text="📋 Copy Cover Letter", callback_data=copy_data)],
+        [TelegramInlineButton(text="📎 Send Resume PDF", callback_data=resume_data)],
+        [TelegramInlineButton(text="🔗 Open LinkedIn", url=validated_url)],
         [
             TelegramInlineButton(text="✅ Applied", callback_data=applied_data),
             TelegramInlineButton(text="❌ Skip", callback_data=skip_data),
         ],
-        [TelegramInlineButton(text="🔗 Open LinkedIn", url=validated_url)],
     ]
+
+
+def build_loading_buttons(url: str) -> list[list[TelegramInlineButton]]:
+    validated_url = validate_vacancy_url(url)
+    return [[TelegramInlineButton(text="🔗 Open LinkedIn", url=validated_url)]]
+
+
+def build_archived_buttons(url: str) -> list[list[TelegramInlineButton]]:
+    validated_url = validate_vacancy_url(url)
+    return [[TelegramInlineButton(text="🔗 Open LinkedIn", url=validated_url)]]
+
+
+def build_loading_text(*, title: str, company: str | None) -> str:
+    return format_preparing_application_html(title=title, company=company)
+
+
+def build_ready_text(*, title: str, company: str | None, recommended_resume: str) -> str:
+    return format_application_ready_card_html(
+        title=title,
+        company=company,
+        recommended_resume=recommended_resume,
+    )
 
 
 def map_source_to_code(source: str) -> str:
@@ -245,7 +297,7 @@ def parse_callback_data(value: str) -> tuple[str, str, str]:
     if len(parts) != 3:
         raise ValueError("Malformed callback data.")
     action, source_code, external_id = parts
-    if action not in {"skip", "prepare", "applied"}:
+    if action not in {"skip", "prepare", "applied", "copy", "resume"}:
         raise ValueError("Unsupported callback action.")
     if not external_id.isdigit():
         raise ValueError("Invalid external id in callback data.")
