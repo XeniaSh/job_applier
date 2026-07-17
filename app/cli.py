@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.collectors.hh_client import HHClient
 from app.collectors.hh_collector import DEFAULT_HH_QUERIES, HHCollector, HHCollectReport
+from app.collectors.greenhouse_collector import GreenhouseCollectionError, GreenhouseCollector
 from app.collectors.email_imap_client import (
     EmailAuthenticationError,
     EmailConnectionError,
@@ -18,8 +19,11 @@ from app.collectors.email_imap_client import (
 from app.collectors.linkedin_email_collector import (
     LinkedInEmailCollectReport,
     LinkedInEmailCollector,
+    LinkedInProcessedVacancy,
 )
 from app.collectors.linkedin_email_parser import extract_email_text_parts, parse_linkedin_email
+from app.collectors.title_filter import should_accept_title
+from app.collectors.vacancy_collector import NormalizedVacancy, VacancyCollector
 from app.application.preparation_service import (
     ApplicationPreparationError,
     PreparedApplication,
@@ -29,6 +33,7 @@ from app.application.resume_cache_service import KNOWN_RESUME_NAMES, ResumeCache
 from app.config import Settings
 from app.formatter import format_evaluation_ru
 from app.llm_client import CoverLetterValidationError, LLMClient, LLMRequestError, LLMResponseError
+from app.models import Decision
 from app.prompt_loader import PromptLoadError, load_analysis_prompt
 from app.skills_profile_loader import SkillsProfileLoadError, load_candidate_skills
 from app.storage.seen_jobs import SeenJobsStorage
@@ -274,6 +279,53 @@ def collect_linkedin_email(
     if not dry_run:
         _sync_application_history(report.processed)
     _print_linkedin_results(report=report, include_ignore=include_ignore, dry_run=dry_run)
+    _print_linkedin_summary(report)
+
+
+@app.command("collect-greenhouse")
+def collect_greenhouse(
+    limit: int = typer.Option(20, "--limit", min=1, help="Maximum new vacancies to analyze."),
+    board: list[str] | None = typer.Option(None, "--board", help="Board slug or full board URL."),
+    include_ignore: bool = typer.Option(False, "--include-ignore", help="Print IGNORE results too."),
+) -> None:
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        typer.secho(
+            f"Отсутствует обязательная конфигурация LLM: {exc}",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2) from exc
+
+    selected_boards = list(board) if board else list(settings.greenhouse_boards)
+    if not selected_boards:
+        typer.secho(
+            "GREENHOUSE_BOARDS не задан. Укажите --board или GREENHOUSE_BOARDS в .env.",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+
+    analyzer = build_analyzer(settings)
+    seen_jobs = SeenJobsStorage()
+    collector = GreenhouseCollector(boards=selected_boards)
+    try:
+        collected = collector.collect()
+    except GreenhouseCollectionError as exc:
+        typer.secho(f"Ошибка Greenhouse collection: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    report = _analyze_collected_vacancies(
+        analyzer=analyzer,
+        seen_jobs=seen_jobs,
+        vacancies=collected,
+        limit=limit,
+        skip_seen=True,
+        mark_seen=True,
+    )
+    _sync_application_history(report.processed)
+    _print_linkedin_results(report=report, include_ignore=include_ignore, dry_run=False)
     _print_linkedin_summary(report)
 
 
@@ -531,11 +583,14 @@ def run_pipeline(
     )
     seen_jobs = SeenJobsStorage()
     deliveries = TelegramDeliveryStorage()
-    collector = LinkedInEmailCollector(
+    linkedin_collector = LinkedInEmailCollector(
         email_client=email_client,
         analyzer=analyzer,
         seen_jobs=seen_jobs,
     )
+    collectors: list[VacancyCollector] = [linkedin_collector]
+    if settings.greenhouse_boards:
+        collectors.append(GreenhouseCollector(boards=settings.greenhouse_boards))
     telegram_client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
     preparation_service = PreparationService(
         analyzer=analyzer,
@@ -559,14 +614,21 @@ def run_pipeline(
             now = time.monotonic()
             if now >= next_cycle_monotonic:
                 try:
-                    report = collector.collect_and_analyze(
+                    collected, collect_errors = _collect_from_collectors(collectors)
+                    report = _analyze_collected_vacancies(
+                        analyzer=analyzer,
+                        seen_jobs=seen_jobs,
+                        vacancies=collected,
                         limit=20,
-                        dry_run=False,
                         skip_seen=True,
                         mark_seen=True,
-                        analyze_in_dry_run=False,
                     )
-                    _run_log(f"LinkedIn: extracted={report.vacancies_extracted} unique={report.unique_vacancies}")
+                    report.errors += collect_errors
+                    per_source: dict[str, int] = {}
+                    for item in collected:
+                        per_source[item.source] = per_source.get(item.source, 0) + 1
+                    source_stats = " ".join(f"{name}={count}" for name, count in sorted(per_source.items()))
+                    _run_log(f"Collected: {source_stats or 'none'} unique={report.unique_vacancies}")
                     _run_log(
                         "Analysis: "
                         f"strong={report.strong_matches} "
@@ -582,7 +644,7 @@ def run_pipeline(
                         verbose=verbose,
                     )
                     _run_log(f"Telegram: sent={sent} already_sent={already_sent}")
-                except (EmailConnectionError, EmailAuthenticationError, LLMRequestError, LLMResponseError) as exc:
+                except (LLMRequestError, LLMResponseError) as exc:
                     _run_log(f"Pipeline cycle failed: {exc}")
                 except Exception as exc:  # noqa: BLE001
                     _run_log(f"Pipeline cycle failed: {exc}")
@@ -1025,6 +1087,99 @@ def _print_linkedin_summary(report: LinkedInEmailCollectReport) -> None:
     )
 
 
+def _collect_from_collectors(collectors: list[VacancyCollector]) -> tuple[list[NormalizedVacancy], int]:
+    merged: list[NormalizedVacancy] = []
+    seen_keys: set[tuple[str, str, str] | str] = set()
+    errors = 0
+    for collector in collectors:
+        try:
+            items = collector.collect()
+        except Exception as exc:  # noqa: BLE001
+            errors += 1
+            logger.error("Collector %s failed: %s", collector.__class__.__name__, exc)
+            continue
+        for item in items:
+            key = item.dedupe_key()
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            merged.append(item)
+    return merged, errors
+
+
+def _analyze_collected_vacancies(
+    *,
+    analyzer: VacancyAnalyzer,
+    seen_jobs: SeenJobsStorage,
+    vacancies: list[NormalizedVacancy],
+    limit: int,
+    skip_seen: bool,
+    mark_seen: bool,
+) -> LinkedInEmailCollectReport:
+    report = LinkedInEmailCollectReport()
+    limited = vacancies[:limit]
+    report.unique_vacancies = len(limited)
+    report.vacancies_extracted = len(vacancies)
+
+    for vacancy in limited:
+        is_seen = seen_jobs.is_seen(vacancy.source, vacancy.external_id)
+        if is_seen:
+            report.already_seen += 1
+            if skip_seen:
+                continue
+        report.new_vacancies += 1
+
+        if not should_accept_title(vacancy.title):
+            report.prefiltered += 1
+            report.processed.append(
+                LinkedInProcessedVacancy(
+                    external_id=vacancy.external_id,
+                    title=vacancy.title,
+                    company=vacancy.company,
+                    location=vacancy.location,
+                    url=vacancy.url,
+                    content_completeness="FULL",
+                    evaluation=None,
+                    skipped_by_prefilter=True,
+                    source=vacancy.source,
+                )
+            )
+            if mark_seen:
+                seen_jobs.mark_seen(vacancy.source, vacancy.external_id)
+            continue
+
+        try:
+            evaluation = analyzer.analyze(vacancy.to_analysis_text(), content_completeness="FULL")
+        except Exception as exc:  # noqa: BLE001
+            report.errors += 1
+            logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
+            continue
+
+        if mark_seen:
+            seen_jobs.mark_seen(vacancy.source, vacancy.external_id)
+        report.analyzed += 1
+        if evaluation.decision == Decision.STRONG_MATCH:
+            report.strong_matches += 1
+        elif evaluation.decision == Decision.POTENTIAL_MATCH:
+            report.potential_matches += 1
+        else:
+            report.ignored += 1
+        report.processed.append(
+            LinkedInProcessedVacancy(
+                external_id=vacancy.external_id,
+                title=vacancy.title,
+                company=vacancy.company,
+                location=vacancy.location,
+                url=vacancy.url,
+                content_completeness="FULL",
+                evaluation=evaluation,
+                source=vacancy.source,
+            )
+        )
+
+    return report
+
+
 @app.command("list-imap-folders")
 def list_imap_folders() -> None:
     try:
@@ -1376,7 +1531,7 @@ def _sync_application_history(items: list[LinkedInProcessedVacancy]) -> None:
 def _upsert_history_item(item: LinkedInProcessedVacancy) -> None:
     evaluation = item.evaluation
     TelegramDeliveryStorage().upsert_application_history(
-        source="linkedin-email",
+        source=item.source,
         external_id=item.external_id,
         title=item.title,
         company=item.company,
@@ -1743,12 +1898,12 @@ def _send_processed_to_telegram(
         decision = item.evaluation.decision.value
         if decision not in {"STRONG_MATCH", "POTENTIAL_MATCH"}:
             continue
-        already_delivered = deliveries.was_sent("linkedin-email", item.external_id, chat_id)
+        already_delivered = deliveries.was_sent(item.source, item.external_id, chat_id)
         if already_delivered:
             already_sent += 1
             continue
         card = TelegramVacancyCard(
-            source=map_source_to_code("linkedin-email"),
+            source=map_source_to_code(item.source),
             external_id=item.external_id,
             decision=decision,
             title=item.title,
@@ -1764,13 +1919,13 @@ def _send_processed_to_telegram(
         try:
             message_ref = telegram_client.send_vacancy_card(card)
             deliveries.save_sent(
-                source="linkedin-email",
+                source=item.source,
                 external_id=item.external_id,
                 chat_id=chat_id,
                 message_id=message_ref.message_id,
             )
             deliveries.mark_history_status(
-                source="linkedin-email",
+                source=item.source,
                 external_id=item.external_id,
                 status="SENT",
                 timestamp_field="sent_at",

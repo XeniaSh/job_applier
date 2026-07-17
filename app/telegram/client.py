@@ -192,7 +192,7 @@ class TelegramClient:
 
 
 def build_action_buttons(source: str, external_id: str, url: str) -> list[list[TelegramInlineButton]]:
-    validated_url = validate_linkedin_job_url(url)
+    validated_url = validate_vacancy_url(url)
     compact_source = map_source_to_code(source)
     skip_data = _callback_data("skip", compact_source, external_id)
     prepare_data = _callback_data("prepare", compact_source, external_id)
@@ -206,7 +206,7 @@ def build_action_buttons(source: str, external_id: str, url: str) -> list[list[T
 
 
 def build_prepared_application_buttons(source: str, external_id: str, url: str) -> list[list[TelegramInlineButton]]:
-    validated_url = validate_linkedin_job_url(url)
+    validated_url = validate_vacancy_url(url)
     compact_source = map_source_to_code(source)
     applied_data = _callback_data("applied", compact_source, external_id)
     skip_data = _callback_data("skip", compact_source, external_id)
@@ -220,7 +220,7 @@ def build_prepared_application_buttons(source: str, external_id: str, url: str) 
 
 
 def map_source_to_code(source: str) -> str:
-    mapping = {"linkedin-email": "li", "li": "li"}
+    mapping = {"linkedin-email": "li", "li": "li", "greenhouse": "gh", "gh": "gh"}
     mapped = mapping.get(source)
     if mapped is None:
         raise ValueError(f"Unknown source: {source}")
@@ -228,7 +228,12 @@ def map_source_to_code(source: str) -> str:
 
 
 def map_code_to_source(code: str) -> str:
-    reverse = {"li": "linkedin-email", "linkedin-email": "linkedin-email"}
+    reverse = {
+        "li": "linkedin-email",
+        "linkedin-email": "linkedin-email",
+        "gh": "greenhouse",
+        "greenhouse": "greenhouse",
+    }
     mapped = reverse.get(code)
     if mapped is None:
         raise ValueError(f"Unknown source code: {code}")
@@ -249,10 +254,22 @@ def parse_callback_data(value: str) -> tuple[str, str, str]:
 
 
 def validate_linkedin_job_url(url: str) -> str:
+    return validate_vacancy_url(url)
+
+
+def validate_vacancy_url(url: str) -> str:
     normalized = url.strip()
-    if not normalized.startswith("https://www.linkedin.com/jobs/view/"):
-        raise ValueError("Only canonical LinkedIn vacancy URL is allowed.")
-    return normalized
+    if normalized.startswith("https://www.linkedin.com/jobs/view/"):
+        return normalized
+    if normalized.startswith("https://boards.greenhouse.io/"):
+        return normalized
+    if normalized.startswith("https://job-boards.greenhouse.io/"):
+        return normalized
+    if normalized.startswith("https://www.greenhouse.io/careers/"):
+        return normalized
+    if normalized.startswith("https://greenhouse.io/"):
+        return normalized
+    raise ValueError("Only known vacancy board URLs are allowed.")
 
 
 def _callback_data(action: str, source_code: str, external_id: str) -> str:

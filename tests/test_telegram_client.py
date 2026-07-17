@@ -84,13 +84,16 @@ def test_send_message_payload(monkeypatch) -> None:
 
 def test_url_validation_and_callback_limit() -> None:
     assert validate_linkedin_job_url("https://www.linkedin.com/jobs/view/1/").endswith("/1/")
+    assert validate_linkedin_job_url("https://job-boards.greenhouse.io/notion/jobs/2").endswith("/2")
     with pytest.raises(ValueError):
         validate_linkedin_job_url("https://example.com/jobs/view/1/")
 
     buttons = build_action_buttons("linkedin-email", "4439013108", "https://www.linkedin.com/jobs/view/4439013108/")
     assert len(buttons) == 2
     assert map_source_to_code("linkedin-email") == "li"
+    assert map_source_to_code("greenhouse") == "gh"
     assert map_code_to_source("li") == "linkedin-email"
+    assert map_code_to_source("gh") == "greenhouse"
     assert parse_callback_data("skip:li:4439013108") == ("skip", "linkedin-email", "4439013108")
     assert parse_callback_data("applied:li:4439013108") == ("applied", "linkedin-email", "4439013108")
     with pytest.raises(ValueError):

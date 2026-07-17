@@ -1,5 +1,8 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
+from pydantic import field_validator
+from pydantic_settings import NoDecode
+from typing import Annotated
 
 
 class Settings(BaseSettings):
@@ -21,6 +24,23 @@ class Settings(BaseSettings):
     candidate_grammatical_gender: str = "neutral"
     pipeline_interval_seconds: int = 300
     telegram_poll_interval_seconds: int = 2
+    greenhouse_boards: Annotated[list[str], NoDecode] = []
+
+    @field_validator("greenhouse_boards", mode="before")
+    @classmethod
+    def parse_greenhouse_boards(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            chunks = value.replace("\r", "\n").replace(",", "\n").split("\n")
+            return [item.strip() for item in chunks if item.strip()]
+        if isinstance(value, list):
+            cleaned: list[str] = []
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    cleaned.append(item.strip())
+            return cleaned
+        return []
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -7,6 +7,7 @@ from app.collectors.email_imap_client import EmailIMAPClient
 from app.collectors.linkedin_email_parser import parse_linkedin_email
 from app.collectors.linkedin_models import LinkedInEmailVacancy
 from app.collectors.title_filter import should_accept_title
+from app.collectors.vacancy_collector import NormalizedVacancy, VacancyCollector
 from app.models import Decision, VacancyEvaluation
 from app.storage.seen_jobs import SeenJobsStorage
 from app.vacancy_analyzer import VacancyAnalyzer
@@ -24,6 +25,7 @@ class LinkedInProcessedVacancy:
     content_completeness: str
     evaluation: VacancyEvaluation | None
     skipped_by_prefilter: bool = False
+    source: str = "linkedin-email"
 
 
 @dataclass
@@ -46,7 +48,7 @@ class LinkedInEmailCollectReport:
     processed: list[LinkedInProcessedVacancy] = field(default_factory=list)
 
 
-class LinkedInEmailCollector:
+class LinkedInEmailCollector(VacancyCollector):
     SOURCE = "linkedin-email"
 
     def __init__(
@@ -69,23 +71,11 @@ class LinkedInEmailCollector:
         mark_seen: bool = True,
     ) -> LinkedInEmailCollectReport:
         report = LinkedInEmailCollectReport()
-        raw_messages = self._email_client.fetch_linkedin_messages()
-        report.emails_found = len(raw_messages)
-        unique_vacancies: dict[str, LinkedInEmailVacancy] = {}
-        for raw_message in raw_messages:
-            try:
-                vacancies = parse_linkedin_email(raw_message)
-            except Exception as exc:  # noqa: BLE001
-                report.errors += 1
-                logger.error("LinkedIn email parse failed: %s", exc)
-                continue
-
-            report.vacancies_extracted += len(vacancies)
-            for vacancy in vacancies:
-                if vacancy.external_id not in unique_vacancies:
-                    unique_vacancies[vacancy.external_id] = vacancy
-
-        limited_vacancies = list(unique_vacancies.values())[:limit]
+        unique_vacancies, emails_found, parse_errors, extracted = self._collect_unique_vacancies()
+        report.emails_found = emails_found
+        report.errors += parse_errors
+        report.vacancies_extracted = extracted
+        limited_vacancies = unique_vacancies[:limit]
         report.unique_vacancies = len(limited_vacancies)
         report.new_vacancies = 0
 
@@ -161,3 +151,42 @@ class LinkedInEmailCollector:
             )
 
         return report
+
+    def collect(self) -> list[NormalizedVacancy]:
+        unique_vacancies, _, _, _ = self._collect_unique_vacancies()
+        normalized: list[NormalizedVacancy] = []
+        for vacancy in unique_vacancies:
+            normalized.append(
+                NormalizedVacancy(
+                    source=self.SOURCE,
+                    external_id=vacancy.external_id,
+                    title=vacancy.title,
+                    company=vacancy.company,
+                    location=vacancy.location,
+                    employment=None,
+                    description=vacancy.to_analysis_text(),
+                    url=vacancy.url,
+                    published_at=vacancy.received_at.isoformat() if vacancy.received_at else None,
+                )
+            )
+        return normalized
+
+    def _collect_unique_vacancies(self) -> tuple[list[LinkedInEmailVacancy], int, int, int]:
+        raw_messages = self._email_client.fetch_linkedin_messages()
+        unique_vacancies: dict[str, LinkedInEmailVacancy] = {}
+        parse_errors = 0
+        extracted = 0
+        for raw_message in raw_messages:
+            try:
+                vacancies = parse_linkedin_email(raw_message)
+            except Exception as exc:  # noqa: BLE001
+                parse_errors += 1
+                logger.error("LinkedIn email parse failed: %s", exc)
+                continue
+
+            extracted += len(vacancies)
+            for vacancy in vacancies:
+                if vacancy.external_id not in unique_vacancies:
+                    unique_vacancies[vacancy.external_id] = vacancy
+
+        return list(unique_vacancies.values()), len(raw_messages), parse_errors, extracted
