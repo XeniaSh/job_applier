@@ -557,15 +557,29 @@ class TelegramDeliveryStorage:
         vacancy_title: str | None = None,
         vacancy_company: str | None = None,
         vacancy_url: str | None = None,
+        resume_message_id: int | None = None,
+        cover_letter_message_id: int | None = None,
     ) -> None:
         prepared_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
-                insert or replace into application_preparations (
-                    source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url
+                insert into application_preparations (
+                    source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url, resume_message_id, cover_letter_message_id
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(source, external_id) do update set
+                    prepared_at = excluded.prepared_at,
+                    resume_name = excluded.resume_name,
+                    language = excluded.language,
+                    status = excluded.status,
+                    error_message = excluded.error_message,
+                    cover_letter = excluded.cover_letter,
+                    vacancy_title = excluded.vacancy_title,
+                    vacancy_company = excluded.vacancy_company,
+                    vacancy_url = excluded.vacancy_url,
+                    resume_message_id = coalesce(excluded.resume_message_id, application_preparations.resume_message_id),
+                    cover_letter_message_id = coalesce(excluded.cover_letter_message_id, application_preparations.cover_letter_message_id)
                 """,
                 (
                     source,
@@ -579,6 +593,8 @@ class TelegramDeliveryStorage:
                     vacancy_title,
                     vacancy_company,
                     vacancy_url,
+                    int(resume_message_id) if resume_message_id is not None else None,
+                    int(cover_letter_message_id) if cover_letter_message_id is not None else None,
                 ),
             )
             conn.commit()
@@ -587,7 +603,7 @@ class TelegramDeliveryStorage:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                select source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url
+                select source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url, resume_message_id, cover_letter_message_id
                 from application_preparations
                 where source = ? and external_id = ?
                 """,
@@ -607,7 +623,47 @@ class TelegramDeliveryStorage:
             vacancy_title=str(row[8]) if row[8] is not None else None,
             vacancy_company=str(row[9]) if row[9] is not None else None,
             vacancy_url=str(row[10]) if row[10] is not None else None,
+            resume_message_id=int(row[11]) if row[11] is not None else None,
+            cover_letter_message_id=int(row[12]) if row[12] is not None else None,
         )
+
+    def set_preparation_aux_message_id(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        resume_message_id: int | None = None,
+        cover_letter_message_id: int | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                update application_preparations
+                set
+                    resume_message_id = coalesce(?, resume_message_id),
+                    cover_letter_message_id = coalesce(?, cover_letter_message_id)
+                where source = ? and external_id = ?
+                """,
+                (
+                    int(resume_message_id) if resume_message_id is not None else None,
+                    int(cover_letter_message_id) if cover_letter_message_id is not None else None,
+                    source,
+                    external_id,
+                ),
+            )
+            conn.commit()
+
+    def clear_preparation_aux_message_ids(self, *, source: str, external_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                update application_preparations
+                set resume_message_id = null, cover_letter_message_id = null
+                where source = ? and external_id = ?
+                """,
+                (source, external_id),
+            )
+            conn.commit()
 
     def get_history_title_company_url(self, source: str, external_id: str) -> tuple[str | None, str | None, str | None]:
         with self._connect() as conn:
@@ -722,6 +778,8 @@ class TelegramDeliveryStorage:
                     vacancy_title text,
                     vacancy_company text,
                     vacancy_url text,
+                    resume_message_id integer,
+                    cover_letter_message_id integer,
                     primary key (source, external_id)
                 )
                 """
@@ -771,6 +829,8 @@ class TelegramDeliveryStorage:
             "vacancy_title": "text",
             "vacancy_company": "text",
             "vacancy_url": "text",
+            "resume_message_id": "integer",
+            "cover_letter_message_id": "integer",
         }
         for name, type_name in extra_columns.items():
             if name in existing:

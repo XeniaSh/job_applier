@@ -25,9 +25,12 @@ def test_merge_deduplicates_by_canonical_url() -> None:
         def collect(self):
             return [_vacancy(source="greenhouse", external_id="2", title="Backend", company="A", location="Remote", url="https://jobs.example.com/role/1")]
 
-    merged, errors = cli_module._collect_from_collectors([_LinkedIn(), _Greenhouse()])
-    assert errors == 0
-    assert len(merged) == 1
+    report = cli_module._collect_from_collectors(
+        collectors=[_LinkedIn(), _Greenhouse()],
+        safe_error_formatter=lambda source, exc: f"{source}:{exc}",
+    )
+    assert report.per_source["linkedin-email"].errors == 0
+    assert len(report.merged) == 1
 
 
 def test_merge_deduplicates_by_company_title_location_when_url_missing() -> None:
@@ -39,9 +42,12 @@ def test_merge_deduplicates_by_company_title_location_when_url_missing() -> None
         def collect(self):
             return [_vacancy(source="greenhouse", external_id="2", title="Backend Engineer", company="ACME", location="Remote", url="")]
 
-    merged, errors = cli_module._collect_from_collectors([_A(), _B()])
-    assert errors == 0
-    assert len(merged) == 1
+    report = cli_module._collect_from_collectors(
+        collectors=[_A(), _B()],
+        safe_error_formatter=lambda source, exc: f"{source}:{exc}",
+    )
+    assert report.per_source["linkedin-email"].errors == 0
+    assert len(report.merged) == 1
 
 
 def test_one_collector_failure_does_not_stop_others() -> None:
@@ -53,7 +59,10 @@ def test_one_collector_failure_does_not_stop_others() -> None:
         def collect(self):
             return [_vacancy(source="greenhouse", external_id="10", title="Role", company="X", location=None, url="https://job-boards.greenhouse.io/x/jobs/10")]
 
-    merged, errors = cli_module._collect_from_collectors([_Broken(), _Healthy()])
-    assert errors == 1
-    assert len(merged) == 1
-    assert merged[0].source == "greenhouse"
+    report = cli_module._collect_from_collectors(
+        collectors=[_Broken(), _Healthy()],
+        safe_error_formatter=lambda source, exc: f"{source}:{exc}",
+    )
+    assert any(counter.errors == 1 for counter in report.per_source.values())
+    assert len(report.merged) == 1
+    assert report.merged[0].source == "greenhouse"

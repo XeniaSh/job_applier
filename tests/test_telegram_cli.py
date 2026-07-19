@@ -726,7 +726,7 @@ def test_poll_callbacks_skip_prepare_unknown_and_wrong_chat() -> None:
         buttons = item["buttons"]
         assert len(buttons) == 1
         assert len(buttons[0]) == 1
-        assert buttons[0][0].text == "🔗 Open LinkedIn"
+        assert buttons[0][0].text == "🔗 Open vacancy"
         assert str(buttons[0][0].url).startswith("https://www.linkedin.com/jobs/view/")
 
 
@@ -1069,7 +1069,7 @@ def test_prepare_callback_sets_loading_state(monkeypatch) -> None:
     )
     assert calls["updates"][0]["delivery_status"] == "PREPARE_REQUESTED"
     assert "⏳ Preparing application..." in calls["edit"]["text"]
-    assert calls["edit"]["buttons"][0][0].text == "🔗 Open LinkedIn"
+    assert calls["edit"]["buttons"][0][0].text == "🔗 Open vacancy"
 
 
 def test_copy_cover_letter_sends_only_text(monkeypatch) -> None:
@@ -1084,8 +1084,8 @@ def test_copy_cover_letter_sends_only_text(monkeypatch) -> None:
         def answer_callback_query(self, callback_query_id, text=None):
             calls["answers"].append((callback_query_id, text))
 
-        def send_text_message(self, text):
-            calls["texts"].append(text)
+        def send_text_message(self, text, **kwargs):
+            calls["texts"].append((text, kwargs))
 
         def edit_message_text(self, **kwargs):
             _ = kwargs
@@ -1104,7 +1104,8 @@ def test_copy_cover_letter_sends_only_text(monkeypatch) -> None:
         storage=FakeStorage(),
         configured_chat_id="123",
     )
-    assert calls["texts"] == ["ONLY LETTER"]
+    assert calls["texts"][0][0] == "ONLY LETTER"
+    assert calls["texts"][0][1]["reply_to_message_id"] == 11
     assert calls["edited"] == 0
 
 
@@ -1116,18 +1117,30 @@ def test_resume_button_sends_pdf_on_demand_and_missing_notifies(monkeypatch) -> 
             sent["answers"].append((callback_query_id, text))
 
         def send_document_by_file_id(self, **kwargs):
-            _ = kwargs
+            assert kwargs["reply_to_message_id"] == 12
             sent["count"] += 1
+            return type("R", (), {"message_id": 222, "file_id": "FILE123", "file_unique_id": "U1", "chat_id": "123"})()
+
+        def send_document(self, **kwargs):
+            _ = kwargs
+            raise AssertionError("fallback upload should not be used")
 
     class ReadyStorage:
         def get_preparation(self, source, external_id):
             _ = source, external_id
-            return type("P", (), {"status": "PREPARED", "cover_letter": "x", "resume_name": "java-backend"})()
+            return type(
+                "P",
+                (),
+                {"status": "PREPARED", "cover_letter": "x", "resume_name": "java-backend", "resume_message_id": None},
+            )()
+
+        def set_preparation_aux_message_id(self, **kwargs):
+            assert kwargs["resume_message_id"] == 222
 
     class MissingStorage:
         def get_preparation(self, source, external_id):
             _ = source, external_id
-            return type("P", (), {"status": "PREPARED", "cover_letter": "x", "resume_name": "java-backend"})()
+            return type("P", (), {"status": "PREPARED", "cover_letter": "x", "resume_name": "java-backend", "resume_message_id": None})()
 
     class CacheOk:
         def get_or_upload(self, *, resume_name, chat_id, force_upload=False):
@@ -1137,7 +1150,7 @@ def test_resume_button_sends_pdf_on_demand_and_missing_notifies(monkeypatch) -> 
     class CacheMissing:
         def get_or_upload(self, *, resume_name, chat_id, force_upload=False):
             _ = resume_name, chat_id, force_upload
-            return type("R", (), {"missing": True, "telegram_file_id": None})()
+            return type("R", (), {"missing": True, "telegram_file_id": None, "resume_path": None})()
 
     update = {
         "callback_query": {
@@ -1164,6 +1177,45 @@ def test_resume_button_sends_pdf_on_demand_and_missing_notifies(monkeypatch) -> 
         resume_cache_service=CacheMissing(),
     )
     assert any(text == "Resume PDF not found." for _, text in sent["answers"])
+
+
+def test_resume_button_does_not_duplicate_when_already_sent(monkeypatch) -> None:
+    answers: list[tuple[str, str | None]] = []
+
+    class FakeClient:
+        def answer_callback_query(self, callback_query_id, text=None):
+            answers.append((callback_query_id, text))
+
+        def send_document_by_file_id(self, **kwargs):
+            raise AssertionError("should not send duplicate resume")
+
+        def send_document(self, **kwargs):
+            raise AssertionError("should not upload duplicate resume")
+
+    class Storage:
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type(
+                "P",
+                (),
+                {"status": "PREPARED", "cover_letter": "x", "resume_name": "java-backend", "resume_message_id": 777},
+            )()
+
+    update = {
+        "callback_query": {
+            "id": "cb11",
+            "data": "resume:li:1",
+            "message": {"chat": {"id": "123"}, "message_id": 12},
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=FakeClient(),
+        storage=Storage(),
+        configured_chat_id="123",
+        resume_cache_service=type("Cache", (), {"get_or_upload": lambda self, **kwargs: None})(),
+    )
+    assert any("Resume already sent below this vacancy." == text for _, text in answers)
 
 
 def test_prepare_callback_idempotency(monkeypatch) -> None:
@@ -1211,3 +1263,199 @@ def test_prepare_callback_idempotency(monkeypatch) -> None:
 
     assert calls["updates"] == 1
     assert any(text == "Уже в обработке" for _, text in calls["answers"])
+
+
+def test_resume_invalid_cached_file_id_falls_back_to_upload_once(monkeypatch, tmp_path) -> None:
+    resumes_dir = tmp_path / "resumes"
+    resumes_dir.mkdir(parents=True, exist_ok=True)
+    pdf = resumes_dir / "java-backend.pdf"
+    pdf.write_bytes(b"%PDF")
+    sent = {"by_id": 0, "upload": 0}
+
+    class FakeClient:
+        def answer_callback_query(self, callback_query_id, text=None):
+            _ = callback_query_id, text
+
+        def send_document_by_file_id(self, **kwargs):
+            _ = kwargs
+            sent["by_id"] += 1
+            raise cli_module.TelegramRequestError("Telegram sendDocument HTTP 400.")
+
+        def send_document(self, **kwargs):
+            sent["upload"] += 1
+            assert kwargs["reply_to_message_id"] == 12
+            return type("D", (), {"message_id": 333, "file_id": "NEW_FILE_ID", "file_unique_id": "U2", "chat_id": "123"})()
+
+    class Storage:
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type(
+                "P",
+                (),
+                {"status": "PREPARED", "cover_letter": "x", "resume_name": "java-backend", "resume_message_id": None},
+            )()
+
+        def save_resume_cache(self, **kwargs):
+            assert kwargs["telegram_file_id"] == "NEW_FILE_ID"
+
+        def set_preparation_aux_message_id(self, **kwargs):
+            assert kwargs["resume_message_id"] == 333
+
+    class Cache:
+        def get_or_upload(self, *, resume_name, chat_id, force_upload=False):
+            _ = resume_name, chat_id, force_upload
+            return type("R", (), {"missing": False, "telegram_file_id": "OLD_FILE_ID", "resume_path": str(pdf)})()
+
+    update = {
+        "callback_query": {
+            "id": "cb12",
+            "data": "resume:li:1",
+            "message": {"chat": {"id": "123"}, "message_id": 12},
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=FakeClient(),
+        storage=Storage(),
+        configured_chat_id="123",
+        resumes_dir=resumes_dir,
+        resume_cache_service=Cache(),
+    )
+    assert sent["by_id"] == 1
+    assert sent["upload"] == 1
+
+
+def test_copy_cover_letter_does_not_duplicate_when_already_sent() -> None:
+    answers: list[tuple[str, str | None]] = []
+
+    class FakeClient:
+        def answer_callback_query(self, callback_query_id, text=None):
+            answers.append((callback_query_id, text))
+
+        def send_text_message(self, *args, **kwargs):
+            raise AssertionError("should not send duplicate cover letter")
+
+    class Storage:
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type(
+                "P",
+                (),
+                {
+                    "status": "PREPARED",
+                    "cover_letter": "ONLY LETTER",
+                    "resume_name": "java-backend",
+                    "cover_letter_message_id": 555,
+                },
+            )()
+
+    update = {
+        "callback_query": {
+            "id": "cb13",
+            "data": "copy:li:1",
+            "message": {"chat": {"id": "123"}, "message_id": 11},
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=FakeClient(),
+        storage=Storage(),
+        configured_chat_id="123",
+    )
+    assert any("Cover letter already sent below this vacancy." == text for _, text in answers)
+
+
+def test_applied_cleanup_failures_do_not_block_transition(monkeypatch) -> None:
+    calls = {"updated": 0, "edited": 0, "deleted": 0}
+
+    class Storage:
+        def update_delivery_and_history(self, **kwargs):
+            _ = kwargs
+            calls["updated"] += 1
+
+        def get_delivery(self, source, external_id):
+            _ = source, external_id
+            return type("D", (), {"status": "PREPARED"})()
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Role", "Company", "https://example.com/vacancy/1")
+
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type("P", (), {"resume_message_id": 1001, "cover_letter_message_id": 1002})()
+
+        def clear_preparation_aux_message_ids(self, **kwargs):
+            _ = kwargs
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            _ = callback_query_id, text
+
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+            calls["edited"] += 1
+
+        def delete_message(self, **kwargs):
+            _ = kwargs
+            calls["deleted"] += 1
+            raise cli_module.TelegramRequestError("cannot delete")
+
+    update = {
+        "callback_query": {
+            "id": "cb14",
+            "data": "applied:li:1",
+            "message": {"chat": {"id": "123"}, "message_id": 15},
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=Client(),
+        storage=Storage(),
+        configured_chat_id="123",
+    )
+    assert calls["updated"] == 1
+    assert calls["edited"] == 1
+    assert calls["deleted"] == 2
+
+
+def test_prepare_message_not_modified_is_harmless() -> None:
+    calls = {"updated": 0, "answers": 0}
+
+    class Storage:
+        def update_delivery_and_history(self, **kwargs):
+            _ = kwargs
+            calls["updated"] += 1
+
+        def get_delivery(self, source, external_id):
+            _ = source, external_id
+            return type("D", (), {"status": "SENT"})()
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Role", "Company", "https://example.com/vacancy/1")
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            _ = callback_query_id, text
+            calls["answers"] += 1
+
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+            raise cli_module.TelegramMessageNotModifiedError("same")
+
+    update = {
+        "callback_query": {
+            "id": "cb15",
+            "data": "prepare:li:1",
+            "message": {"chat": {"id": "123"}, "message_id": 11},
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=Client(),
+        storage=Storage(),
+        configured_chat_id="123",
+    )
+    assert calls["updated"] == 1
+    assert calls["answers"] == 1

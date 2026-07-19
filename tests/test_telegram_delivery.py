@@ -87,6 +87,21 @@ def test_list_by_status_and_preparation_metadata(tmp_path: Path) -> None:
         language="en",
         error_message=None,
     )
+    storage.set_preparation_aux_message_id(
+        source="linkedin-email",
+        external_id="5",
+        resume_message_id=321,
+        cover_letter_message_id=322,
+    )
+    prep = storage.get_preparation("linkedin-email", "5")
+    assert prep is not None
+    assert prep.resume_message_id == 321
+    assert prep.cover_letter_message_id == 322
+    storage.clear_preparation_aux_message_ids(source="linkedin-email", external_id="5")
+    cleared = storage.get_preparation("linkedin-email", "5")
+    assert cleared is not None
+    assert cleared.resume_message_id is None
+    assert cleared.cover_letter_message_id is None
 
 
 def test_list_deliveries_filters_order_and_limit(tmp_path: Path) -> None:

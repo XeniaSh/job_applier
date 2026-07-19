@@ -57,7 +57,21 @@ def test_collect_greenhouse_uses_board_option(monkeypatch) -> None:
     monkeypatch.setattr(
         cli_module,
         "_analyze_collected_vacancies",
-        lambda **kwargs: LinkedInEmailCollectReport(),
+        lambda **kwargs: (
+            LinkedInEmailCollectReport(),
+            {},
+            cli_module.AnalysisCycleReport(
+                processed=[],
+                analyzed=0,
+                strong=0,
+                potential=0,
+                ignore=0,
+                title_filtered=0,
+                errors=0,
+                no_work_reason=None,
+                verbose_events=[],
+            ),
+        ),
     )
 
     result = CliRunner().invoke(cli_module.app, ["collect-greenhouse", "--board", "notion"])
@@ -88,7 +102,25 @@ def test_collect_greenhouse_include_ignore(monkeypatch) -> None:
     monkeypatch.setattr(cli_module, "build_analyzer", lambda settings: object())
     monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: object())
     monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("C", (), {"collect": lambda self: []})())
-    monkeypatch.setattr(cli_module, "_analyze_collected_vacancies", lambda **kwargs: report)
+    monkeypatch.setattr(
+        cli_module,
+        "_analyze_collected_vacancies",
+        lambda **kwargs: (
+            report,
+            {},
+            cli_module.AnalysisCycleReport(
+                processed=report.processed,
+                analyzed=report.analyzed,
+                strong=report.strong_matches,
+                potential=report.potential_matches,
+                ignore=report.ignored,
+                title_filtered=report.prefiltered,
+                errors=report.errors,
+                no_work_reason=None,
+                verbose_events=[],
+            ),
+        ),
+    )
 
     result = CliRunner().invoke(cli_module.app, ["collect-greenhouse", "--include-ignore"])
     assert result.exit_code == 0

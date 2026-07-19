@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from app.telegram.client import (
+    TelegramMessageNotModifiedError,
     TelegramClient,
     TelegramRequestError,
     build_action_buttons,
@@ -85,11 +86,11 @@ def test_send_message_payload(monkeypatch) -> None:
 def test_url_validation_and_callback_limit() -> None:
     assert validate_linkedin_job_url("https://www.linkedin.com/jobs/view/1/").endswith("/1/")
     assert validate_linkedin_job_url("https://job-boards.greenhouse.io/notion/jobs/2").endswith("/2")
-    with pytest.raises(ValueError):
-        validate_linkedin_job_url("https://example.com/jobs/view/1/")
+    assert validate_linkedin_job_url("https://example.com/jobs/view/1/").endswith("/1/")
 
     buttons = build_action_buttons("linkedin-email", "4439013108", "https://www.linkedin.com/jobs/view/4439013108/")
     assert len(buttons) == 2
+    assert buttons[1][0].text == "Open vacancy"
     assert map_source_to_code("linkedin-email") == "li"
     assert map_source_to_code("greenhouse") == "gh"
     assert map_code_to_source("li") == "linkedin-email"
@@ -109,6 +110,7 @@ def test_url_validation_and_callback_limit() -> None:
     assert prepared_buttons[0][0].callback_data == "copy:li:4439013108"
     assert prepared_buttons[1][0].callback_data == "resume:li:4439013108"
     assert prepared_buttons[2][0].url == "https://www.linkedin.com/jobs/view/4439013108/"
+    assert prepared_buttons[2][0].text == "🔗 Open vacancy"
     assert prepared_buttons[3][0].callback_data == "applied:li:4439013108"
     assert prepared_buttons[3][1].callback_data == "skip:li:4439013108"
 
@@ -222,10 +224,30 @@ def test_send_document_by_file_id_payload(monkeypatch) -> None:
 
     monkeypatch.setattr(httpx, "Client", fake_client)
     client = TelegramClient(bot_token="token", chat_id="123")
-    ref = client.send_document_by_file_id(chat_id="321", file_id="FILE_ID_ABC", caption="resume")
+    ref = client.send_document_by_file_id(chat_id="321", file_id="FILE_ID_ABC", caption="resume", reply_to_message_id=77)
     assert ref.message_id == 100
     _, request_kwargs = calls[0]
     payload = request_kwargs["json"]
     assert payload["chat_id"] == "321"
     assert payload["document"] == "FILE_ID_ABC"
     assert payload["caption"] == "resume"
+    assert payload["reply_to_message_id"] == 77
+
+
+def test_edit_message_not_modified_error_is_typed(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+    responses = [
+        _FakeResponse(
+            200,
+            {"ok": False, "description": "Bad Request: message is not modified"},
+        )
+    ]
+
+    def fake_client(*args, **kwargs):
+        _ = args, kwargs
+        return _FakeClient(responses, calls)
+
+    monkeypatch.setattr(httpx, "Client", fake_client)
+    client = TelegramClient(bot_token="token", chat_id="123")
+    with pytest.raises(TelegramMessageNotModifiedError):
+        client.edit_message_text(chat_id="123", message_id=1, text="same")

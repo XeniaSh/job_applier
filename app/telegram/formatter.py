@@ -84,6 +84,18 @@ def format_application_ready_card_html(*, title: str, company: str | None, recom
     lines.append("")
     lines.append("Resume:")
     lines.append(_escape(_human_resume_name(recommended_resume)))
+    lines.append("Cover letter: Ready")
+    lines.append("Resume PDF: Ready")
+    rendered = "\n".join(lines).strip()
+    if len(rendered) <= MAX_MESSAGE_LEN:
+        return rendered
+    return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
+
+
+def format_preparation_failed_html(*, title: str, company: str | None) -> str:
+    lines = ["⚠️ Application preparation failed", "", _escape(title)]
+    if company:
+        lines.append(_escape(company))
     rendered = "\n".join(lines).strip()
     if len(rendered) <= MAX_MESSAGE_LEN:
         return rendered

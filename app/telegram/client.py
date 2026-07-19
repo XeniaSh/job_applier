@@ -16,6 +16,10 @@ class TelegramRequestError(Exception):
     """Raised when Telegram API request fails."""
 
 
+class TelegramMessageNotModifiedError(TelegramRequestError):
+    """Raised when Telegram edit has no changes."""
+
+
 class TelegramClient:
     def __init__(self, bot_token: str, chat_id: str) -> None:
         self._bot_token = bot_token
@@ -92,12 +96,20 @@ class TelegramClient:
             return [item for item in updates if isinstance(item, dict)]
         return []
 
-    def send_text_message(self, text: str) -> TelegramMessageRef:
-        payload = {"chat_id": self._chat_id, "text": text}
+    def send_text_message(
+        self,
+        text: str,
+        *,
+        chat_id: str | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> TelegramMessageRef:
+        payload: dict[str, object] = {"chat_id": str(chat_id or self._chat_id), "text": text}
+        if reply_to_message_id is not None and reply_to_message_id > 0:
+            payload["reply_to_message_id"] = int(reply_to_message_id)
         data = self._post_json("sendMessage", payload=payload, read_timeout=15.0)
         result = data.get("result", {})
         return TelegramMessageRef(
-            chat_id=str(result.get("chat", {}).get("id", self._chat_id)),
+            chat_id=str(result.get("chat", {}).get("id", chat_id or self._chat_id)),
             message_id=int(result.get("message_id", 0)),
         )
 
@@ -140,15 +152,25 @@ class TelegramClient:
             message_id=int(result.get("message_id", 0)),
         )
 
-    def send_document(self, *, file_path: str, caption: str) -> TelegramDocumentRef:
+    def send_document(
+        self,
+        *,
+        file_path: str,
+        caption: str,
+        chat_id: str | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> TelegramDocumentRef:
         timeout = httpx.Timeout(connect=5.0, read=15.0, write=20.0, pool=5.0)
         url = f"{self._base_url}/sendDocument"
         try:
             with open(file_path, "rb") as handle:
                 with httpx.Client(timeout=timeout) as client:
+                    data: dict[str, object] = {"chat_id": str(chat_id or self._chat_id), "caption": caption}
+                    if reply_to_message_id is not None and reply_to_message_id > 0:
+                        data["reply_to_message_id"] = int(reply_to_message_id)
                     response = client.post(
                         url,
-                        data={"chat_id": self._chat_id, "caption": caption},
+                        data=data,
                         files={"document": (Path(file_path).name, handle, "application/pdf")},
                     )
         except OSError as exc:
@@ -174,12 +196,19 @@ class TelegramClient:
         chat_id: str,
         file_id: str,
         caption: str | None = None,
+        reply_to_message_id: int | None = None,
     ) -> TelegramDocumentRef:
-        payload: dict[str, str] = {"chat_id": str(chat_id), "document": file_id}
+        payload: dict[str, object] = {"chat_id": str(chat_id), "document": file_id}
         if caption:
             payload["caption"] = caption
+        if reply_to_message_id is not None and reply_to_message_id > 0:
+            payload["reply_to_message_id"] = int(reply_to_message_id)
         data = self._post_json("sendDocument", payload=payload, read_timeout=15.0)
         return self._extract_document_ref(data=data)
+
+    def delete_message(self, *, chat_id: str, message_id: int) -> None:
+        payload = {"chat_id": str(chat_id), "message_id": int(message_id)}
+        self._post_json("deleteMessage", payload=payload, read_timeout=15.0)
 
     def _post_json(self, endpoint: str, payload: dict, read_timeout: float) -> dict:
         timeout = httpx.Timeout(connect=5.0, read=read_timeout, write=10.0, pool=5.0)
@@ -199,6 +228,10 @@ class TelegramClient:
         except ValueError as exc:
             raise TelegramRequestError(f"Telegram {endpoint} invalid JSON response.") from exc
         if not data.get("ok", False):
+            description = str(data.get("description", ""))
+            lowered = description.lower()
+            if "message is not modified" in lowered:
+                raise TelegramMessageNotModifiedError("Telegram message is not modified.")
             raise TelegramRequestError(f"Telegram {endpoint} API error (HTTP {response.status_code}).")
         return data
 
@@ -227,7 +260,7 @@ def build_action_buttons(source: str, external_id: str, url: str) -> list[list[T
             TelegramInlineButton(text="Prepare application", callback_data=prepare_data),
             TelegramInlineButton(text="Skip", callback_data=skip_data),
         ],
-        [TelegramInlineButton(text="Open LinkedIn", url=validated_url)],
+        [TelegramInlineButton(text="Open vacancy", url=validated_url)],
     ]
 
 
@@ -240,8 +273,8 @@ def build_prepared_application_buttons(source: str, external_id: str, url: str) 
     skip_data = _callback_data("skip", compact_source, external_id)
     return [
         [TelegramInlineButton(text="📋 Copy Cover Letter", callback_data=copy_data)],
-        [TelegramInlineButton(text="📎 Send Resume PDF", callback_data=resume_data)],
-        [TelegramInlineButton(text="🔗 Open LinkedIn", url=validated_url)],
+        [TelegramInlineButton(text="📎 Resume PDF", callback_data=resume_data)],
+        [TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)],
         [
             TelegramInlineButton(text="✅ Applied", callback_data=applied_data),
             TelegramInlineButton(text="❌ Skip", callback_data=skip_data),
@@ -251,12 +284,24 @@ def build_prepared_application_buttons(source: str, external_id: str, url: str) 
 
 def build_loading_buttons(url: str) -> list[list[TelegramInlineButton]]:
     validated_url = validate_vacancy_url(url)
-    return [[TelegramInlineButton(text="🔗 Open LinkedIn", url=validated_url)]]
+    return [[TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)]]
 
 
 def build_archived_buttons(url: str) -> list[list[TelegramInlineButton]]:
     validated_url = validate_vacancy_url(url)
-    return [[TelegramInlineButton(text="🔗 Open LinkedIn", url=validated_url)]]
+    return [[TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)]]
+
+
+def build_prepare_failed_buttons(source: str, external_id: str, url: str) -> list[list[TelegramInlineButton]]:
+    validated_url = validate_vacancy_url(url)
+    compact_source = map_source_to_code(source)
+    prepare_data = _callback_data("prepare", compact_source, external_id)
+    skip_data = _callback_data("skip", compact_source, external_id)
+    return [
+        [TelegramInlineButton(text="Retry preparation", callback_data=prepare_data)],
+        [TelegramInlineButton(text="Skip", callback_data=skip_data)],
+        [TelegramInlineButton(text="Open vacancy", url=validated_url)],
+    ]
 
 
 def build_loading_text(*, title: str, company: str | None) -> str:
@@ -299,7 +344,7 @@ def parse_callback_data(value: str) -> tuple[str, str, str]:
     action, source_code, external_id = parts
     if action not in {"skip", "prepare", "applied", "copy", "resume"}:
         raise ValueError("Unsupported callback action.")
-    if not external_id.isdigit():
+    if not external_id.strip():
         raise ValueError("Invalid external id in callback data.")
     source = map_code_to_source(source_code)
     return action, source, external_id
@@ -311,17 +356,9 @@ def validate_linkedin_job_url(url: str) -> str:
 
 def validate_vacancy_url(url: str) -> str:
     normalized = url.strip()
-    if normalized.startswith("https://www.linkedin.com/jobs/view/"):
+    if normalized.startswith("https://") or normalized.startswith("http://"):
         return normalized
-    if normalized.startswith("https://boards.greenhouse.io/"):
-        return normalized
-    if normalized.startswith("https://job-boards.greenhouse.io/"):
-        return normalized
-    if normalized.startswith("https://www.greenhouse.io/careers/"):
-        return normalized
-    if normalized.startswith("https://greenhouse.io/"):
-        return normalized
-    raise ValueError("Only known vacancy board URLs are allowed.")
+    raise ValueError("Only HTTP(S) vacancy URLs are allowed.")
 
 
 def _callback_data(action: str, source_code: str, external_id: str) -> str:

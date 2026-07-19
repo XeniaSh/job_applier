@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from typing import Callable
 
 import typer
 from pydantic import ValidationError
@@ -24,7 +25,7 @@ from app.collectors.linkedin_email_collector import (
 )
 from app.collectors.linkedin_email_parser import extract_email_text_parts, parse_linkedin_email
 from app.collectors.title_filter import should_accept_title
-from app.collectors.vacancy_collector import NormalizedVacancy, VacancyCollector
+from app.collectors.vacancy_collector import Collector, CollectorResult, NormalizedVacancy, VacancyCollector, vacancy_identity
 from app.application.preparation_service import (
     ApplicationPreparationError,
     PreparedApplication,
@@ -35,7 +36,7 @@ from app.application.resume_cache_service import KNOWN_RESUME_NAMES, ResumeCache
 from app.config import Settings
 from app.formatter import format_evaluation_ru
 from app.llm_client import CoverLetterValidationError, LLMClient, LLMRequestError, LLMResponseError
-from app.models import Decision
+from app.models import Decision, VacancyEvaluation
 from app.prompt_loader import PromptLoadError, load_analysis_prompt
 from app.skills_profile_loader import SkillsProfileLoadError, load_candidate_skills
 from app.storage.seen_jobs import SeenJobsStorage
@@ -50,17 +51,19 @@ from app.storage.telegram_delivery import (
 )
 from app.telegram.client import (
     TelegramClient,
+    TelegramMessageNotModifiedError,
     TelegramRequestError,
     build_archived_buttons,
     build_loading_buttons,
     build_loading_text,
+    build_prepare_failed_buttons,
     build_prepared_application_buttons,
     build_ready_text,
     map_source_to_code,
     parse_callback_data,
     validate_linkedin_job_url,
 )
-from app.telegram.formatter import format_archived_vacancy_html
+from app.telegram.formatter import format_archived_vacancy_html, format_preparation_failed_html
 from app.telegram.models import (
     ApplicationHistoryRecord,
     TelegramDeliveryRecord,
@@ -323,7 +326,7 @@ def collect_greenhouse(
         typer.secho(f"Ошибка Greenhouse collection: {exc}", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
 
-    report = _analyze_collected_vacancies(
+    report, _per_source, _analysis = _analyze_collected_vacancies(
         analyzer=analyzer,
         seen_jobs=seen_jobs,
         vacancies=collected,
@@ -595,9 +598,10 @@ def run_pipeline(
         analyzer=analyzer,
         seen_jobs=seen_jobs,
     )
-    collectors: list[VacancyCollector] = [linkedin_collector]
+    collectors: list[Collector] = [RuntimeCollector(name="linkedin-email", collect_fn=linkedin_collector.collect)]
     if settings.greenhouse_boards:
-        collectors.append(GreenhouseCollector(boards=settings.greenhouse_boards))
+        greenhouse_collector = GreenhouseCollector(boards=settings.greenhouse_boards)
+        collectors.append(RuntimeCollector(name="greenhouse", collect_fn=greenhouse_collector.collect))
     telegram_client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
     callback_resume_cache = ResumeCacheService(
         resumes_dir=settings.resumes_dir,
@@ -626,36 +630,82 @@ def run_pipeline(
             now = time.monotonic()
             if now >= next_cycle_monotonic:
                 try:
-                    collected, collect_errors = _collect_from_collectors(collectors)
-                    report = _analyze_collected_vacancies(
+                    cycle_start = time.monotonic()
+                    collect_start = time.monotonic()
+                    pipeline_result = _collect_pipeline_items(
+                        collectors=collectors,
+                        safe_error_formatter=lambda source, exc: _format_collector_error(
+                            source=source,
+                            exc=exc,
+                            imap_host=settings.linkedin_email_imap_host,
+                            secrets=_runtime_secrets(settings),
+                        ),
+                    )
+                    collect_ms = max(0, int((time.monotonic() - collect_start) * 1000))
+                    analyze_start = time.monotonic()
+                    _analyze_pipeline_items(
                         analyzer=analyzer,
                         seen_jobs=seen_jobs,
-                        vacancies=collected,
+                        pipeline=pipeline_result,
                         limit=20,
                         skip_seen=True,
                         mark_seen=True,
                     )
-                    report.errors += collect_errors
-                    per_source: dict[str, int] = {}
-                    for item in collected:
-                        per_source[item.source] = per_source.get(item.source, 0) + 1
-                    source_stats = " ".join(f"{name}={count}" for name, count in sorted(per_source.items()))
-                    _run_log(f"Collected: {source_stats or 'none'} unique={report.unique_vacancies}")
-                    _run_log(
-                        "Analysis: "
-                        f"strong={report.strong_matches} "
-                        f"potential={report.potential_matches} "
-                        f"ignore={report.ignored} "
-                        f"title_filtered={report.prefiltered}"
-                    )
-                    sent, already_sent = _send_processed_to_telegram(
-                        processed=report.processed,
+                    analyze_ms = max(0, int((time.monotonic() - analyze_start) * 1000))
+                    telegram_start = time.monotonic()
+                    _deliver_pipeline_items(
+                        pipeline=pipeline_result,
                         deliveries=deliveries,
                         telegram_client=telegram_client,
                         chat_id=settings.telegram_chat_id,
-                        verbose=verbose,
                     )
-                    _run_log(f"Telegram: sent={sent} already_sent={already_sent}")
+                    telegram_ms = max(0, int((time.monotonic() - telegram_start) * 1000))
+                    cycle_ms = max(0, int((time.monotonic() - cycle_start) * 1000))
+
+                    pipeline_result.validate_accounting()
+                    source_names = _ordered_sources(pipeline_result.sources())
+                    for source_name in source_names:
+                        if pipeline_result.has_collect_error(source_name):
+                            failed_message = pipeline_result.collect_error_message(source_name)
+                            _run_log(f"{source_name}: failed — {failed_message}")
+                            continue
+                        _run_log(
+                            f"{source_name}: extracted={pipeline_result.extracted(source_name)} "
+                            f"unique={pipeline_result.unique(source_name)} "
+                            f"new={pipeline_result.new(source_name)} "
+                            f"already_seen={pipeline_result.already_seen(source_name)} "
+                            f"invalid_identity={pipeline_result.invalid_identity(source_name)} "
+                            f"prefiltered={pipeline_result.title_filtered(source_name)} "
+                            f"errors={pipeline_result.errors_before_analysis(source_name)}"
+                        )
+                    if len(source_names) > 1:
+                        _run_log(f"Merged: unique={pipeline_result.merged_unique()}")
+                    _run_log(
+                        "Analysis: "
+                        f"analyzed={pipeline_result.analyzed_total()} "
+                        f"strong={pipeline_result.strong_total()} "
+                        f"potential={pipeline_result.potential_total()} "
+                        f"ignore={pipeline_result.ignore_total()} "
+                        f"title_filtered={pipeline_result.title_filtered_total()} "
+                        f"errors={pipeline_result.processing_errors_total()}"
+                    )
+                    _run_log(
+                        "Telegram: "
+                        f"eligible={pipeline_result.eligible()} "
+                        f"already_delivered={pipeline_result.already_delivered()} "
+                        f"sent={pipeline_result.sent()} "
+                        f"errors={pipeline_result.telegram_errors()}"
+                    )
+                    no_work_reason = pipeline_result.no_work_reason()
+                    if pipeline_result.analyzed_total() == 0 and no_work_reason:
+                        _run_log(f"No vacancies analyzed: {no_work_reason}")
+                    _run_log(
+                        f"Timing: collect={collect_ms}ms analyze={analyze_ms}ms "
+                        f"telegram={telegram_ms}ms cycle={cycle_ms}ms"
+                    )
+                    if verbose:
+                        for outcome in _pipeline_verbose_outcomes(pipeline_result):
+                            _run_log(outcome)
                 except (LLMRequestError, LLMResponseError) as exc:
                     _run_log(f"Pipeline cycle failed: {exc}")
                 except Exception as exc:  # noqa: BLE001
@@ -675,7 +725,7 @@ def run_pipeline(
                 if prepare_requests > 0:
                     _run_log("Prepare request received")
             except TelegramRequestError as exc:
-                _run_log(f"Telegram poll failed: {exc}")
+                _run_log(f"Telegram poll failed: {_format_telegram_error(exc, secrets=_runtime_secrets(settings))}")
                 time.sleep(poll_interval)
                 continue
 
@@ -1102,24 +1152,321 @@ def _print_linkedin_summary(report: LinkedInEmailCollectReport) -> None:
     )
 
 
-def _collect_from_collectors(collectors: list[VacancyCollector]) -> tuple[list[NormalizedVacancy], int]:
-    merged: list[NormalizedVacancy] = []
-    seen_keys: set[tuple[str, str, str] | str] = set()
-    errors = 0
+def _collect_pipeline_items(
+    *,
+    collectors: list[Collector],
+    safe_error_formatter: Callable[[str, Exception], str],
+) -> PipelineResult:
+    items: list[PipelineItem] = []
     for collector in collectors:
         try:
-            items = collector.collect()
+            result = collector.collect()
         except Exception as exc:  # noqa: BLE001
-            errors += 1
-            logger.error("Collector %s failed: %s", collector.__class__.__name__, exc)
+            items.append(
+                PipelineItem(
+                    source=collector.name,
+                    error=safe_error_formatter(collector.name, exc),
+                    error_stage="collect",
+                )
+            )
             continue
+
+        for vacancy in result.vacancies:
+            identity = vacancy_identity(vacancy)
+            storage_key = _identity_storage_key(identity=identity, vacancy=vacancy)
+            items.append(
+                PipelineItem(
+                    source=result.source or collector.name,
+                    vacancy=vacancy,
+                    identity=identity,
+                    storage_source=storage_key[0] if storage_key else None,
+                    storage_external_id=storage_key[1] if storage_key else None,
+                )
+            )
+
+    seen_keys: set[str] = set()
+    for item in items:
+        if item.vacancy is None:
+            continue
+        if item.identity:
+            key = item.identity
+        else:
+            key = f"missing:{item.source}:{len(seen_keys)}"
+        if key in seen_keys:
+            item.duplicate = True
+            continue
+        seen_keys.add(key)
+    return PipelineResult(items=items)
+
+
+def _analyze_pipeline_items(
+    *,
+    analyzer: VacancyAnalyzer,
+    seen_jobs: SeenJobsStorage,
+    pipeline: PipelineResult,
+    limit: int,
+    skip_seen: bool,
+    mark_seen: bool,
+) -> None:
+    for item in pipeline.items:
+        if item.vacancy is None or item.duplicate:
+            continue
+        vacancy = item.vacancy
+        if item.storage_source is None or item.storage_external_id is None:
+            item.invalid_identity = True
+            item.preanalysis_outcome = "invalid_identity"
+            continue
+
+        try:
+            item.already_seen = seen_jobs.is_seen(item.storage_source, item.storage_external_id)
+        except Exception as exc:  # noqa: BLE001
+            item.error = str(exc)
+            item.error_stage = "seen"
+            item.preanalysis_outcome = "error"
+            continue
+
+        if item.already_seen and skip_seen:
+            item.preanalysis_outcome = "already_seen"
+            continue
+
+        if not should_accept_title(vacancy.title):
+            item.title_filtered = True
+            item.preanalysis_outcome = "prefiltered"
+            if mark_seen:
+                seen_jobs.mark_seen(item.storage_source, item.storage_external_id)
+            continue
+
+        item.preanalysis_outcome = "new"
+
+    analyzable: list[PipelineItem] = [item for item in pipeline.items if item.preanalysis_outcome == "new"]
+    for item in analyzable[:limit]:
+        item.considered = True
+        vacancy = item.vacancy
+        if vacancy is None:
+            continue
+        try:
+            evaluation = analyzer.analyze(vacancy.to_analysis_text(), content_completeness="FULL")
+        except Exception as exc:  # noqa: BLE001
+            item.error = str(exc)
+            item.error_stage = "analyze"
+            logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
+            continue
+
+        item.analysis_result = evaluation
+        if mark_seen:
+            seen_jobs.mark_seen(item.storage_source or vacancy.source, item.storage_external_id or vacancy.external_id)
+        decision = evaluation.decision.value
+        item.telegram_eligible = decision in {"STRONG_MATCH", "POTENTIAL_MATCH"}
+
+
+def _deliver_pipeline_items(
+    *,
+    pipeline: PipelineResult,
+    deliveries: TelegramDeliveryStorage,
+    telegram_client: TelegramClient,
+    chat_id: str,
+) -> None:
+    for item in pipeline.items:
+        if item.vacancy is None:
+            continue
+        if item.title_filtered:
+            _upsert_history_item(
+                LinkedInProcessedVacancy(
+                    external_id=item.vacancy.external_id,
+                    title=item.vacancy.title,
+                    company=item.vacancy.company,
+                    location=item.vacancy.location,
+                    url=item.vacancy.url,
+                    content_completeness="FULL",
+                    evaluation=None,
+                    skipped_by_prefilter=True,
+                    source=item.source,
+                )
+            )
+            continue
+        if item.analysis_result is None:
+            continue
+
+        _upsert_history_item(
+            LinkedInProcessedVacancy(
+                external_id=item.vacancy.external_id,
+                title=item.vacancy.title,
+                company=item.vacancy.company,
+                location=item.vacancy.location,
+                url=item.vacancy.url,
+                content_completeness="FULL",
+                evaluation=item.analysis_result,
+                source=item.source,
+            )
+        )
+
+        if not item.telegram_eligible:
+            continue
+        delivery_source = item.storage_source or item.source
+        delivery_external_id = item.storage_external_id or item.vacancy.external_id
+        already_delivered = deliveries.was_sent(delivery_source, delivery_external_id, chat_id)
+        if already_delivered:
+            item.telegram_already_delivered = True
+            continue
+        card = TelegramVacancyCard(
+            source=map_source_to_code(item.source),
+            external_id=item.vacancy.external_id,
+            decision=item.analysis_result.decision.value,
+            title=item.vacancy.title,
+            company=item.vacancy.company,
+            location=item.vacancy.location,
+            url=item.vacancy.url,
+            match_percentage=item.analysis_result.match_percentage,
+            gaps=item.analysis_result.gaps,
+            nuances=item.analysis_result.nuances,
+            recommended_resume=item.analysis_result.recommended_resume.value,
+            content_completeness="FULL",
+        )
+        try:
+            message_ref = telegram_client.send_vacancy_card(card)
+        except (TelegramRequestError, ValueError) as exc:
+            item.error = str(exc)
+            item.error_stage = "telegram"
+            logger.error("Telegram send failed for job %s: %s", item.vacancy.external_id, exc)
+            continue
+        deliveries.save_sent(
+            source=delivery_source,
+            external_id=delivery_external_id,
+            chat_id=chat_id,
+            message_id=message_ref.message_id,
+        )
+        deliveries.mark_history_status(
+            source=delivery_source,
+            external_id=delivery_external_id,
+            status="SENT",
+            timestamp_field="sent_at",
+        )
+        item.telegram_delivered = True
+
+
+def _pipeline_verbose_outcomes(pipeline: PipelineResult) -> list[str]:
+    outcomes: list[str] = []
+    for item in pipeline.items:
+        if item.vacancy is None or item.duplicate:
+            continue
+        title = item.vacancy.title
+        identity = item.identity or "<missing_identity>"
+        if item.preanalysis_outcome == "already_seen":
+            outcomes.append(f"ALREADY_SEEN {identity} {title}")
+            continue
+        if item.preanalysis_outcome == "invalid_identity":
+            outcomes.append(f"INVALID_IDENTITY {title}")
+            continue
+        if item.preanalysis_outcome == "prefiltered":
+            outcomes.append(f"PREFILTERED {identity} {title}")
+            continue
+        if item.preanalysis_outcome == "error":
+            outcomes.append(f"ERROR {identity} {item.error or 'preanalysis_error'}")
+            continue
+        if item.preanalysis_outcome == "new":
+            outcomes.append(f"NEW {identity} {title}")
+        if item.analysis_result is None:
+            continue
+        if item.analysis_result.decision == Decision.STRONG_MATCH:
+            outcomes.append(f"STRONG {identity} {title}")
+        elif item.analysis_result.decision == Decision.POTENTIAL_MATCH:
+            outcomes.append(f"POTENTIAL {identity} {title}")
+        else:
+            outcomes.append(f"IGNORE {identity} {title}")
+
+        if item.telegram_already_delivered:
+            outcomes.append(f"ALREADY_DELIVERED {identity} {title}")
+        elif item.telegram_delivered:
+            outcomes.append(f"SENT {identity} {title}")
+    return outcomes
+
+
+def _ordered_sources(sources: list[str]) -> list[str]:
+    preferred = ["linkedin-email", "greenhouse"]
+    ranked = [source for source in preferred if source in sources]
+    ranked.extend(sorted(source for source in sources if source not in preferred))
+    return ranked
+
+
+def _identity_storage_key(*, identity: str | None, vacancy: NormalizedVacancy) -> tuple[str, str] | None:
+    if identity is None:
+        return None
+    if identity.startswith("url:"):
+        return ("url", identity[4:])
+    if identity.startswith("fp:"):
+        return ("fp", identity[3:])
+    if ":" not in identity:
+        return None
+    source, external_id = identity.split(":", 1)
+    source = source.strip()
+    external_id = external_id.strip()
+    if not source or not external_id:
+        return None
+    return source, external_id
+
+
+def _collect_from_collectors(
+    *,
+    collectors: list[VacancyCollector],
+    safe_error_formatter,
+) -> CollectCycleReport:
+    merged: list[NormalizedVacancy] = []
+    seen_keys: set[tuple[str, str, str] | str] = set()
+    per_source: dict[str, SourceCycleCounters] = {}
+
+    for collector in collectors:
+        source = getattr(collector, "SOURCE", collector.__class__.__name__.lower())
+        counters = per_source.setdefault(source, SourceCycleCounters(source=source))
+        try:
+            extracted, items = _collect_source_items(collector)
+            if not getattr(collector, "SOURCE", None) and items:
+                inferred_source = items[0].source
+                if inferred_source != source:
+                    per_source.pop(source, None)
+                    source = inferred_source
+                    counters = per_source.setdefault(source, SourceCycleCounters(source=source))
+            counters.extracted = extracted
+            counters.unique = len(items)
+        except Exception as exc:  # noqa: BLE001
+            counters.failed_message = safe_error_formatter(source, exc)
+            counters.errors += 1
+            logger.error("Collector %s failed: %s", source, counters.failed_message)
+            continue
+
         for item in items:
             key = item.dedupe_key()
             if key in seen_keys:
                 continue
             seen_keys.add(key)
             merged.append(item)
-    return merged, errors
+
+    return CollectCycleReport(
+        merged=merged,
+        merged_unique=len(merged),
+        per_source=per_source,
+    )
+
+
+def _collect_source_items(collector: VacancyCollector) -> tuple[int, list[NormalizedVacancy]]:
+    if hasattr(collector, "_collect_unique_vacancies"):
+        items, _emails, _parse_errors, extracted = collector._collect_unique_vacancies()  # noqa: SLF001
+        normalized = [
+            NormalizedVacancy(
+                source=collector.SOURCE,
+                external_id=item.external_id,
+                title=item.title,
+                company=item.company,
+                location=item.location,
+                employment=None,
+                description=item.to_analysis_text(),
+                url=item.url,
+                published_at=item.received_at.isoformat() if item.received_at else None,
+            )
+            for item in items
+        ]
+        return extracted, normalized
+    items = collector.collect()
+    return len(items), items
 
 
 def _analyze_collected_vacancies(
@@ -1130,22 +1477,30 @@ def _analyze_collected_vacancies(
     limit: int,
     skip_seen: bool,
     mark_seen: bool,
-) -> LinkedInEmailCollectReport:
+) -> tuple[LinkedInEmailCollectReport, dict[str, SourceCycleCounters], AnalysisCycleReport]:
     report = LinkedInEmailCollectReport()
     limited = vacancies[:limit]
     report.unique_vacancies = len(limited)
     report.vacancies_extracted = len(vacancies)
+    per_source: dict[str, SourceCycleCounters] = {}
+    verbose_outcomes: list[str] = []
 
     for vacancy in limited:
+        source_counters = per_source.setdefault(vacancy.source, SourceCycleCounters(source=vacancy.source))
         is_seen = seen_jobs.is_seen(vacancy.source, vacancy.external_id)
         if is_seen:
             report.already_seen += 1
+            source_counters.already_seen += 1
+            verbose_outcomes.append(f"ALREADY_SEEN {vacancy.title}")
             if skip_seen:
                 continue
         report.new_vacancies += 1
+        source_counters.new += 1
 
         if not should_accept_title(vacancy.title):
             report.prefiltered += 1
+            source_counters.prefiltered += 1
+            verbose_outcomes.append(f"TITLE_FILTER {vacancy.title}")
             report.processed.append(
                 LinkedInProcessedVacancy(
                     external_id=vacancy.external_id,
@@ -1167,18 +1522,26 @@ def _analyze_collected_vacancies(
             evaluation = analyzer.analyze(vacancy.to_analysis_text(), content_completeness="FULL")
         except Exception as exc:  # noqa: BLE001
             report.errors += 1
+            source_counters.errors += 1
             logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
             continue
 
         if mark_seen:
             seen_jobs.mark_seen(vacancy.source, vacancy.external_id)
         report.analyzed += 1
+        source_counters.analyzed += 1
         if evaluation.decision == Decision.STRONG_MATCH:
             report.strong_matches += 1
+            source_counters.strong += 1
+            verbose_outcomes.append(f"STRONG {vacancy.title}")
         elif evaluation.decision == Decision.POTENTIAL_MATCH:
             report.potential_matches += 1
+            source_counters.potential += 1
+            verbose_outcomes.append(f"POTENTIAL {vacancy.title}")
         else:
             report.ignored += 1
+            source_counters.ignore += 1
+            verbose_outcomes.append(f"IGNORE {vacancy.title}")
         report.processed.append(
             LinkedInProcessedVacancy(
                 external_id=vacancy.external_id,
@@ -1192,7 +1555,126 @@ def _analyze_collected_vacancies(
             )
         )
 
-    return report
+    no_work_reason = _determine_no_work_reason(
+        merged_unique=len(limited),
+        new=report.new_vacancies,
+        already_seen=report.already_seen,
+        prefiltered=report.prefiltered,
+        analyzed=report.analyzed,
+        errors=report.errors,
+    )
+    return report, per_source, AnalysisCycleReport(
+        processed=report.processed,
+        analyzed=report.analyzed,
+        strong=report.strong_matches,
+        potential=report.potential_matches,
+        ignore=report.ignored,
+        title_filtered=report.prefiltered,
+        errors=report.errors,
+        no_work_reason=no_work_reason,
+        verbose_events=verbose_outcomes,
+    )
+
+
+def _merge_source_counters(
+    *,
+    collected: dict[str, SourceCycleCounters],
+    analyzed: dict[str, SourceCycleCounters],
+    known_sources: list[str],
+) -> dict[str, SourceCycleCounters]:
+    merged: dict[str, SourceCycleCounters] = {}
+    for name in known_sources:
+        if name in collected or name in analyzed:
+            merged[name] = SourceCycleCounters(source=name)
+
+    for source, counters in collected.items():
+        target = merged.setdefault(source, SourceCycleCounters(source=source))
+        target.extracted = counters.extracted
+        target.unique = counters.unique
+        target.errors += counters.errors
+        target.failed_message = counters.failed_message
+
+    for source, counters in analyzed.items():
+        target = merged.setdefault(source, SourceCycleCounters(source=source))
+        target.new += counters.new
+        target.already_seen += counters.already_seen
+        target.prefiltered += counters.prefiltered
+        target.analyzed += counters.analyzed
+        target.strong += counters.strong
+        target.potential += counters.potential
+        target.ignore += counters.ignore
+        target.errors += counters.errors
+    return merged
+
+
+def _determine_no_work_reason(
+    *,
+    merged_unique: int,
+    new: int,
+    already_seen: int,
+    prefiltered: int,
+    analyzed: int,
+    errors: int,
+) -> str | None:
+    if analyzed > 0:
+        return None
+    if errors > 0:
+        return f"processing errors={errors}."
+    if merged_unique == 0:
+        return "collector returned no new vacancies."
+    if new == 0 and already_seen == merged_unique:
+        return "all unique vacancies were already seen."
+    if new > 0 and prefiltered == new:
+        return "all candidates were removed by title filter."
+    return "see cycle counters."
+
+
+def _runtime_secrets(settings: Settings) -> list[str]:
+    return [
+        settings.llm_api_key,
+        settings.linkedin_email_password,
+        settings.telegram_bot_token,
+    ]
+
+
+def _sanitize_text(value: str, *, secrets: list[str]) -> str:
+    sanitized = value
+    for secret in secrets:
+        if secret:
+            sanitized = sanitized.replace(secret, "***")
+    return sanitized
+
+
+def _format_collector_error(*, source: str, exc: Exception, imap_host: str, secrets: list[str]) -> str:
+    if source == "linkedin-email":
+        if isinstance(exc, EmailAuthenticationError):
+            return "IMAP authentication failure."
+        if isinstance(exc, EmailConnectionError):
+            message = str(exc).lower()
+            if "select mailbox" in message or "folder" in message:
+                return "IMAP mailbox selection failure."
+            if "timeout" in message:
+                return f"IMAP connection timeout to {imap_host}."
+            if "ssl" in message or "connection failed" in message:
+                return f"IMAP SSL/network failure to {imap_host}."
+            return f"IMAP connection failed to {imap_host}."
+    return _sanitize_text(str(exc), secrets=secrets) or "collector failed."
+
+
+def _format_telegram_error(exc: Exception, *, secrets: list[str]) -> str:
+    message = _sanitize_text(str(exc), secrets=secrets).lower()
+    if "http 409" in message:
+        return "HTTP 409 conflict — another getUpdates poller may be running."
+    if "http 401" in message:
+        return "HTTP 401 unauthorized."
+    if "timeout" in message:
+        return "timeout."
+    http_match = re.search(r"http\s+(\d{3})", message)
+    if http_match:
+        return f"HTTP {http_match.group(1)}."
+    if "request failed" in message:
+        return "network failure."
+    return _sanitize_text(str(exc), secrets=secrets)
 
 
 @app.command("list-imap-folders")
@@ -1419,6 +1901,13 @@ def _process_callback_update(
                 company=company,
                 applied=False,
             )
+            _cleanup_aux_messages(
+                storage=storage,
+                client=client,
+                source=source,
+                external_id=external_id,
+                chat_id=configured_chat_id,
+            )
         elif action == "applied":
             if current_status == STATUS_APPLIED:
                 if callback_id:
@@ -1443,6 +1932,13 @@ def _process_callback_update(
                 company=company,
                 applied=True,
             )
+            _cleanup_aux_messages(
+                storage=storage,
+                client=client,
+                source=source,
+                external_id=external_id,
+                chat_id=configured_chat_id,
+            )
         elif action == "prepare":
             if current_status == STATUS_PREPARE_REQUESTED:
                 if callback_id:
@@ -1462,12 +1958,15 @@ def _process_callback_update(
                     text="Добавлено в очередь на подготовку отклика",
                 )
             if message_id > 0 and url:
-                client.edit_message_text(
-                    chat_id=configured_chat_id,
-                    message_id=message_id,
-                    text=build_loading_text(title=title, company=company),
-                    buttons=build_loading_buttons(url),
-                )
+                try:
+                    client.edit_message_text(
+                        chat_id=configured_chat_id,
+                        message_id=message_id,
+                        text=build_loading_text(title=title, company=company),
+                        buttons=build_loading_buttons(url),
+                    )
+                except TelegramMessageNotModifiedError:
+                    _ = None
         elif action == "copy":
             get_preparation = getattr(storage, "get_preparation", None)
             prep = get_preparation(source, external_id) if callable(get_preparation) else None
@@ -1475,7 +1974,23 @@ def _process_callback_update(
                 if callback_id:
                     client.answer_callback_query(callback_id, text="Отклик еще не готов")
                 return
-            client.send_text_message(prep.cover_letter)
+            existing_cover_id = getattr(prep, "cover_letter_message_id", None)
+            if isinstance(existing_cover_id, int) and existing_cover_id > 0:
+                if callback_id:
+                    client.answer_callback_query(callback_id, text="Cover letter already sent below this vacancy.")
+                return
+            sent_ref = client.send_text_message(
+                prep.cover_letter,
+                chat_id=configured_chat_id,
+                reply_to_message_id=message_id if message_id > 0 else None,
+            )
+            set_aux = getattr(storage, "set_preparation_aux_message_id", None)
+            if callable(set_aux):
+                set_aux(
+                    source=source,
+                    external_id=external_id,
+                    cover_letter_message_id=sent_ref.message_id,
+                )
             if callback_id:
                 client.answer_callback_query(callback_id, text="Cover letter sent")
         else:  # action == "resume"
@@ -1484,6 +1999,11 @@ def _process_callback_update(
             if prep is None or prep.status != STATUS_PREPARED or not prep.resume_name:
                 if callback_id:
                     client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                return
+            existing_resume_id = getattr(prep, "resume_message_id", None)
+            if isinstance(existing_resume_id, int) and existing_resume_id > 0:
+                if callback_id:
+                    client.answer_callback_query(callback_id, text="Resume already sent below this vacancy.")
                 return
             cache = resume_cache_service
             if cache is None:
@@ -1500,15 +2020,60 @@ def _process_callback_update(
                 resume_name=prep.resume_name,
                 chat_id=configured_chat_id,
             )
-            if resume_result.missing or resume_result.telegram_file_id is None:
+            if resume_result.missing:
                 if callback_id:
                     client.answer_callback_query(callback_id, text="Resume PDF not found.")
                 return
-            client.send_document_by_file_id(
-                chat_id=configured_chat_id,
-                file_id=resume_result.telegram_file_id,
-                caption=None,
+            caption = _build_resume_caption(
+                resume_name=prep.resume_name,
+                title=title,
+                company=company,
             )
+            sent_doc = None
+            if resume_result.telegram_file_id:
+                try:
+                    sent_doc = client.send_document_by_file_id(
+                        chat_id=configured_chat_id,
+                        file_id=resume_result.telegram_file_id,
+                        caption=caption,
+                        reply_to_message_id=message_id if message_id > 0 else None,
+                    )
+                except TelegramRequestError:
+                    sent_doc = None
+            if sent_doc is None:
+                if resumes_dir is None:
+                    if callback_id:
+                        client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                    return
+                resume_path, _resume_error = resolve_resume_path(resumes_dir, prep.resume_name)
+                if resume_path is None:
+                    if callback_id:
+                        client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                    return
+                sent_doc = client.send_document(
+                    file_path=str(resume_path),
+                    caption=caption,
+                    chat_id=configured_chat_id,
+                    reply_to_message_id=message_id if message_id > 0 else None,
+                )
+                stat = resume_path.stat()
+                save_cache = getattr(storage, "save_resume_cache", None)
+                if callable(save_cache):
+                    save_cache(
+                        resume_name=prep.resume_name,
+                        file_path=str(resume_path),
+                        file_mtime_ns=int(stat.st_mtime_ns),
+                        file_size=int(stat.st_size),
+                        telegram_file_id=sent_doc.file_id,
+                        telegram_file_unique_id=sent_doc.file_unique_id,
+                    )
+            set_aux = getattr(storage, "set_preparation_aux_message_id", None)
+            if callable(set_aux):
+                set_aux(
+                    source=source,
+                    external_id=external_id,
+                    resume_message_id=sent_doc.message_id,
+                )
             if callback_id:
                 client.answer_callback_query(callback_id, text="Resume sent")
     except (ValueError, KeyError, TelegramRequestError, OSError):
@@ -1533,12 +2098,46 @@ def _edit_archived_card(
     if message_id <= 0:
         return
     buttons = build_archived_buttons(url) if url else []
-    client.edit_message_text(
-        chat_id=chat_id,
-        message_id=message_id,
-        text=format_archived_vacancy_html(applied=applied, title=title, company=company),
-        buttons=buttons,
-    )
+    try:
+        client.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=format_archived_vacancy_html(applied=applied, title=title, company=company),
+            buttons=buttons,
+        )
+    except TelegramMessageNotModifiedError:
+        _ = None
+
+
+def _build_resume_caption(*, resume_name: str, title: str, company: str | None) -> str:
+    company_part = company or "n/a"
+    return f"Resume · {resume_name.replace('-', ' ').title()}\n{title} · {company_part}"
+
+
+def _cleanup_aux_messages(
+    *,
+    storage: TelegramDeliveryStorage,
+    client: TelegramClient,
+    source: str,
+    external_id: str,
+    chat_id: str,
+) -> None:
+    get_preparation = getattr(storage, "get_preparation", None)
+    prep = get_preparation(source, external_id) if callable(get_preparation) else None
+    if prep is None:
+        return
+    resume_message_id = getattr(prep, "resume_message_id", None)
+    cover_message_id = getattr(prep, "cover_letter_message_id", None)
+    for message_id in [resume_message_id, cover_message_id]:
+        if not isinstance(message_id, int) or message_id <= 0:
+            continue
+        try:
+            client.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramRequestError as exc:
+            logger.warning("Auxiliary Telegram message cleanup failed for %s:%s: %s", source, external_id, exc)
+    clear_aux = getattr(storage, "clear_preparation_aux_message_ids", None)
+    if callable(clear_aux):
+        clear_aux(source=source, external_id=external_id)
 
 
 def _resolve_card_context(
@@ -1811,6 +2410,253 @@ class PreparationRunResult:
     pdf_errors: int
 
 
+@dataclass
+class PipelineItem:
+    source: str
+    vacancy: NormalizedVacancy | None = None
+    identity: str | None = None
+    storage_source: str | None = None
+    storage_external_id: str | None = None
+    duplicate: bool = False
+    considered: bool = False
+    preanalysis_outcome: str | None = None
+    already_seen: bool = False
+    invalid_identity: bool = False
+    title_filtered: bool = False
+    analysis_result: VacancyEvaluation | None = None
+    telegram_eligible: bool = False
+    telegram_delivered: bool = False
+    telegram_already_delivered: bool = False
+    error: str | None = None
+    error_stage: str | None = None
+
+    @property
+    def title(self) -> str:
+        if self.vacancy is None:
+            return ""
+        return self.vacancy.title
+
+
+@dataclass
+class PipelineResult:
+    items: list[PipelineItem]
+
+    def _source_items(self, source: str) -> list[PipelineItem]:
+        return [item for item in self.items if item.source == source]
+
+    def sources(self) -> list[str]:
+        return sorted({item.source for item in self.items})
+
+    def extracted(self, source: str) -> int:
+        return sum(1 for item in self._source_items(source) if item.vacancy is not None)
+
+    def unique(self, source: str) -> int:
+        return sum(1 for item in self._source_items(source) if item.vacancy is not None and not item.duplicate)
+
+    def new(self, source: str) -> int:
+        return sum(1 for item in self._source_items(source) if item.preanalysis_outcome == "new")
+
+    def already_seen(self, source: str) -> int:
+        return sum(1 for item in self._source_items(source) if item.preanalysis_outcome == "already_seen")
+
+    def invalid_identity(self, source: str) -> int:
+        return sum(1 for item in self._source_items(source) if item.preanalysis_outcome == "invalid_identity")
+
+    def title_filtered(self, source: str) -> int:
+        return sum(1 for item in self._source_items(source) if item.preanalysis_outcome == "prefiltered")
+
+    def errors_before_analysis(self, source: str) -> int:
+        return sum(1 for item in self._source_items(source) if item.preanalysis_outcome == "error")
+
+    def analyzed(self, source: str) -> int:
+        return sum(1 for item in self._source_items(source) if item.analysis_result is not None)
+
+    def strong(self, source: str) -> int:
+        return sum(
+            1
+            for item in self._source_items(source)
+            if item.analysis_result is not None
+            and getattr(item.analysis_result, "decision", None) == Decision.STRONG_MATCH
+        )
+
+    def potential(self, source: str) -> int:
+        return sum(
+            1
+            for item in self._source_items(source)
+            if item.analysis_result is not None
+            and getattr(item.analysis_result, "decision", None) == Decision.POTENTIAL_MATCH
+        )
+
+    def ignore(self, source: str) -> int:
+        return sum(
+            1
+            for item in self._source_items(source)
+            if item.analysis_result is not None
+            and getattr(item.analysis_result, "decision", None) == Decision.IGNORE
+        )
+
+    def eligible(self) -> int:
+        return sum(1 for item in self.items if item.telegram_eligible)
+
+    def sent(self) -> int:
+        return sum(1 for item in self.items if item.telegram_delivered)
+
+    def already_delivered(self) -> int:
+        return sum(1 for item in self.items if item.telegram_already_delivered)
+
+    def telegram_errors(self) -> int:
+        return sum(1 for item in self.items if item.error_stage == "telegram")
+
+    def stage_errors(self, source: str, stage: str) -> int:
+        return sum(1 for item in self._source_items(source) if item.error_stage == stage)
+
+    def has_collect_error(self, source: str) -> bool:
+        return any(item.error_stage == "collect" for item in self._source_items(source))
+
+    def collect_error_message(self, source: str) -> str | None:
+        for item in self._source_items(source):
+            if item.error_stage == "collect":
+                return item.error
+        return None
+
+    def merged_unique(self) -> int:
+        return sum(1 for item in self.items if item.vacancy is not None and not item.duplicate)
+
+    def analyzed_total(self) -> int:
+        return sum(1 for item in self.items if item.analysis_result is not None)
+
+    def strong_total(self) -> int:
+        return sum(
+            1
+            for item in self.items
+            if item.analysis_result is not None
+            and getattr(item.analysis_result, "decision", None) == Decision.STRONG_MATCH
+        )
+
+    def potential_total(self) -> int:
+        return sum(
+            1
+            for item in self.items
+            if item.analysis_result is not None
+            and getattr(item.analysis_result, "decision", None) == Decision.POTENTIAL_MATCH
+        )
+
+    def ignore_total(self) -> int:
+        return sum(
+            1
+            for item in self.items
+            if item.analysis_result is not None
+            and getattr(item.analysis_result, "decision", None) == Decision.IGNORE
+        )
+
+    def title_filtered_total(self) -> int:
+        return sum(1 for item in self.items if item.preanalysis_outcome == "prefiltered")
+
+    def invalid_identity_total(self) -> int:
+        return sum(1 for item in self.items if item.preanalysis_outcome == "invalid_identity")
+
+    def processing_errors_total(self) -> int:
+        return sum(1 for item in self.items if item.preanalysis_outcome == "error" or item.error_stage == "analyze")
+
+    def no_work_reason(self) -> str | None:
+        analyzed = self.analyzed_total()
+        if analyzed > 0:
+            return None
+        errors = self.processing_errors_total()
+        merged_unique = self.merged_unique()
+        already_seen = sum(1 for item in self.items if item.preanalysis_outcome == "already_seen")
+        invalid_identity = self.invalid_identity_total()
+        prefiltered = self.title_filtered_total()
+        new_count = sum(1 for item in self.items if item.preanalysis_outcome == "new")
+        accounted = already_seen + invalid_identity + prefiltered + new_count + sum(
+            1 for item in self.items if item.preanalysis_outcome == "error"
+        )
+        title_filtered = self.title_filtered_total()
+        if errors > 0:
+            return f"processing errors={errors}."
+        if merged_unique == 0:
+            return "collector returned no new vacancies."
+        if accounted != merged_unique:
+            return f"Pipeline accounting error: unique={merged_unique} accounted={accounted} missing={merged_unique - accounted}."
+        if already_seen == merged_unique:
+            return "all unique vacancies were already seen."
+        if invalid_identity > 0 and already_seen + invalid_identity == merged_unique:
+            return f"{invalid_identity} vacancies had no usable identity."
+        if title_filtered == merged_unique - already_seen - invalid_identity:
+            return "all candidates were removed by title filter."
+        if new_count == 0:
+            return f"new=0 already_seen={already_seen} prefiltered={title_filtered}."
+        return "see cycle counters."
+
+    def validate_accounting(self) -> None:
+        for source in self.sources():
+            unique = self.unique(source)
+            already_seen = self.already_seen(source)
+            invalid_identity = self.invalid_identity(source)
+            prefiltered = self.title_filtered(source)
+            new_count = self.new(source)
+            errors = self.errors_before_analysis(source)
+            assert unique == (already_seen + invalid_identity + prefiltered + new_count + errors), (
+                f"Unbalanced accounting for {source}: unique={unique}, "
+                f"already_seen={already_seen}, invalid_identity={invalid_identity}, "
+                f"prefiltered={prefiltered}, new={new_count}, errors_before_analysis={errors}"
+            )
+
+
+@dataclass(frozen=True)
+class RuntimeCollector:
+    name: str
+    collect_fn: Callable[[], list[NormalizedVacancy]]
+
+    def collect(self) -> CollectorResult:
+        return CollectorResult(source=self.name, vacancies=self.collect_fn())
+
+
+@dataclass
+class SourceCycleCounters:
+    source: str
+    extracted: int = 0
+    unique: int = 0
+    new: int = 0
+    already_seen: int = 0
+    prefiltered: int = 0
+    analyzed: int = 0
+    strong: int = 0
+    potential: int = 0
+    ignore: int = 0
+    errors: int = 0
+    failed_message: str | None = None
+
+
+@dataclass
+class CollectCycleReport:
+    merged: list[NormalizedVacancy]
+    merged_unique: int
+    per_source: dict[str, SourceCycleCounters]
+
+
+@dataclass(frozen=True)
+class AnalysisCycleReport:
+    processed: list[LinkedInProcessedVacancy]
+    analyzed: int
+    strong: int
+    potential: int
+    ignore: int
+    title_filtered: int
+    errors: int
+    no_work_reason: str | None
+    verbose_events: list[str]
+
+
+@dataclass(frozen=True)
+class TelegramCycleReport:
+    eligible: int
+    already_delivered: int
+    sent: int
+    send_errors: int
+    verbose_events: list[str]
+
+
 class _JobApplierLock:
     def __init__(self, lock_path: Path) -> None:
         self._path = lock_path
@@ -1922,6 +2768,11 @@ def _prepare_requested_applications(
         ) as exc:
             errors_count += 1
             if not dry_run:
+                message_ref = storage.get_message_ref(
+                    source=source,
+                    external_id=external_id,
+                    chat_id=settings.telegram_chat_id,
+                )
                 storage.update_status(
                     source=source,
                     external_id=external_id,
@@ -1946,6 +2797,23 @@ def _prepare_requested_applications(
                     status=STATUS_PREPARATION_FAILED,
                     timestamp_field=None,
                 )
+                if message_ref is not None:
+                    try:
+                        title, company, url = _resolve_card_context(
+                            storage=storage,
+                            message={"text": "", "reply_markup": {}},
+                            source=source,
+                            external_id=external_id,
+                        )
+                        if url:
+                            telegram_client.edit_message_text(  # type: ignore[union-attr]
+                                chat_id=message_ref[0],
+                                message_id=message_ref[1],
+                                text=format_preparation_failed_html(title=title, company=company),
+                                buttons=build_prepare_failed_buttons(source=source, external_id=external_id, url=url),
+                            )
+                    except (TelegramRequestError, TelegramMessageNotModifiedError, ValueError):
+                        logger.warning("Primary vacancy message update failed for preparation error: %s:%s", source, external_id)
             elif print_dry_run_items:
                 typer.echo(f"FAILED {source}:{external_id} {exc}")
             continue
@@ -2007,6 +2875,8 @@ def _prepare_requested_applications(
                     url=prepared.url,
                 ),
             )
+        except TelegramMessageNotModifiedError:
+            _ = None
         except (TelegramRequestError, ValueError) as exc:
             errors_count += 1
             storage.update_status(
@@ -2083,8 +2953,29 @@ def _send_processed_to_telegram(
     chat_id: str,
     verbose: bool,
 ) -> tuple[int, int]:
+    report = _send_processed_to_telegram_detailed(
+        processed=processed,
+        deliveries=deliveries,
+        telegram_client=telegram_client,
+        chat_id=chat_id,
+        verbose=verbose,
+    )
+    return report.sent, report.already_delivered
+
+
+def _send_processed_to_telegram_detailed(
+    *,
+    processed: list[LinkedInProcessedVacancy],
+    deliveries: TelegramDeliveryStorage,
+    telegram_client: TelegramClient,
+    chat_id: str,
+    verbose: bool,
+) -> TelegramCycleReport:
+    eligible = 0
     sent = 0
     already_sent = 0
+    send_errors = 0
+    verbose_events: list[str] = []
     for item in processed:
         _upsert_history_item(item)
         if item.evaluation is None:
@@ -2092,9 +2983,12 @@ def _send_processed_to_telegram(
         decision = item.evaluation.decision.value
         if decision not in {"STRONG_MATCH", "POTENTIAL_MATCH"}:
             continue
+        eligible += 1
         already_delivered = deliveries.was_sent(item.source, item.external_id, chat_id)
         if already_delivered:
             already_sent += 1
+            if verbose:
+                verbose_events.append(f"ALREADY_DELIVERED {item.title}")
             continue
         card = TelegramVacancyCard(
             source=map_source_to_code(item.source),
@@ -2126,7 +3020,14 @@ def _send_processed_to_telegram(
             )
             sent += 1
             if verbose:
-                _run_log(f"Telegram delivered {item.external_id}")
+                verbose_events.append(f"SENT {item.title}")
         except (TelegramRequestError, ValueError) as exc:
+            send_errors += 1
             logger.error("Telegram send failed for job %s: %s", item.external_id, exc)
-    return sent, already_sent
+    return TelegramCycleReport(
+        eligible=eligible,
+        already_delivered=already_sent,
+        sent=sent,
+        send_errors=send_errors,
+        verbose_events=verbose_events,
+    )

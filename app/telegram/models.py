@@ -93,3 +93,5 @@ class ApplicationPreparationRecord:
     vacancy_title: str | None
     vacancy_company: str | None
     vacancy_url: str | None
+    resume_message_id: int | None = None
+    cover_letter_message_id: int | None = None
