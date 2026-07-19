@@ -170,7 +170,8 @@ def test_run_telegram_poll_409_clear_message(monkeypatch, tmp_path: Path) -> Non
 
     result = CliRunner().invoke(cli_module.app, ["run"])
     assert result.exit_code == 0
-    assert "Telegram poll failed: HTTP 409 conflict — another getUpdates poller may be running." in result.output
+    assert "Telegram poll failed:" in result.output
+    assert "HTTP 409 conflict — another getUpdates poller may be running." in result.output
 
 
 def test_run_verbose_mode_prints_per_vacancy_outcomes(monkeypatch, tmp_path: Path) -> None:
@@ -447,3 +448,32 @@ def test_run_polling_failure_does_not_change_vacancy_counters(monkeypatch, tmp_p
     assert "Telegram poll failed:" in result.output
     assert "linkedin-email: extracted=1 unique=1 new=0 already_seen=1 invalid_identity=0 prefiltered=0 errors=0" in result.output
     assert "Telegram: eligible=0 already_delivered=0 sent=0 errors=0" in result.output
+
+
+def test_run_poll_failure_logs_method_status_and_description(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    _bootstrap_common(monkeypatch)
+    monkeypatch.setattr(cli_module, "LinkedInEmailCollector", lambda **kwargs: type("L", (), {"SOURCE": "linkedin-email", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
+    monkeypatch.setattr(
+        cli_module,
+        "_poll_telegram_actions_once",
+        lambda **kwargs: (_ for _ in ()).throw(
+            cli_module.TelegramRequestError(
+                "Telegram API request failed.",
+                method="editMessageText",
+                http_status=400,
+                error_code=400,
+                description="Bad Request: message to edit not found",
+            )
+        ),
+    )
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
+    monkeypatch.setattr(cli_module.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 0
+    assert "Telegram poll failed:" in result.output
+    assert "method=editMessageText" in result.output
+    assert "HTTP 400" in result.output
+    assert 'description="Bad Request: message to edit not found"' in result.output

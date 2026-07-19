@@ -15,6 +15,21 @@ from app.telegram.models import TelegramDocumentRef, TelegramInlineButton, Teleg
 class TelegramRequestError(Exception):
     """Raised when Telegram API request fails."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        method: str | None = None,
+        http_status: int | None = None,
+        error_code: int | None = None,
+        description: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.method = method
+        self.http_status = http_status
+        self.error_code = error_code
+        self.description = description
+
 
 class TelegramMessageNotModifiedError(TelegramRequestError):
     """Raised when Telegram edit has no changes."""
@@ -174,20 +189,26 @@ class TelegramClient:
                         files={"document": (Path(file_path).name, handle, "application/pdf")},
                     )
         except OSError as exc:
-            raise TelegramRequestError("Telegram sendDocument file read failed.") from exc
+            raise TelegramRequestError(
+                "Telegram API request failed.",
+                method="sendDocument",
+                description="file read failed",
+            ) from exc
         except httpx.TimeoutException as exc:
-            raise TelegramRequestError("Telegram sendDocument timeout.") from exc
+            raise TelegramRequestError(
+                "Telegram API request failed.",
+                method="sendDocument",
+                description="timeout",
+            ) from exc
         except httpx.HTTPError as exc:
-            raise TelegramRequestError("Telegram sendDocument request failed.") from exc
+            raise TelegramRequestError(
+                "Telegram API request failed.",
+                method="sendDocument",
+                description="network failure",
+            ) from exc
 
-        if response.status_code >= 400:
-            raise TelegramRequestError(f"Telegram sendDocument HTTP {response.status_code}.")
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise TelegramRequestError("Telegram sendDocument invalid JSON response.") from exc
-        if not data.get("ok", False):
-            raise TelegramRequestError(f"Telegram sendDocument API error (HTTP {response.status_code}).")
+        data = self._parse_response_json(response=response, endpoint="sendDocument")
+        self._raise_for_telegram_error(endpoint="sendDocument", response=response, data=data)
         return self._extract_document_ref(data=data)
 
     def send_document_by_file_id(
@@ -217,23 +238,64 @@ class TelegramClient:
             with httpx.Client(timeout=timeout) as client:
                 response = client.post(url, json=payload)
         except httpx.TimeoutException as exc:
-            raise TelegramRequestError(f"Telegram {endpoint} timeout.") from exc
+            raise TelegramRequestError(
+                "Telegram API request failed.",
+                method=endpoint,
+                description="timeout",
+            ) from exc
         except httpx.HTTPError as exc:
-            raise TelegramRequestError(f"Telegram {endpoint} request failed.") from exc
+            raise TelegramRequestError(
+                "Telegram API request failed.",
+                method=endpoint,
+                description="network failure",
+            ) from exc
 
-        if response.status_code >= 400:
-            raise TelegramRequestError(f"Telegram {endpoint} HTTP {response.status_code}.")
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise TelegramRequestError(f"Telegram {endpoint} invalid JSON response.") from exc
-        if not data.get("ok", False):
-            description = str(data.get("description", ""))
-            lowered = description.lower()
-            if "message is not modified" in lowered:
-                raise TelegramMessageNotModifiedError("Telegram message is not modified.")
-            raise TelegramRequestError(f"Telegram {endpoint} API error (HTTP {response.status_code}).")
+        data = self._parse_response_json(response=response, endpoint=endpoint)
+        self._raise_for_telegram_error(endpoint=endpoint, response=response, data=data)
         return data
+
+    def _parse_response_json(self, *, response: httpx.Response, endpoint: str) -> dict:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise TelegramRequestError(
+                "Telegram API request failed.",
+                method=endpoint,
+                http_status=response.status_code,
+                description="invalid JSON response",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise TelegramRequestError(
+                "Telegram API request failed.",
+                method=endpoint,
+                http_status=response.status_code,
+                description="invalid JSON payload",
+            )
+        return payload
+
+    def _raise_for_telegram_error(self, *, endpoint: str, response: httpx.Response, data: dict) -> None:
+        if response.status_code < 400 and bool(data.get("ok", False)):
+            return
+        description_raw = data.get("description")
+        description = str(description_raw) if description_raw is not None else ""
+        error_code_raw = data.get("error_code")
+        error_code = int(error_code_raw) if isinstance(error_code_raw, int) else None
+        lowered = description.lower()
+        if "message is not modified" in lowered:
+            raise TelegramMessageNotModifiedError(
+                "Telegram message is not modified.",
+                method=endpoint,
+                http_status=response.status_code,
+                error_code=error_code,
+                description=description or "message is not modified",
+            )
+        raise TelegramRequestError(
+            "Telegram API request failed.",
+            method=endpoint,
+            http_status=response.status_code,
+            error_code=error_code,
+            description=description or "unknown Telegram API error",
+        )
 
     def _extract_document_ref(self, *, data: dict) -> TelegramDocumentRef:
         result = data.get("result", {})

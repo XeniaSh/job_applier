@@ -725,7 +725,8 @@ def run_pipeline(
                 if prepare_requests > 0:
                     _run_log("Prepare request received")
             except TelegramRequestError as exc:
-                _run_log(f"Telegram poll failed: {_format_telegram_error(exc, secrets=_runtime_secrets(settings))}")
+                details = _format_telegram_error(exc, secrets=_runtime_secrets(settings))
+                _run_log(f"Telegram poll failed:\n  {details}")
                 time.sleep(poll_interval)
                 continue
 
@@ -1662,6 +1663,19 @@ def _format_collector_error(*, source: str, exc: Exception, imap_host: str, secr
 
 
 def _format_telegram_error(exc: Exception, *, secrets: list[str]) -> str:
+    if isinstance(exc, TelegramRequestError):
+        parts: list[str] = []
+        if exc.method:
+            parts.append(f"method={exc.method}")
+        if exc.http_status is not None:
+            parts.append(f"HTTP {exc.http_status}")
+        if exc.error_code is not None:
+            parts.append(f"error_code={exc.error_code}")
+        if exc.description:
+            safe_description = _sanitize_text(exc.description, secrets=secrets)
+            parts.append(f'description="{safe_description}"')
+        if parts:
+            return "\n  ".join(parts)
     message = _sanitize_text(str(exc), secrets=secrets).lower()
     if "http 409" in message:
         return "HTTP 409 conflict — another getUpdates poller may be running."

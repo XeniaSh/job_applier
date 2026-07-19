@@ -251,3 +251,27 @@ def test_edit_message_not_modified_error_is_typed(monkeypatch) -> None:
     client = TelegramClient(bot_token="token", chat_id="123")
     with pytest.raises(TelegramMessageNotModifiedError):
         client.edit_message_text(chat_id="123", message_id=1, text="same")
+
+
+def test_telegram_http_error_exposes_method_status_and_description(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+    responses = [
+        _FakeResponse(
+            400,
+            {"ok": False, "error_code": 400, "description": "Bad Request: query is too old"},
+        )
+    ]
+
+    def fake_client(*args, **kwargs):
+        _ = args, kwargs
+        return _FakeClient(responses, calls)
+
+    monkeypatch.setattr(httpx, "Client", fake_client)
+    client = TelegramClient(bot_token="token", chat_id="123")
+    with pytest.raises(TelegramRequestError) as exc:
+        client.answer_callback_query("cb-id")
+    err = exc.value
+    assert err.method == "answerCallbackQuery"
+    assert err.http_status == 400
+    assert err.error_code == 400
+    assert err.description == "Bad Request: query is too old"
