@@ -1029,6 +1029,7 @@ def test_telegram_cache_resumes_warmup_and_force(monkeypatch, tmp_path) -> None:
 
 def test_prepare_callback_sets_loading_state(monkeypatch) -> None:
     calls = {"updates": [], "answers": []}
+    events: list[str] = []
 
     class FakeStorage:
         def update_delivery_and_history(self, **kwargs):
@@ -1044,9 +1045,11 @@ def test_prepare_callback_sets_loading_state(monkeypatch) -> None:
 
     class FakeClient:
         def answer_callback_query(self, callback_query_id, text=None):
+            events.append("answer")
             calls["answers"].append((callback_query_id, text))
 
         def edit_message_text(self, **kwargs):
+            events.append("edit")
             calls["edit"] = kwargs
 
     update = {
@@ -1070,6 +1073,48 @@ def test_prepare_callback_sets_loading_state(monkeypatch) -> None:
     assert calls["updates"][0]["delivery_status"] == "PREPARE_REQUESTED"
     assert "⏳ Preparing application..." in calls["edit"]["text"]
     assert calls["edit"]["buttons"][0][0].text == "🔗 Open vacancy"
+    assert events[:2] == ["answer", "edit"]
+
+
+def test_prepare_callback_does_not_answer_twice_on_edit_error() -> None:
+    calls = {"answers": []}
+
+    class Storage:
+        def update_delivery_and_history(self, **kwargs):
+            _ = kwargs
+
+        def get_delivery(self, source, external_id):
+            _ = source, external_id
+            return type("D", (), {"status": "SENT"})()
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Role", "Company", "https://www.linkedin.com/jobs/view/1/")
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            calls["answers"].append((callback_query_id, text))
+
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+            raise cli_module.TelegramRequestError("Telegram editMessageText HTTP 400.")
+
+    update = {
+        "callback_query": {
+            "id": "cb-prep-fail",
+            "data": "prepare:li:1",
+            "message": {"chat": {"id": "123"}, "message_id": 10},
+        }
+    }
+
+    cli_module._process_callback_update(
+        update=update,
+        client=Client(),
+        storage=Storage(),
+        configured_chat_id="123",
+    )
+
+    assert len(calls["answers"]) == 1
 
 
 def test_copy_cover_letter_sends_only_text(monkeypatch) -> None:

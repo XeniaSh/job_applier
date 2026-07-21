@@ -642,6 +642,7 @@ def prepare_telegram_applications(
         limit=limit,
         dry_run=dry_run,
         print_dry_run_items=dry_run,
+        timing_logger=None,
     )
 
     typer.echo(f"В очереди: {result.queue_items}")
@@ -797,12 +798,31 @@ def run_pipeline(
                                     f"checkpoint_before={source_diag.checkpoint_before or 0} "
                                     f"checkpoint_after={source_diag.checkpoint_after or 0} "
                                     f"highest_uid_seen={source_diag.highest_uid_seen or 0} "
-                                    f"matched={source_diag.messages_matched} fetched={source_diag.messages_fetched} "
-                                    f"parsed={source_diag.messages_parsed} extracted={source_diag.vacancies_extracted} "
+                                    f"searched_uids={source_diag.searched_uids} "
+                                    f"fetch_attempted={source_diag.fetch_attempted} "
+                                    f"fetch_succeeded={source_diag.fetch_succeeded} "
+                                    f"decode_succeeded={source_diag.decode_succeeded} "
+                                    f"rejected_sender={source_diag.rejected_sender} "
+                                    f"rejected_subject={source_diag.rejected_subject} "
+                                    f"parse_errors={source_diag.parse_errors} "
+                                    f"messages_parsed={source_diag.messages_parsed} "
+                                    f"matched={source_diag.messages_matched} "
+                                    f"fetched={source_diag.messages_fetched} "
+                                    f"extracted={source_diag.vacancies_extracted} "
                                     f"search_criteria={source_diag.search_criteria or 'n/a'} "
                                     f"checkpoint_advanced={source_diag.checkpoint_advanced} "
                                     f"uidvalidity_changed={source_diag.uidvalidity_changed}"
                                 )
+                                if source_diag.classification_counts:
+                                    counts_line = " ".join(
+                                        f"{reason}={count}"
+                                        for reason, count in sorted(source_diag.classification_counts.items())
+                                    )
+                                    _run_log(f"{source_name}: classification_counts {counts_line}")
+                                for event in source_diag.classification_events:
+                                    _run_log(f"{source_name}: {event}")
+                                for event in source_diag.rejection_events:
+                                    _run_log(f"{source_name}: {event}")
                                 if source_diag.timings_ms:
                                     _run_log(
                                         f"{source_name} timings: "
@@ -856,6 +876,7 @@ def run_pipeline(
                     timeout=poll_interval,
                     resumes_dir=settings.resumes_dir,
                     resume_cache_service=callback_resume_cache,
+                    timing_logger=_run_log if verbose else None,
                 )
                 if prepare_requests > 0:
                     _run_log("Prepare request received")
@@ -874,6 +895,7 @@ def run_pipeline(
                     limit=20,
                     dry_run=False,
                     print_dry_run_items=False,
+                    timing_logger=_run_log if verbose else None,
                 )
                 if result.generated_packages > 0:
                     _run_log("Application generated")
@@ -916,6 +938,7 @@ def poll_telegram_actions(
                     offset=offset,
                     timeout=timeout,
                     resumes_dir=settings.resumes_dir,
+                    timing_logger=None,
                 )
             except TelegramRequestError as exc:
                 typer.secho(f"Ошибка Telegram polling: {exc}", err=True, fg=typer.colors.RED)
@@ -1304,11 +1327,30 @@ def _print_linkedin_sync_diagnostics(diagnostics: LinkedInSyncDiagnostics, *, ve
             f"checkpoint_before={diagnostics.checkpoint_before or 0} "
             f"checkpoint_after={diagnostics.checkpoint_after or 0} "
             f"highest_uid_seen={diagnostics.highest_uid_seen or 0} "
+            f"searched_uids={diagnostics.searched_uids} "
+            f"fetch_attempted={diagnostics.fetch_attempted} "
+            f"fetch_succeeded={diagnostics.fetch_succeeded} "
+            f"decode_succeeded={diagnostics.decode_succeeded} "
+            f"rejected_sender={diagnostics.rejected_sender} "
+            f"rejected_subject={diagnostics.rejected_subject} "
+            f"parse_errors={diagnostics.parse_errors} "
             f"messages_parsed={diagnostics.messages_parsed} "
             f"search_criteria={diagnostics.search_criteria or 'n/a'} "
             f"checkpoint_advanced={diagnostics.checkpoint_advanced} "
             f"uidvalidity_changed={diagnostics.uidvalidity_changed}"
         )
+        if diagnostics.classification_counts:
+            typer.echo(
+                "LinkedIn IMAP classification counts: "
+                + " ".join(
+                    f"{reason}={count}"
+                    for reason, count in sorted(diagnostics.classification_counts.items())
+                )
+            )
+        for event in diagnostics.classification_events:
+            typer.echo(f"LinkedIn IMAP message: {event}")
+        for event in diagnostics.rejection_events:
+            typer.echo(f"LinkedIn IMAP message: {event}")
         typer.echo(
             "LinkedIn IMAP timings: "
             f"connect={diagnostics.timings_ms.get('connect', 0)}ms "
@@ -2016,7 +2058,9 @@ def _process_callback_update(
     configured_chat_id: str,
     resumes_dir: Path | None = None,
     resume_cache_service: ResumeCacheService | None = None,
+    timing_logger: Callable[[str], None] | None = None,
 ) -> None:
+    received_at = time.monotonic()
     callback = update.get("callback_query")
     if not isinstance(callback, dict):
         return
@@ -2057,11 +2101,21 @@ def _process_callback_update(
         current = get_delivery(source, external_id)
         current_status = current.status if current is not None else None
 
+    answered = False
+    answer_at: float | None = None
+
+    def answer_once(text: str | None) -> None:
+        nonlocal answered, answer_at
+        if answered or not callback_id:
+            return
+        client.answer_callback_query(callback_id, text=text)
+        answered = True
+        answer_at = time.monotonic()
+
     try:
         if action == "skip":
             if current_status == STATUS_SKIPPED:
-                if callback_id:
-                    client.answer_callback_query(callback_id, text="Вакансия уже пропущена")
+                answer_once("Вакансия уже пропущена")
                 return
             storage.update_delivery_and_history(
                 source=source,
@@ -2071,8 +2125,7 @@ def _process_callback_update(
                 history_status=STATUS_SKIPPED,
                 timestamp_field="skipped_at",
             )
-            if callback_id:
-                client.answer_callback_query(callback_id, text="Вакансия пропущена")
+            answer_once("Вакансия пропущена")
             _edit_archived_card(
                 client=client,
                 chat_id=configured_chat_id,
@@ -2091,8 +2144,7 @@ def _process_callback_update(
             )
         elif action == "applied":
             if current_status == STATUS_APPLIED:
-                if callback_id:
-                    client.answer_callback_query(callback_id, text="Отклик уже отмечен")
+                answer_once("Отклик уже отмечен")
                 return
             storage.update_delivery_and_history(
                 source=source,
@@ -2102,8 +2154,7 @@ def _process_callback_update(
                 history_status=STATUS_APPLIED,
                 timestamp_field="applied_at",
             )
-            if callback_id:
-                client.answer_callback_query(callback_id, text="Отклик отмечен как отправленный")
+            answer_once("Отклик отмечен как отправленный")
             _edit_archived_card(
                 client=client,
                 chat_id=configured_chat_id,
@@ -2122,8 +2173,7 @@ def _process_callback_update(
             )
         elif action == "prepare":
             if current_status == STATUS_PREPARE_REQUESTED:
-                if callback_id:
-                    client.answer_callback_query(callback_id, text="Уже в обработке")
+                answer_once("Уже в обработке")
                 return
             storage.update_delivery_and_history(
                 source=source,
@@ -2133,32 +2183,31 @@ def _process_callback_update(
                 history_status=STATUS_PREPARE_REQUESTED,
                 timestamp_field=None,
             )
-            if callback_id:
-                client.answer_callback_query(
-                    callback_id,
-                    text="Добавлено в очередь на подготовку отклика",
-                )
+            answer_once("Добавлено в очередь на подготовку отклика")
             if message_id > 0 and url:
                 try:
+                    edit_start = time.monotonic()
                     client.edit_message_text(
                         chat_id=configured_chat_id,
                         message_id=message_id,
                         text=build_loading_text(title=title, company=company),
                         buttons=build_loading_buttons(url),
                     )
+                    if timing_logger is not None:
+                        timing_logger(
+                            f"Callback {action}:{source}:{external_id} editMessageText +{int((time.monotonic() - edit_start) * 1000)}ms"
+                        )
                 except TelegramMessageNotModifiedError:
                     _ = None
         elif action == "copy":
             get_preparation = getattr(storage, "get_preparation", None)
             prep = get_preparation(source, external_id) if callable(get_preparation) else None
             if prep is None or prep.status != STATUS_PREPARED or not prep.cover_letter:
-                if callback_id:
-                    client.answer_callback_query(callback_id, text="Отклик еще не готов")
+                answer_once("Отклик еще не готов")
                 return
             existing_cover_id = getattr(prep, "cover_letter_message_id", None)
             if isinstance(existing_cover_id, int) and existing_cover_id > 0:
-                if callback_id:
-                    client.answer_callback_query(callback_id, text="Cover letter already sent below this vacancy.")
+                answer_once("Cover letter already sent below this vacancy.")
                 return
             sent_ref = client.send_text_message(
                 prep.cover_letter,
@@ -2172,25 +2221,21 @@ def _process_callback_update(
                     external_id=external_id,
                     cover_letter_message_id=sent_ref.message_id,
                 )
-            if callback_id:
-                client.answer_callback_query(callback_id, text="Cover letter sent")
+            answer_once("Cover letter sent")
         else:  # action == "resume"
             get_preparation = getattr(storage, "get_preparation", None)
             prep = get_preparation(source, external_id) if callable(get_preparation) else None
             if prep is None or prep.status != STATUS_PREPARED or not prep.resume_name:
-                if callback_id:
-                    client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                answer_once("Resume PDF not found.")
                 return
             existing_resume_id = getattr(prep, "resume_message_id", None)
             if isinstance(existing_resume_id, int) and existing_resume_id > 0:
-                if callback_id:
-                    client.answer_callback_query(callback_id, text="Resume already sent below this vacancy.")
+                answer_once("Resume already sent below this vacancy.")
                 return
             cache = resume_cache_service
             if cache is None:
                 if resumes_dir is None:
-                    if callback_id:
-                        client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                    answer_once("Resume PDF not found.")
                     return
                 cache = ResumeCacheService(
                     resumes_dir=resumes_dir,
@@ -2202,8 +2247,7 @@ def _process_callback_update(
                 chat_id=configured_chat_id,
             )
             if resume_result.missing:
-                if callback_id:
-                    client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                answer_once("Resume PDF not found.")
                 return
             caption = _build_resume_caption(
                 resume_name=prep.resume_name,
@@ -2223,13 +2267,11 @@ def _process_callback_update(
                     sent_doc = None
             if sent_doc is None:
                 if resumes_dir is None:
-                    if callback_id:
-                        client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                    answer_once("Resume PDF not found.")
                     return
                 resume_path, _resume_error = resolve_resume_path(resumes_dir, prep.resume_name)
                 if resume_path is None:
-                    if callback_id:
-                        client.answer_callback_query(callback_id, text="Resume PDF not found.")
+                    answer_once("Resume PDF not found.")
                     return
                 sent_doc = client.send_document(
                     file_path=str(resume_path),
@@ -2255,12 +2297,18 @@ def _process_callback_update(
                     external_id=external_id,
                     resume_message_id=sent_doc.message_id,
                 )
-            if callback_id:
-                client.answer_callback_query(callback_id, text="Resume sent")
+            answer_once("Resume sent")
     except (ValueError, KeyError, TelegramRequestError, OSError):
-        if callback_id:
-            client.answer_callback_query(callback_id, text="Не удалось обновить статус")
+        if not answered:
+            answer_once("Не удалось обновить статус")
         return
+    finally:
+        if timing_logger is not None:
+            ack_ms = int((answer_at - received_at) * 1000) if answer_at is not None else -1
+            total_ms = int((time.monotonic() - received_at) * 1000)
+            timing_logger(
+                f"Callback {action}:{source}:{external_id} ack_ms={ack_ms} total_ms={total_ms} answered={'yes' if answered else 'no'}"
+            )
 
     if action in {"copy", "resume", "prepare"}:
         return
@@ -2885,6 +2933,7 @@ def _poll_telegram_actions_once(
     timeout: int,
     resumes_dir: Path | None = None,
     resume_cache_service: ResumeCacheService | None = None,
+    timing_logger: Callable[[str], None] | None = None,
 ) -> tuple[int | None, int]:
     updates = client.get_updates(offset=offset, timeout=timeout)
     next_offset = offset
@@ -2906,6 +2955,7 @@ def _poll_telegram_actions_once(
             configured_chat_id=configured_chat_id,
             resumes_dir=resumes_dir,
             resume_cache_service=resume_cache_service,
+            timing_logger=timing_logger,
         )
         update_id = int(update.get("update_id", 0))
         next_offset = max(next_offset or 0, update_id + 1)
@@ -2924,6 +2974,7 @@ def _prepare_requested_applications(
     dry_run: bool,
     print_dry_run_items: bool,
     resume_cache_service: ResumeCacheService | None = None,
+    timing_logger: Callable[[str], None] | None = None,
 ) -> PreparationRunResult:
     queue = storage.list_by_status(
         chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
@@ -2944,8 +2995,16 @@ def _prepare_requested_applications(
     _ = resume_cache_service
 
     for source, external_id in queue:
+        item_started_at = time.monotonic()
+        if timing_logger is not None:
+            timing_logger(f"Prepare start {source}:{external_id}")
+        generation_started_at = time.monotonic()
         try:
             prepared = service.prepare(source=source, external_id=external_id)
+            if timing_logger is not None:
+                timing_logger(
+                    f"Prepare generated {source}:{external_id} +{int((time.monotonic() - generation_started_at) * 1000)}ms"
+                )
         except (
             ApplicationPreparationError,
             LLMRequestError,
@@ -2953,6 +3012,10 @@ def _prepare_requested_applications(
             CoverLetterValidationError,
             PromptLoadError,
         ) as exc:
+            if timing_logger is not None:
+                timing_logger(
+                    f"Prepare failed {source}:{external_id} +{int((time.monotonic() - generation_started_at) * 1000)}ms"
+                )
             errors_count += 1
             if not dry_run:
                 message_ref = storage.get_message_ref(
@@ -3048,6 +3111,7 @@ def _prepare_requested_applications(
             continue
 
         try:
+            edit_started_at = time.monotonic()
             telegram_client.edit_message_text(  # type: ignore[union-attr]
                 chat_id=message_ref[0],
                 message_id=message_ref[1],
@@ -3062,6 +3126,10 @@ def _prepare_requested_applications(
                     url=prepared.url,
                 ),
             )
+            if timing_logger is not None:
+                timing_logger(
+                    f"Prepare editMessageText {source}:{external_id} +{int((time.monotonic() - edit_started_at) * 1000)}ms"
+                )
         except TelegramMessageNotModifiedError:
             _ = None
         except (TelegramRequestError, ValueError) as exc:
@@ -3118,6 +3186,10 @@ def _prepare_requested_applications(
             status=STATUS_PREPARED,
             timestamp_field="prepared_at",
         )
+        if timing_logger is not None:
+            timing_logger(
+                f"Prepare done {source}:{external_id} total={int((time.monotonic() - item_started_at) * 1000)}ms"
+            )
 
     return PreparationRunResult(
         queue_items=queue_items,

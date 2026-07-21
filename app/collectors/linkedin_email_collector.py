@@ -57,11 +57,21 @@ class LinkedInSyncDiagnostics:
     checkpoint_before: int | None
     checkpoint_after: int | None
     highest_uid_seen: int | None
+    searched_uids: int
+    fetch_attempted: int
+    fetch_succeeded: int
+    decode_succeeded: int
+    rejected_sender: int
+    rejected_subject: int
+    parse_errors: int
+    classification_counts: dict[str, int]
     messages_matched: int
     messages_fetched: int
     messages_parsed: int
     vacancies_extracted: int
     search_criteria: str
+    rejection_events: list[str]
+    classification_events: list[str]
     checkpoint_advanced: bool
     uidvalidity_changed: bool
     timings_ms: dict[str, int]
@@ -94,11 +104,21 @@ class LinkedInEmailCollector(VacancyCollector):
             checkpoint_before=None,
             checkpoint_after=None,
             highest_uid_seen=None,
+            searched_uids=0,
+            fetch_attempted=0,
+            fetch_succeeded=0,
+            decode_succeeded=0,
+            rejected_sender=0,
+            rejected_subject=0,
+            parse_errors=0,
+            classification_counts={},
             messages_matched=0,
             messages_fetched=0,
             messages_parsed=0,
             vacancies_extracted=0,
             search_criteria="",
+            rejection_events=[],
+            classification_events=[],
             checkpoint_advanced=False,
             uidvalidity_changed=False,
             timings_ms={},
@@ -252,9 +272,18 @@ class LinkedInEmailCollector(VacancyCollector):
                 highest_uid_seen=checkpoint_before,
                 uidvalidity=checkpoint_uidvalidity,
                 uidvalidity_changed=False,
+                searched_uids=len(raw_messages),
+                fetch_attempted=len(raw_messages),
+                fetch_succeeded=len(raw_messages),
+                decode_succeeded=len(raw_messages),
+                rejected_sender=0,
+                rejected_subject=0,
+                classification_counts={},
                 messages_matched=len(raw_messages),
                 messages_fetched=len(raw_messages),
                 search_criteria=f'SINCE "{self._bootstrap_lookback_days}d-legacy"',
+                rejection_events=[],
+                classification_events=[],
                 timings_ms={},
                 messages=raw_messages,
             )
@@ -275,6 +304,7 @@ class LinkedInEmailCollector(VacancyCollector):
         unique_vacancies: dict[str, LinkedInEmailVacancy] = {}
         parse_errors = 0
         extracted = 0
+        parsed_messages = 0
         parse_start = time.monotonic()
         for raw_message in raw_messages:
             try:
@@ -284,6 +314,7 @@ class LinkedInEmailCollector(VacancyCollector):
                 logger.error("LinkedIn email parse failed: %s", exc)
                 continue
 
+            parsed_messages += 1
             extracted += len(vacancies)
             for vacancy in vacancies:
                 if vacancy.external_id not in unique_vacancies:
@@ -320,11 +351,21 @@ class LinkedInEmailCollector(VacancyCollector):
             checkpoint_before=sync_result.checkpoint_before,
             checkpoint_after=sync_result.checkpoint_after,
             highest_uid_seen=sync_result.highest_uid_seen,
+            searched_uids=sync_result.searched_uids,
+            fetch_attempted=sync_result.fetch_attempted,
+            fetch_succeeded=sync_result.fetch_succeeded,
+            decode_succeeded=sync_result.decode_succeeded,
+            rejected_sender=sync_result.rejected_sender,
+            rejected_subject=sync_result.rejected_subject,
+            parse_errors=parse_errors,
+            classification_counts=sync_result.classification_counts,
             messages_matched=sync_result.messages_matched,
             messages_fetched=sync_result.messages_fetched,
-            messages_parsed=len(raw_messages),
+            messages_parsed=parsed_messages,
             vacancies_extracted=extracted,
             search_criteria=sync_result.search_criteria,
+            rejection_events=sync_result.rejection_events,
+            classification_events=sync_result.classification_events,
             checkpoint_advanced=checkpoint_advanced,
             uidvalidity_changed=sync_result.uidvalidity_changed,
             timings_ms=timings,

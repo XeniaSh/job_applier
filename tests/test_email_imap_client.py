@@ -66,6 +66,47 @@ def _message_bytes(*, from_value: str, subject: str) -> bytes:
     return message.as_bytes()
 
 
+def _run_single_subject(*, subject: str, from_value: str = "LinkedIn Jobs <jobs-noreply@linkedin.com>", body: str = "body"):
+    class _OneMessageIMAP(_FakeIMAP):
+        def uid(self, command: str, *args: str):
+            lower = command.lower()
+            if lower == "search":
+                return ("OK", [b"1"])
+            if lower == "fetch":
+                message = EmailMessage()
+                message["From"] = from_value
+                message["Subject"] = subject
+                message["Message-ID"] = "<id>"
+                message.set_content(body)
+                return ("OK", [(b"1 (RFC822 {123}", message.as_bytes()), b")"])
+            return super().uid(command, *args)
+
+        def response(self, code: str):
+            if code == "UIDVALIDITY":
+                return ("UIDVALIDITY", [b"13"])
+            return (code, [])
+
+    client = EmailIMAPClient(
+        host="imap.gmail.com",
+        port=993,
+        username="user",
+        password="app-password",
+        folder="INBOX",
+        search_days=7,
+        mark_as_read=False,
+        adapter=_OneMessageIMAP(messages={}),
+    )
+    return client.fetch_linkedin_messages_sync(
+        checkpoint_uid=None,
+        checkpoint_uidvalidity=None,
+        incremental_enabled=False,
+        bootstrap_lookback_days=7,
+        bootstrap_message_limit=10,
+        batch_size=10,
+        rescan=True,
+    )
+
+
 def test_imap_fetch_filters_linkedin_alerts_and_marks_seen() -> None:
     adapter = _FakeIMAP(
         messages={
@@ -260,3 +301,343 @@ def test_incremental_uid_search_falls_back_to_all_filter_when_server_returns_sta
     assert result.mode == "incremental"
     assert result.messages_fetched == 0
     assert result.search_criteria.endswith("(fallback=ALL-filter)")
+
+
+def test_fetch_supports_nested_and_trailing_imap_response_shapes() -> None:
+    message = _message_bytes(from_value="LinkedIn Jobs <jobs-noreply@linkedin.com>", subject="Job alert")
+
+    class _ShapeIMAP(_FakeIMAP):
+        def uid(self, command: str, *args: str):
+            lower = command.lower()
+            if lower == "search":
+                return ("OK", [b"1 2 3 4"])
+            if lower == "fetch":
+                uid = str(args[0])
+                if uid == "1":
+                    return ("OK", [(b"1 (RFC822 {123}", message)])
+                if uid == "2":
+                    return ("OK", [(b"2 (RFC822 {123}", [message])])
+                if uid == "3":
+                    return ("OK", [None, (b"3 (RFC822 {123}", message), b")"])
+                return ("OK", [b")", (b"4 (RFC822 {123}", (None, message))])
+            return super().uid(command, *args)
+
+        def response(self, code: str):
+            if code == "UIDVALIDITY":
+                return ("UIDVALIDITY", [b"13"])
+            return (code, [])
+
+    client = EmailIMAPClient(
+        host="imap.gmail.com",
+        port=993,
+        username="user",
+        password="app-password",
+        folder="INBOX",
+        search_days=7,
+        mark_as_read=False,
+        adapter=_ShapeIMAP(messages={}),
+    )
+
+    result = client.fetch_linkedin_messages_sync(
+        checkpoint_uid=None,
+        checkpoint_uidvalidity=None,
+        incremental_enabled=False,
+        bootstrap_lookback_days=7,
+        bootstrap_message_limit=100,
+        batch_size=100,
+        rescan=True,
+    )
+    assert result.fetch_succeeded == 4
+    assert result.decode_succeeded == 4
+    assert result.messages_matched == 4
+    assert result.rejected_sender == 0
+    assert result.rejected_subject == 0
+
+
+def test_display_name_sender_and_encoded_subject_are_matched() -> None:
+    encoded_subject = "=?UTF-8?B?Sm9iIGFsZXJ0OiBKYXZh?="
+    message = _message_bytes(
+        from_value="LinkedIn Jobs <jobs-listings@linkedin.com>",
+        subject=encoded_subject,
+    )
+
+    class _OneIMAP(_FakeIMAP):
+        def uid(self, command: str, *args: str):
+            if command.lower() == "search":
+                return ("OK", [b"10"])
+            if command.lower() == "fetch":
+                return ("OK", [(b"10 (RFC822 {123}", message), b")"])
+            return super().uid(command, *args)
+
+        def response(self, code: str):
+            if code == "UIDVALIDITY":
+                return ("UIDVALIDITY", [b"13"])
+            return (code, [])
+
+    client = EmailIMAPClient(
+        host="imap.gmail.com",
+        port=993,
+        username="user",
+        password="app-password",
+        folder="INBOX",
+        search_days=7,
+        mark_as_read=False,
+        adapter=_OneIMAP(messages={}),
+    )
+    result = client.fetch_linkedin_messages_sync(
+        checkpoint_uid=None,
+        checkpoint_uidvalidity=None,
+        incremental_enabled=False,
+        bootstrap_lookback_days=7,
+        bootstrap_message_limit=10,
+        batch_size=10,
+        rescan=True,
+    )
+    assert result.messages_matched == 1
+    assert result.rejected_sender == 0
+    assert result.rejected_subject == 0
+
+
+def test_non_linkedin_messages_rejected_with_balanced_counters() -> None:
+    linkedin = _message_bytes(from_value="LinkedIn Jobs <jobs-noreply@linkedin.com>", subject="Job alert")
+    wrong_sender = _message_bytes(from_value="alerts@example.com", subject="Job alert")
+    wrong_subject = _message_bytes(from_value="LinkedIn Jobs <jobs-noreply@linkedin.com>", subject="Newsletter")
+    malformed = b"this-is-not-an-email"
+
+    class _MixedIMAP(_FakeIMAP):
+        def uid(self, command: str, *args: str):
+            if command.lower() == "search":
+                return ("OK", [b"1 2 3 4"])
+            if command.lower() == "fetch":
+                uid = str(args[0])
+                if uid == "1":
+                    return ("OK", [(b"1 (RFC822 {123}", linkedin)])
+                if uid == "2":
+                    return ("OK", [(b"2 (RFC822 {123}", wrong_sender)])
+                if uid == "3":
+                    return ("OK", [(b"3 (RFC822 {123}", wrong_subject)])
+                return ("OK", [(b"4 (RFC822 {123}", malformed)])
+            return super().uid(command, *args)
+
+        def response(self, code: str):
+            if code == "UIDVALIDITY":
+                return ("UIDVALIDITY", [b"13"])
+            return (code, [])
+
+    client = EmailIMAPClient(
+        host="imap.gmail.com",
+        port=993,
+        username="user",
+        password="app-password",
+        folder="INBOX",
+        search_days=7,
+        mark_as_read=False,
+        adapter=_MixedIMAP(messages={}),
+    )
+    result = client.fetch_linkedin_messages_sync(
+        checkpoint_uid=None,
+        checkpoint_uidvalidity=None,
+        incremental_enabled=False,
+        bootstrap_lookback_days=7,
+        bootstrap_message_limit=20,
+        batch_size=20,
+        rescan=True,
+    )
+    assert result.searched_uids == 4
+    assert result.fetch_attempted == 4
+    assert result.fetch_succeeded == 3
+    assert result.decode_succeeded == 3
+    assert result.rejected_sender == 1
+    assert result.rejected_subject == 1
+    assert result.messages_matched == 1
+    assert len(result.rejection_events) == 3
+    accounted = result.messages_matched + result.rejected_sender + result.rejected_subject + (result.fetch_attempted - result.fetch_succeeded)
+    assert accounted == result.fetch_attempted
+
+
+def test_linkedin_body_link_allows_nonstandard_subject() -> None:
+    message = EmailMessage()
+    message["From"] = "LinkedIn Jobs <jobs-noreply@linkedin.com>"
+    message["Subject"] = "Career update"
+    message["Message-ID"] = "<id>"
+    message.set_content("Check this opportunity: https://www.linkedin.com/jobs/view/123/")
+
+    class _BodyLinkIMAP(_FakeIMAP):
+        def uid(self, command: str, *args: str):
+            if command.lower() == "search":
+                return ("OK", [b"1"])
+            if command.lower() == "fetch":
+                return ("OK", [(b"1 (RFC822 {123}", message.as_bytes())])
+            return super().uid(command, *args)
+
+        def response(self, code: str):
+            if code == "UIDVALIDITY":
+                return ("UIDVALIDITY", [b"13"])
+            return (code, [])
+
+    client = EmailIMAPClient(
+        host="imap.gmail.com",
+        port=993,
+        username="user",
+        password="app-password",
+        folder="INBOX",
+        search_days=7,
+        mark_as_read=False,
+        adapter=_BodyLinkIMAP(messages={}),
+    )
+    result = client.fetch_linkedin_messages_sync(
+        checkpoint_uid=None,
+        checkpoint_uidvalidity=None,
+        incremental_enabled=False,
+        bootstrap_lookback_days=7,
+        bootstrap_message_limit=10,
+        batch_size=10,
+        rescan=True,
+    )
+    assert result.messages_matched == 1
+    assert result.rejected_subject == 0
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected_reason"),
+    [
+        ("Software Engineer - Backend (Remote) at Hire Feed", "accepted_role_at_company"),
+        ("Java Developer - AI/ML (Remote) at Hire Feed", "accepted_role_at_company"),
+        ('"JVM Backend posted in the past 24..."', "accepted_posted_alert"),
+        ("Tyler Technologies - Senior Software Engineer posted on 7/18/26", "accepted_posted_on"),
+        ('Ksenia, apply now to "PH - Spring Boot Software Engineer (6-month Contract) at ..."', "accepted_apply_now"),
+        ("Senior Java Developer (Remote) at Quik Hire Staffing", "accepted_role_at_company"),
+        ("Java Developer at Bonhill Partners: up to £200K/year", "accepted_salary"),
+        ("Backend Developer | $70/hr Remote at Crossing Hurdles: up to $70/hour", "accepted_salary"),
+        ("Java Developer at Bonhill Partners: up to $200K/year", "accepted_salary"),
+        ("=?UTF-8?Q?Software_Engineer_-_Backend_(Remote)_at_Hire_Feed?=", "accepted_role_at_company"),
+        ("“Kotlin Backend posted in the past 24...”", "accepted_posted_alert"),
+        ("Software Engineer &amp; Backend at Hire Feed", "accepted_role_at_company"),
+    ],
+)
+def test_job_subject_examples_are_accepted(subject: str, expected_reason: str) -> None:
+    result = _run_single_subject(subject=subject)
+    assert result.messages_matched == 1
+    assert result.rejected_subject == 0
+    assert result.classification_counts.get(expected_reason) == 1
+
+
+def test_rejects_linkedin_security_message() -> None:
+    result = _run_single_subject(subject="Security alert: new sign-in to your account")
+    assert result.messages_matched == 0
+    assert result.rejected_subject == 1
+    assert result.classification_counts.get("rejected_security") == 1
+
+
+def test_rejects_linkedin_connection_message() -> None:
+    result = _run_single_subject(subject="You have a new connection request")
+    assert result.messages_matched == 0
+    assert result.rejected_subject == 1
+    assert result.classification_counts.get("rejected_social") == 1
+
+
+def test_rejects_linkedin_marketing_newsletter() -> None:
+    result = _run_single_subject(subject="LinkedIn Newsletter: Top Voices this week")
+    assert result.messages_matched == 0
+    assert result.rejected_subject == 1
+    assert result.classification_counts.get("rejected_marketing") == 1
+
+
+def test_trusted_sender_without_job_evidence_is_rejected() -> None:
+    result = _run_single_subject(subject="Weekly summary update from LinkedIn")
+    assert result.messages_matched == 0
+    assert result.rejected_subject == 1
+    assert result.classification_counts.get("rejected_no_job_evidence") == 1
+
+
+def test_folded_multiline_subject_is_accepted() -> None:
+    raw = (
+        b"From: LinkedIn Jobs <jobs-noreply@linkedin.com>\r\n"
+        b"Subject: Java Developer at Bonhill Partners:\r\n"
+        b" posted on 7/18/26\r\n"
+        b"Message-ID: <id>\r\n"
+        b"\r\nbody\r\n"
+    )
+
+    class _FoldedSubjectIMAP(_FakeIMAP):
+        def uid(self, command: str, *args: str):
+            if command.lower() == "search":
+                return ("OK", [b"1"])
+            if command.lower() == "fetch":
+                return ("OK", [(b"1 (RFC822 {123}", raw), b")"])
+            return super().uid(command, *args)
+
+        def response(self, code: str):
+            if code == "UIDVALIDITY":
+                return ("UIDVALIDITY", [b"13"])
+            return (code, [])
+
+    client = EmailIMAPClient(
+        host="imap.gmail.com",
+        port=993,
+        username="user",
+        password="app-password",
+        folder="INBOX",
+        search_days=7,
+        mark_as_read=False,
+        adapter=_FoldedSubjectIMAP(messages={}),
+    )
+    result = client.fetch_linkedin_messages_sync(
+        checkpoint_uid=None,
+        checkpoint_uidvalidity=None,
+        incremental_enabled=False,
+        bootstrap_lookback_days=7,
+        bootstrap_message_limit=10,
+        batch_size=10,
+        rescan=True,
+    )
+    assert result.messages_matched == 1
+    assert result.classification_counts.get("accepted_posted_on") == 1
+
+
+def test_twenty_five_fetched_messages_are_fully_accounted() -> None:
+    linkedin = _message_bytes(from_value="LinkedIn Jobs <jobs-noreply@linkedin.com>", subject="Job alert")
+    other = _message_bytes(from_value="noreply@example.com", subject="Digest")
+
+    class _TwentyFiveIMAP(_FakeIMAP):
+        def uid(self, command: str, *args: str):
+            if command.lower() == "search":
+                return ("OK", [b" ".join(str(i).encode("ascii") for i in range(1, 26))])
+            if command.lower() == "fetch":
+                uid = int(str(args[0]))
+                payload = linkedin if uid % 2 == 0 else other
+                return ("OK", [(f"{uid} (RFC822 {{123}}".encode("ascii"), payload), b")"])
+            return super().uid(command, *args)
+
+        def response(self, code: str):
+            if code == "UIDVALIDITY":
+                return ("UIDVALIDITY", [b"13"])
+            return (code, [])
+
+    client = EmailIMAPClient(
+        host="imap.gmail.com",
+        port=993,
+        username="user",
+        password="app-password",
+        folder="INBOX",
+        search_days=7,
+        mark_as_read=False,
+        adapter=_TwentyFiveIMAP(messages={}),
+    )
+    result = client.fetch_linkedin_messages_sync(
+        checkpoint_uid=None,
+        checkpoint_uidvalidity=None,
+        incremental_enabled=False,
+        bootstrap_lookback_days=7,
+        bootstrap_message_limit=30,
+        batch_size=30,
+        rescan=True,
+    )
+    assert result.searched_uids == 25
+    assert result.fetch_attempted == 25
+    assert result.fetch_succeeded == 25
+    assert result.decode_succeeded == 25
+    assert result.rejected_sender == 13
+    assert result.rejected_subject == 0
+    assert result.messages_matched == 12
+    assert result.messages_fetched == 25

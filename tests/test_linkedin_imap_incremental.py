@@ -263,3 +263,56 @@ def test_reset_checkpoint_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert collector.reset_checkpoint() is True
     assert collector.reset_checkpoint() is False
 
+
+def test_rescan_diagnostics_explain_zero_parsed_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_parser(monkeypatch)
+
+    class _NonLinkedInIMAP(_FakeIMAP):
+        def uid(self, command: str, *args: str):
+            lower = command.lower()
+            if lower == "search":
+                return ("OK", [b" ".join(str(i).encode("ascii") for i in range(1, 26))])
+            if lower == "fetch":
+                uid = str(args[0])
+                message = EmailMessage()
+                message["From"] = "digest@example.com"
+                message["Subject"] = "Daily digest"
+                message["Message-ID"] = f"<{uid}>"
+                message.set_content("body")
+                return ("OK", [(f"{uid} (RFC822 {{123}}".encode("ascii"), message.as_bytes()), b")"])
+            return super().uid(command, *args)
+
+    client = EmailIMAPClient(
+        host="imap.gmail.com",
+        port=993,
+        username="person@example.com",
+        password="app-password",
+        folder="INBOX",
+        search_days=7,
+        mark_as_read=False,
+        adapter=_NonLinkedInIMAP(uids=list(range(1, 26))),
+    )
+    collector = LinkedInEmailCollector(
+        email_client=client,
+        analyzer=_Analyzer(),
+        seen_jobs=_SeenJobs(),
+        checkpoint_storage=ImapCheckpointStorage(db_path=tmp_path / "jobs.db"),
+        incremental_enabled=True,
+        bootstrap_message_limit=50,
+        bootstrap_lookback_days=7,
+        batch_size=50,
+    )
+    report = collector.collect_and_analyze(limit=20, dry_run=True, rescan=True)
+    diagnostics = collector.last_sync_diagnostics()
+
+    assert report.emails_found == 0
+    assert diagnostics.sync_mode == "rescan"
+    assert diagnostics.searched_uids == 25
+    assert diagnostics.fetch_succeeded == 25
+    assert diagnostics.decode_succeeded == 25
+    assert diagnostics.rejected_sender == 25
+    assert diagnostics.rejected_subject == 0
+    assert diagnostics.parse_errors == 0
+    assert diagnostics.messages_parsed == 0
+    assert diagnostics.vacancies_extracted == 0
+

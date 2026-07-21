@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import imaplib
+import html
 import logging
 import re
 import ssl
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
@@ -46,11 +48,28 @@ class ImapSyncResult:
     highest_uid_seen: int | None
     uidvalidity: str | None
     uidvalidity_changed: bool
+    searched_uids: int
+    fetch_attempted: int
+    fetch_succeeded: int
+    decode_succeeded: int
+    rejected_sender: int
+    rejected_subject: int
     messages_matched: int
     messages_fetched: int
     search_criteria: str
+    rejection_events: list[str]
+    classification_counts: dict[str, int]
+    classification_events: list[str]
     timings_ms: dict[str, int]
     messages: list[RawEmailMessage]
+
+
+@dataclass(frozen=True)
+class SubjectClassification:
+    accepted: bool
+    reason: str
+    matched_pattern: str | None
+    normalized_subject: str
 
 
 class IMAPAdapter(Protocol):
@@ -76,6 +95,18 @@ class EmailIMAPClient:
         "new jobs",
         "вакансии",
         "новые вакансии",
+    )
+    SUBJECT_REJECT_PATTERNS: tuple[tuple[str, str], ...] = (
+        ("rejected_security", r"\b(password|security|sign[- ]?in|login|verify|verification|two[- ]factor|2fa|suspicious)\b"),
+        ("rejected_social", r"\b(connect(?:ion)? request|invitation|inmail|message from|profile viewed|who viewed|endorsement)\b"),
+        ("rejected_marketing", r"\b(newsletter|digest|top voices|events?|webinar|course|learning|premium|ads?|advertis)\b"),
+    )
+    SUBJECT_ACCEPT_PATTERNS: tuple[tuple[str, str], ...] = (
+        ("accepted_posted_alert", r"\bposted in the past\b"),
+        ("accepted_posted_on", r"\bposted on\s+\d{1,2}/\d{1,2}/\d{2,4}\b"),
+        ("accepted_apply_now", r"\bapply now to\b"),
+        ("accepted_salary", r"[$€£]\s?\d+[kKmM]?(?:/\w+)?|up to\s*[$€£]\s?\d+"),
+        ("accepted_role_at_company", r"\b(?:senior|staff|principal|lead|junior)?\s*[a-z0-9+/#().,\- ]{2,}\bat\b[a-z0-9&'().,\- ]{2,}"),
     )
 
     def __init__(
@@ -171,32 +202,86 @@ class EmailIMAPClient:
                     highest_uid_seen=highest_uid_seen,
                     uidvalidity=uidvalidity,
                     uidvalidity_changed=uidvalidity_changed,
+                    searched_uids=0,
+                    fetch_attempted=0,
+                    fetch_succeeded=0,
+                    decode_succeeded=0,
+                    rejected_sender=0,
+                    rejected_subject=0,
                     messages_matched=0,
                     messages_fetched=0,
                     search_criteria=search_criteria,
+                    rejection_events=[],
+                    classification_counts={},
+                    classification_events=[],
                     timings_ms=timings_ms,
                     messages=[],
                 )
 
             start_fetch = time.monotonic()
             messages: list[RawEmailMessage] = []
+            searched_uids = len(uids)
+            fetch_attempted = 0
+            fetch_succeeded = 0
+            decode_succeeded = 0
+            rejected_sender = 0
+            rejected_subject = 0
+            rejection_events: list[str] = []
+            classification_counts: Counter[str] = Counter()
+            classification_events: list[str] = []
             for uid in sorted(uids):
+                fetch_attempted += 1
                 try:
-                    raw_message = self._fetch_message_by_uid(
+                    raw_bytes = self._fetch_message_payload_by_uid(
                         client=client,
                         uid=str(uid),
                     )
-                except EmailMessageError:
+                    fetch_succeeded += 1
+                except EmailMessageError as exc:
                     logger.warning(
-                        "Failed to parse email message UID=%s",
+                        "Failed to fetch email message UID=%s: %s",
                         uid,
+                        exc,
                     )
+                    rejection_events.append(f"UID={uid} reason=fetch_failed")
                     continue
 
-                if not self._is_likely_linkedin_alert(
-                    raw_message.from_address,
-                    raw_message.subject,
-                ):
+                try:
+                    raw_message = self._decode_raw_message(
+                        uid=str(uid),
+                        raw_bytes=raw_bytes,
+                    )
+                    decode_succeeded += 1
+                except EmailMessageError as exc:
+                    logger.warning(
+                        "Failed to decode email message UID=%s: %s",
+                        uid,
+                        exc,
+                    )
+                    rejection_events.append(f"UID={uid} reason=decode_failed")
+                    continue
+
+                is_sender_ok = self._is_linkedin_sender(raw_message.from_address)
+                if not is_sender_ok:
+                    rejected_sender += 1
+                    rejection_events.append(
+                        f"UID={uid} reason=rejected_sender domain={_sender_domain(raw_message.from_address)}"
+                    )
+                    continue
+                classification = self._classify_linkedin_subject(
+                    subject=raw_message.subject,
+                    has_job_link=self._has_linkedin_job_link(raw_message.email_message),
+                )
+                classification_counts[classification.reason] += 1
+                classification_events.append(
+                    f"UID={uid} classification={classification.reason} "
+                    f"subject_preview={_subject_preview(classification.normalized_subject)}"
+                )
+                if not classification.accepted:
+                    rejected_subject += 1
+                    rejection_events.append(
+                        f"UID={uid} reason={classification.reason} domain={_sender_domain(raw_message.from_address)}"
+                    )
                     continue
 
                 messages.append(raw_message)
@@ -217,9 +302,18 @@ class EmailIMAPClient:
                 highest_uid_seen=highest_uid_seen,
                 uidvalidity=uidvalidity,
                 uidvalidity_changed=uidvalidity_changed,
+                searched_uids=searched_uids,
+                fetch_attempted=fetch_attempted,
+                fetch_succeeded=fetch_succeeded,
+                decode_succeeded=decode_succeeded,
+                rejected_sender=rejected_sender,
+                rejected_subject=rejected_subject,
                 messages_matched=len(messages),
-                messages_fetched=len(uids),
+                messages_fetched=searched_uids,
                 search_criteria=search_criteria,
+                rejection_events=rejection_events,
+                classification_counts=dict(classification_counts),
+                classification_events=classification_events,
                 timings_ms=timings_ms,
                 messages=messages,
             )
@@ -261,11 +355,11 @@ class EmailIMAPClient:
         finally:
             self._cleanup_client(client)
 
-    def _fetch_message_by_uid(
+    def _fetch_message_payload_by_uid(
         self,
         client: IMAPAdapter,
         uid: str,
-    ) -> RawEmailMessage:
+    ) -> bytes:
         status, data = client.uid(
             "fetch",
             uid,
@@ -275,18 +369,12 @@ class EmailIMAPClient:
         if status != "OK" or not data:
             raise EmailMessageError(f"Cannot fetch message UID={uid}")
 
-        raw_bytes: bytes | None = None
-
-        for item in data:
-            if isinstance(item, tuple) and len(item) == 2:
-                payload = item[1]
-                if isinstance(payload, bytes):
-                    raw_bytes = payload
-                    break
-
+        raw_bytes = _extract_message_bytes(data)
         if raw_bytes is None:
             raise EmailMessageError(f"Message UID={uid} has invalid payload")
+        return raw_bytes
 
+    def _decode_raw_message(self, *, uid: str, raw_bytes: bytes) -> RawEmailMessage:
         try:
             parsed = message_from_bytes(raw_bytes)
         except Exception as exc:  # noqa: BLE001
@@ -314,18 +402,66 @@ class EmailIMAPClient:
             email_message=parsed,
         )
 
-    def _is_likely_linkedin_alert(
+    def _is_linkedin_sender(
         self,
         from_address: str,
-        subject: str,
     ) -> bool:
-        from_lower = from_address.lower()
-        subject_lower = subject.lower()
-
-        if "linkedin.com" not in from_lower:
+        sender_domain = _sender_domain(from_address)
+        if sender_domain is None:
             return False
+        return sender_domain == "linkedin.com" or sender_domain.endswith(".linkedin.com")
 
-        return any(indicator in subject_lower for indicator in self.SUBJECT_INDICATORS)
+    def _classify_linkedin_subject(self, *, subject: str, has_job_link: bool) -> SubjectClassification:
+        normalized = _normalize_subject(subject)
+        normalized_folded = normalized.casefold()
+        for reason, pattern in self.SUBJECT_REJECT_PATTERNS:
+            if re.search(pattern, normalized_folded):
+                return SubjectClassification(
+                    accepted=False,
+                    reason=reason,
+                    matched_pattern=pattern,
+                    normalized_subject=normalized,
+                )
+        for reason, pattern in self.SUBJECT_ACCEPT_PATTERNS:
+            if re.search(pattern, normalized_folded):
+                return SubjectClassification(
+                    accepted=True,
+                    reason=reason,
+                    matched_pattern=pattern,
+                    normalized_subject=normalized,
+                )
+        if any(indicator in normalized_folded for indicator in self.SUBJECT_INDICATORS):
+            return SubjectClassification(
+                accepted=True,
+                reason="accepted_job_alert_keyword",
+                matched_pattern="subject_indicator",
+                normalized_subject=normalized,
+            )
+        if has_job_link:
+            return SubjectClassification(
+                accepted=True,
+                reason="accepted_job_link_evidence",
+                matched_pattern="body_linkedin_jobs_view",
+                normalized_subject=normalized,
+            )
+        return SubjectClassification(
+            accepted=False,
+            reason="rejected_no_job_evidence",
+            matched_pattern=None,
+            normalized_subject=normalized,
+        )
+
+    def _has_linkedin_job_link(self, message: Message) -> bool:
+        for part in message.walk():
+            content_type = part.get_content_type()
+            if content_type not in {"text/plain", "text/html"}:
+                continue
+            payload = part.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                text = payload.decode("utf-8", errors="ignore").lower()
+                if "linkedin.com/jobs/view" in text:
+                    return True
+        return False
 
     def _open_authenticated_client(self) -> IMAPAdapter:
         client = self._provided_adapter
@@ -514,3 +650,65 @@ def _parse_uid_list(raw_data: object) -> list[int]:
         if chunk.isdigit():
             result.append(int(chunk))
     return result
+
+
+def _normalize_subject(subject: str) -> str:
+    value = html.unescape(subject or "")
+    value = (
+        value.replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u2014", "-")
+        .replace("\u2013", "-")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def _extract_message_bytes(fetch_data: object) -> bytes | None:
+    candidates: list[bytes] = []
+    stack: list[object] = [fetch_data]
+    while stack:
+        item = stack.pop()
+        if item is None:
+            continue
+        if isinstance(item, (list, tuple)):
+            stack.extend(reversed(item))
+            continue
+        if isinstance(item, bytes):
+            value = item.strip()
+            if not value or value in {b")", b"("}:
+                continue
+            candidates.append(item)
+    for candidate in sorted(candidates, key=len, reverse=True):
+        if b":" not in candidate[:200]:
+            continue
+        try:
+            parsed = message_from_bytes(candidate)
+        except Exception:  # noqa: BLE001
+            continue
+        if parsed.keys():
+            return candidate
+    return None
+
+
+def _sender_domain(from_address: str) -> str | None:
+    pattern = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})")
+    for match in pattern.finditer(from_address):
+        domain = match.group(1).strip().lower().rstrip(".")
+        if domain:
+            return domain
+    return None
+
+
+def _subject_preview(normalized_subject: str) -> str:
+    value = normalized_subject
+    value = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[redacted-email]", value)
+    value = re.sub(r"https?://\S+", "[link]", value)
+    value = re.sub(r"\b[a-z0-9_-]{24,}\b", "[token]", value, flags=re.IGNORECASE)
+    value = re.sub(r"^[A-Z][a-z]{1,24},\s+", "", value)
+    value = value[:80]
+    return f"\"{value}\""
