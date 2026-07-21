@@ -490,7 +490,14 @@ def test_run_log_uses_shared_timestamp_formatter(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli_module, "_format_log_time", lambda: "07:12:08.142")
     cli_module._run_log("Prepare start linkedin-email:1")
     captured = capsys.readouterr()
-    assert captured.out.strip() == "[07:12:08.142] Prepare start linkedin-email:1"
+    assert captured.out.strip() == "[07:12:08.142][main] Prepare start linkedin-email:1"
+
+
+def test_run_log_allows_explicit_component_tag(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli_module, "_format_log_time", lambda: "07:12:08.142")
+    cli_module._run_log("Callback received prepare:linkedin-email:1", component="poller")
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "[07:12:08.142][poller] Callback received prepare:linkedin-email:1"
 
 
 def test_run_uses_prepare_worker_thread_and_no_process_spawn_path(monkeypatch, tmp_path: Path) -> None:
@@ -549,6 +556,29 @@ def test_run_restarts_cleanly_after_keyboard_interrupt(monkeypatch, tmp_path: Pa
     assert "already running" not in second.output.lower()
 
 
+def test_run_verbose_logs_shutdown_lifecycle(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    _bootstrap_common(monkeypatch)
+    _run_single_cycle(monkeypatch)
+    monkeypatch.setattr(cli_module, "LinkedInEmailCollector", lambda **kwargs: type("L", (), {"SOURCE": "linkedin-email", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})())
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
+
+    result = CliRunner().invoke(cli_module.app, ["run", "--verbose"])
+    assert result.exit_code == 0
+    assert "[main] Shutdown requested (KeyboardInterrupt)" in result.output
+    assert "[main] Stopping Telegram poller" in result.output
+    assert "[poller] Poller exiting" in result.output
+    assert "[main] Signaling prepare worker" in result.output
+    assert "[main] Waiting for worker thread" in result.output
+    assert "[main] Worker joined" in result.output
+    assert "[main] Releasing singleton lock" in result.output
+    assert "[main] Singleton lock released" in result.output
+    assert "[poller] Poller exited" in result.output
+    assert "[main] Job Applier stopped." in result.output
+
+
 def test_lock_prevents_concurrent_external_run_and_allows_retry_after_release(tmp_path: Path) -> None:
     lock_path = tmp_path / "data" / "job_applier.lock"
     first = cli_module._JobApplierLock(lock_path)
@@ -567,3 +597,18 @@ def test_lock_recovers_from_stale_pid_file(tmp_path: Path) -> None:
     lock = cli_module._JobApplierLock(lock_path)
     assert lock.acquire() is True
     lock.release()
+
+
+def test_lock_logs_acquire_and_release_lifecycle(tmp_path: Path) -> None:
+    events: list[str] = []
+    lock_path = tmp_path / "data" / "job_applier.lock"
+    lock = cli_module._JobApplierLock(lock_path, log_fn=events.append)
+    assert lock.acquire() is True
+    lock.release()
+    assert "Acquire requested" in events
+    assert "Lock file created" in events
+    assert "PID written" in events
+    assert "Release requested" in events
+    assert "Deleting lock file" in events
+    assert "Lock file deleted" in events
+    assert "Release completed" in events

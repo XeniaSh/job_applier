@@ -669,7 +669,10 @@ def run_pipeline(
         raise typer.Exit(code=2) from exc
     _require_telegram_settings(settings)
 
-    lock = _JobApplierLock(Path("data/job_applier.lock"))
+    lock = _JobApplierLock(
+        Path("data/job_applier.lock"),
+        log_fn=_component_log("main") if verbose else None,
+    )
     if not lock.acquire():
         typer.echo("Job Applier is already running.")
         raise typer.Exit(code=1)
@@ -745,8 +748,9 @@ def run_pipeline(
     )
     prepare_thread.start()
 
-    typer.echo("Job Applier started.")
-    typer.echo("Press Ctrl+C to stop.")
+    _run_log("Job Applier started.", component="main")
+    _run_log("Press Ctrl+C to stop.", component="main")
+    _run_log("Poller started.", component="poller")
     try:
         while True:
             now = time.monotonic()
@@ -793,7 +797,7 @@ def run_pipeline(
                     for source_name in source_names:
                         if pipeline_result.has_collect_error(source_name):
                             failed_message = pipeline_result.collect_error_message(source_name)
-                            _run_log(f"{source_name}: failed — {failed_message}")
+                            _run_log(f"{source_name}: failed — {failed_message}", component="main")
                             continue
                         _run_log(
                             f"{source_name}: extracted={pipeline_result.extracted(source_name)} "
@@ -802,13 +806,16 @@ def run_pipeline(
                             f"already_seen={pipeline_result.already_seen(source_name)} "
                             f"invalid_identity={pipeline_result.invalid_identity(source_name)} "
                             f"prefiltered={pipeline_result.title_filtered(source_name)} "
-                            f"errors={pipeline_result.errors_before_analysis(source_name)}"
+                            f"errors={pipeline_result.errors_before_analysis(source_name)}",
+                            component="main",
                         )
                         source_diag = diagnostics_by_source.get(source_name)
                         if source_diag is not None:
                             if source_diag.sync_mode == "incremental" and source_diag.messages_fetched == 0:
                                 _run_log(
                                     f"{source_name}: checked new_messages=0 checkpoint={source_diag.checkpoint_after or source_diag.checkpoint_before or 0}"
+                                    ,
+                                    component="main",
                                 )
                             elif verbose:
                                 _run_log(
@@ -829,18 +836,19 @@ def run_pipeline(
                                     f"extracted={source_diag.vacancies_extracted} "
                                     f"search_criteria={source_diag.search_criteria or 'n/a'} "
                                     f"checkpoint_advanced={source_diag.checkpoint_advanced} "
-                                    f"uidvalidity_changed={source_diag.uidvalidity_changed}"
+                                    f"uidvalidity_changed={source_diag.uidvalidity_changed}",
+                                    component="main",
                                 )
                                 if source_diag.classification_counts:
                                     counts_line = " ".join(
                                         f"{reason}={count}"
                                         for reason, count in sorted(source_diag.classification_counts.items())
                                     )
-                                    _run_log(f"{source_name}: classification_counts {counts_line}")
+                                    _run_log(f"{source_name}: classification_counts {counts_line}", component="main")
                                 for event in source_diag.classification_events:
-                                    _run_log(f"{source_name}: {event}")
+                                    _run_log(f"{source_name}: {event}", component="main")
                                 for event in source_diag.rejection_events:
-                                    _run_log(f"{source_name}: {event}")
+                                    _run_log(f"{source_name}: {event}", component="main")
                                 if source_diag.timings_ms:
                                     _run_log(
                                         f"{source_name} timings: "
@@ -849,10 +857,11 @@ def run_pipeline(
                                         f"search={source_diag.timings_ms.get('search', 0)}ms "
                                         f"fetch={source_diag.timings_ms.get('fetch', 0)}ms "
                                         f"parse={source_diag.timings_ms.get('parse', 0)}ms "
-                                        f"checkpoint={source_diag.timings_ms.get('checkpoint', 0)}ms"
+                                        f"checkpoint={source_diag.timings_ms.get('checkpoint', 0)}ms",
+                                        component="main",
                                     )
                     if len(source_names) > 1:
-                        _run_log(f"Merged: unique={pipeline_result.merged_unique()}")
+                        _run_log(f"Merged: unique={pipeline_result.merged_unique()}", component="main")
                     _run_log(
                         "Analysis: "
                         f"analyzed={pipeline_result.analyzed_total()} "
@@ -860,29 +869,32 @@ def run_pipeline(
                         f"potential={pipeline_result.potential_total()} "
                         f"ignore={pipeline_result.ignore_total()} "
                         f"title_filtered={pipeline_result.title_filtered_total()} "
-                        f"errors={pipeline_result.processing_errors_total()}"
+                        f"errors={pipeline_result.processing_errors_total()}",
+                        component="main",
                     )
                     _run_log(
                         "Telegram: "
                         f"eligible={pipeline_result.eligible()} "
                         f"already_delivered={pipeline_result.already_delivered()} "
                         f"sent={pipeline_result.sent()} "
-                        f"errors={pipeline_result.telegram_errors()}"
+                        f"errors={pipeline_result.telegram_errors()}",
+                        component="main",
                     )
                     no_work_reason = pipeline_result.no_work_reason()
                     if pipeline_result.analyzed_total() == 0 and no_work_reason:
-                        _run_log(f"No vacancies analyzed: {no_work_reason}")
+                        _run_log(f"No vacancies analyzed: {no_work_reason}", component="main")
                     _run_log(
                         f"Timing: collect={collect_ms}ms analyze={analyze_ms}ms "
-                        f"telegram={telegram_ms}ms cycle={cycle_ms}ms"
+                        f"telegram={telegram_ms}ms cycle={cycle_ms}ms",
+                        component="main",
                     )
                     if verbose:
                         for outcome in _pipeline_verbose_outcomes(pipeline_result):
-                            _run_log(outcome)
+                            _run_log(outcome, component="main")
                 except (LLMRequestError, LLMResponseError) as exc:
-                    _run_log(f"Pipeline cycle failed: {exc}")
+                    _run_log(f"Pipeline cycle failed: {exc}", component="main")
                 except Exception as exc:  # noqa: BLE001
-                    _run_log(f"Pipeline cycle failed: {exc}")
+                    _run_log(f"Pipeline cycle failed: {exc}", component="main")
                 next_cycle_monotonic = time.monotonic() + interval
 
             try:
@@ -894,23 +906,44 @@ def run_pipeline(
                     timeout=poll_interval,
                     resumes_dir=settings.resumes_dir,
                     resume_cache_service=callback_resume_cache,
-                    timing_logger=_run_log if verbose else None,
+                    timing_logger=_component_log("poller") if verbose else None,
                 )
                 if prepare_requests > 0:
-                    _run_log("Prepare request received")
+                    _run_log("Prepare request received", component="poller")
                     prepare_wakeup_event.set()
             except TelegramRequestError as exc:
                 details = _format_telegram_error(exc, secrets=_runtime_secrets(settings))
-                _run_log(f"Telegram poll failed:\n  {details}")
+                _run_log(f"Telegram poll failed:\n  {details}", component="poller")
                 time.sleep(poll_interval)
                 continue
     except KeyboardInterrupt:
-        typer.echo("Job Applier stopped.")
+        _run_log("Shutdown requested (KeyboardInterrupt)", component="main")
     finally:
-        prepare_stop_event.set()
-        prepare_wakeup_event.set()
-        prepare_thread.join(timeout=5.0)
-        lock.release()
+        _run_log("Stopping Telegram poller", component="main")
+        _run_log("Poller exiting", component="poller")
+        _run_log("Signaling prepare worker", component="main")
+        try:
+            prepare_stop_event.set()
+            prepare_wakeup_event.set()
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Failed signaling prepare worker: {exc}", component="main")
+        _run_log("Waiting for worker thread", component="main")
+        try:
+            prepare_thread.join(timeout=5.0)
+            if prepare_thread.is_alive():
+                _run_log("Worker join timeout; thread still alive.", component="main")
+            else:
+                _run_log("Worker joined", component="main")
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Worker join failed: {exc}", component="main")
+        _run_log("Releasing singleton lock", component="main")
+        try:
+            lock.release()
+            _run_log("Singleton lock released", component="main")
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Singleton lock release failed: {exc}", component="main")
+        _run_log("Poller exited", component="poller")
+        _run_log("Job Applier stopped.", component="main")
 
 
 @app.command("poll-telegram-actions")
@@ -2952,39 +2985,54 @@ class TelegramCycleReport:
 
 
 class _JobApplierLock:
-    def __init__(self, lock_path: Path) -> None:
+    def __init__(self, lock_path: Path, log_fn: Callable[[str], None] | None = None) -> None:
         self._path = lock_path
         self._fd: int | None = None
+        self._log_fn = log_fn
+
+    def _emit(self, message: str) -> None:
+        if self._log_fn is not None:
+            self._log_fn(message)
 
     def acquire(self) -> bool:
+        self._emit("Acquire requested")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if self._try_acquire_new_lock():
             return True
         stale_pid = self._read_stored_pid()
         if stale_pid is None or self._pid_is_running(stale_pid):
+            self._emit("Acquire blocked by existing running PID")
             return False
         try:
+            self._emit(f"Stale lock detected pid={stale_pid}; deleting lock file")
             self._path.unlink(missing_ok=True)
         except OSError:
+            self._emit("Acquire failed: stale lock deletion failed")
             return False
         return self._try_acquire_new_lock()
 
     def release(self) -> None:
+        self._emit("Release requested")
         if self._fd is not None:
             try:
                 os.close(self._fd)
-            except OSError:
-                _ = None
+            except OSError as exc:
+                self._emit(f"Release failed: close fd error: {exc}")
             self._fd = None
+        self._emit("Deleting lock file")
         try:
             self._path.unlink(missing_ok=True)
-        except OSError:
-            _ = None
+            self._emit("Lock file deleted")
+        except OSError as exc:
+            self._emit(f"Release failed: {exc}")
+        self._emit("Release completed")
 
     def _try_acquire_new_lock(self) -> bool:
         try:
             self._fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            self._emit("Lock file created")
             os.write(self._fd, str(os.getpid()).encode("utf-8"))
+            self._emit("PID written")
             return True
         except FileExistsError:
             return False
@@ -3008,13 +3056,17 @@ class _JobApplierLock:
         return True
 
 
-def _run_log(message: str) -> None:
+def _run_log(message: str, *, component: str = "main") -> None:
     stamp = _format_log_time()
-    typer.echo(f"[{stamp}] {message}")
+    typer.echo(f"[{stamp}][{component}] {message}")
 
 
 def _format_log_time() -> str:
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+
+def _component_log(component: str) -> Callable[[str], None]:
+    return lambda message: _run_log(message, component=component)
 
 
 def _enqueue_prepare_priority(*, storage: TelegramDeliveryStorage, source: str, external_id: str) -> None:
@@ -3067,12 +3119,14 @@ def _prepare_worker_loop(
         storage=worker_storage,
         telegram_client=telegram_client,
     )
+    if verbose:
+        _run_log("Worker thread started", component="worker")
     while not stop_event.is_set():
         try:
             priority_keys = _drain_prepare_priorities(storage=worker_storage)
             if priority_keys and verbose:
                 for source, external_id in priority_keys:
-                    _run_log(f"Prepare priority requested {source}:{external_id}")
+                    _run_log(f"Prepare priority requested {source}:{external_id}", component="worker")
             result = _prepare_requested_applications(
                 settings=settings,
                 service=service,
@@ -3082,18 +3136,40 @@ def _prepare_worker_loop(
                 dry_run=False,
                 print_dry_run_items=False,
                 resume_cache_service=worker_resume_cache,
-                timing_logger=_run_log if verbose else None,
+                timing_logger=_component_log("worker") if verbose else None,
                 priority_vacancy_keys=priority_keys,
             )
             if priority_keys and verbose:
-                _run_log(f"Prepare queue continue pending={max(0, result.queue_items - len(priority_keys))}")
+                _run_log(
+                    f"Prepare queue continue pending={max(0, result.queue_items - len(priority_keys))}",
+                    component="worker",
+                )
             if result.generated_packages == 0 and result.errors_count == 0:
+                if verbose:
+                    _run_log("Worker waiting", component="worker")
                 wakeup_event.wait(timeout=0.5)
+                if verbose:
+                    _run_log("Worker woke up", component="worker")
                 wakeup_event.clear()
         except Exception as exc:  # noqa: BLE001
-            _run_log(f"Prepare worker error: {exc}")
+            _run_log(f"Prepare worker error: {exc}", component="worker")
             wakeup_event.wait(timeout=0.5)
             wakeup_event.clear()
+    if verbose:
+        _run_log("Worker shutdown requested", component="worker")
+        try:
+            pending = worker_storage.list_by_status(
+                chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
+                status=STATUS_PREPARE_REQUESTED,
+                limit=1,
+            )
+            if pending:
+                _run_log("Queue not drained pending>=1", component="worker")
+            else:
+                _run_log("Queue drained", component="worker")
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Queue drain check failed: {exc}", component="worker")
+        _run_log("Worker exiting", component="worker")
 
 
 def _poll_telegram_actions_once(
