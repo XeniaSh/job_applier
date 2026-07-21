@@ -354,3 +354,54 @@ def test_limit_applies_after_dedup_across_messages(monkeypatch) -> None:
     assert report.unique_vacancies == 3
     assert report.new_vacancies == 3
     assert report.analyzed == 3
+
+
+def test_parser_diagnostics_events_and_stats_exposed(monkeypatch) -> None:
+    from app.collectors import linkedin_email_collector as module
+
+    monkeypatch.setattr(
+        module,
+        "parse_linkedin_email",
+        lambda raw_message: [
+            LinkedInEmailVacancy(
+                "1",
+                "Java API Developer",
+                "Nityo",
+                "Hybrid",
+                "https://www.linkedin.com/jobs/view/1/",
+                "Stand out and let hirers know you're open to work.",
+                "m",
+                None,
+                ContentCompleteness.PARTIAL,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        module,
+        "evaluate_title",
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": True,
+                "reason": "allowed",
+                "normalized_title": title.lower(),
+                "positive_rules": ["java"],
+                "negative_rules": [],
+                "decision": "PASS",
+            },
+        )(),
+    )
+    collector = LinkedInEmailCollector(
+        email_client=_FakeEmailClient(messages=[_raw_message()]),
+        analyzer=_FakeAnalyzer(),
+        seen_jobs=_FakeSeenJobs(),
+    )
+
+    collector.collect_and_analyze(limit=20, dry_run=True)
+    diagnostics = collector.last_sync_diagnostics()
+
+    assert diagnostics.extraction_stats.get("cards_found", 0) >= 1
+    assert any("CARD card_index=" in event for event in diagnostics.parser_events)
+    assert any("VISIBLE_TEXT_PREVIEW" in event for event in diagnostics.parser_events)
+    assert any("snippet_source=" in event for event in diagnostics.parser_events)

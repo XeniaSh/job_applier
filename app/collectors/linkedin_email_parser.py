@@ -41,6 +41,25 @@ NOISE_TEXT = {
     "easy apply",
     "job alert",
 }
+PROMOTIONAL_MARKERS = (
+    "stand out and let hirers know",
+    "try premium",
+    "install linkedin widgets",
+    "stay updated at a glance",
+    "this email was intended for",
+    "you are receiving job alert emails",
+    "unsubscribe",
+    "linkedin corporation",
+    "see all jobs",
+)
+FOOTER_BOUNDARY_MARKERS = (
+    "see all jobs",
+    "try premium",
+    "install linkedin widgets",
+    "this email was intended for",
+    "you are receiving job alert emails",
+    "unsubscribe",
+)
 ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 SEPARATOR_RE = re.compile(r"\s*[•·▪\u2022\ufffd]\s*")
 
@@ -53,6 +72,45 @@ class _Card:
     company: str | None = None
     location: str | None = None
     snippet: str | None = None
+    visible_text_parts: list[str] = None  # type: ignore[assignment]
+    card_begin: int | None = None
+    card_end: int | None = None
+    text_length: int = 0
+    visible_text_length: int = 0
+    snippet_source: str = "missing"
+    promotional_snippet_detected: bool = False
+
+    def __post_init__(self) -> None:
+        if self.visible_text_parts is None:
+            self.visible_text_parts = []
+
+
+@dataclass(frozen=True)
+class ParserCardDiagnostic:
+    card_index: int
+    external_id: str
+    title: str
+    company: str | None
+    email_subject_context: str | None
+    alert_query: str | None
+    snippet_source: str
+    promotional_snippet_detected: bool
+    card_begin: int | None
+    card_end: int | None
+    text_length: int
+    visible_text_length: int
+    visible_text_preview: str
+
+
+@dataclass(frozen=True)
+class ParserExtractionDiagnostics:
+    cards_found: int
+    cards_with_description: int
+    cards_with_real_snippet: int
+    cards_with_promotional_snippet: int
+    cards_without_snippet: int
+    cards_with_only_title: int
+    card_diagnostics: list[ParserCardDiagnostic]
 
 
 class _StructuredCardParser(HTMLParser):
@@ -63,8 +121,10 @@ class _StructuredCardParser(HTMLParser):
         self._current_card_id: str | None = None
         self._current_anchor_id: str | None = None
         self._current_anchor_text: list[str] = []
+        self._node_index = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._node_index += 1
         attr_map = dict(attrs)
         href = attr_map.get("href")
         if tag == "a" and href and _is_vacancy_url(href):
@@ -78,6 +138,8 @@ class _StructuredCardParser(HTMLParser):
                     card = _Card(external_id=job_id, url=_normalize_job_url(href, job_id))
                     self.cards_by_id[job_id] = card
                     self.ordered_ids.append(job_id)
+                if card.card_begin is None:
+                    card.card_begin = self._node_index
 
         if tag == "img" and self._current_card_id is not None:
             alt = _clean_text(attr_map.get("alt"))
@@ -87,12 +149,14 @@ class _StructuredCardParser(HTMLParser):
                     card.company = alt
 
     def handle_endtag(self, tag: str) -> None:
+        self._node_index += 1
         if tag == "a" and self._current_anchor_id is not None:
             text = _clean_text(" ".join(self._current_anchor_text))
             if text and text.lower() not in NOISE_TEXT:
                 card = self.cards_by_id[self._current_anchor_id]
                 if not card.title or card.title.lower().startswith("linkedin vacancy "):
                     card.title = text
+                card.card_end = self._node_index
             self._current_anchor_id = None
             self._current_anchor_text = []
 
@@ -112,23 +176,44 @@ class _StructuredCardParser(HTMLParser):
             return
 
         card = self.cards_by_id[self._current_card_id]
+        if _is_footer_boundary_text(text):
+            card.card_end = self._node_index
+            self._current_card_id = None
+            return
+        card.visible_text_parts.append(text)
+        card.visible_text_length += len(text)
+        card.text_length += len(data or "")
+        card.card_end = self._node_index
         _apply_text_to_card(card, text)
 
 
 def parse_linkedin_email(raw_message: RawEmailMessage) -> list[LinkedInEmailVacancy]:
+    vacancies, _ = parse_linkedin_email_with_diagnostics(raw_message)
+    return vacancies
+
+
+def parse_linkedin_email_with_diagnostics(
+    raw_message: RawEmailMessage,
+) -> tuple[list[LinkedInEmailVacancy], ParserExtractionDiagnostics]:
     html_content, plain_content = _extract_text_content(raw_message.email_message)
+    email_subject_context = _clean_optional(raw_message.subject)
+    alert_query = _extract_alert_query(email_subject_context)
 
     structured_cards: list[LinkedInEmailVacancy] = []
+    card_diagnostics: list[ParserCardDiagnostic] = []
     if html_content:
         parser = _StructuredCardParser()
         parser.feed(html_content)
         parser.close()
-        for job_id in parser.ordered_ids:
+        for card_index, job_id in enumerate(parser.ordered_ids, start=1):
             card = parser.cards_by_id[job_id]
             title = card.title or f"LinkedIn vacancy {job_id}"
             company = _clean_optional(card.company)
             location = _clean_optional(card.location)
             snippet = _clean_optional(card.snippet)
+            snippet_source = card.snippet_source
+            promotional_snippet = card.promotional_snippet_detected
+            visible_text_preview = _build_visible_text_preview(card.visible_text_parts)
             completeness = _detect_content_completeness(
                 title=title,
                 company=company,
@@ -146,8 +231,27 @@ def parse_linkedin_email(raw_message: RawEmailMessage) -> list[LinkedInEmailVaca
                     email_message_id=raw_message.message_id,
                     received_at=raw_message.received_at,
                     content_completeness=completeness,
-                    alert_context=raw_message.subject or None,
+                    email_subject_context=email_subject_context,
+                    alert_query=alert_query,
+                    snippet_source=snippet_source,
                     parser_source=ParserSource.STRUCTURED_CARD,
+                )
+            )
+            card_diagnostics.append(
+                ParserCardDiagnostic(
+                    card_index=card_index,
+                    external_id=job_id,
+                    title=title,
+                    company=company,
+                    email_subject_context=email_subject_context,
+                    alert_query=alert_query,
+                    snippet_source=snippet_source,
+                    promotional_snippet_detected=promotional_snippet,
+                    card_begin=card.card_begin,
+                    card_end=card.card_end,
+                    text_length=card.text_length,
+                    visible_text_length=card.visible_text_length,
+                    visible_text_preview=visible_text_preview,
                 )
             )
 
@@ -160,6 +264,10 @@ def parse_linkedin_email(raw_message: RawEmailMessage) -> list[LinkedInEmailVaca
             continue
         title = _clean_text(link_text) or f"LinkedIn vacancy {external_id}"
         snippet = _extract_snippet(plain_content, external_id)
+        snippet_source = _classify_snippet_source(snippet)
+        if snippet_source == "promo":
+            snippet = None
+            snippet_source = "missing"
         vacancy = LinkedInEmailVacancy(
             external_id=external_id,
             title=title,
@@ -175,13 +283,34 @@ def parse_linkedin_email(raw_message: RawEmailMessage) -> list[LinkedInEmailVaca
                 location=None,
                 snippet=snippet,
             ),
-            alert_context=raw_message.subject or None,
+            email_subject_context=email_subject_context,
+            alert_query=alert_query,
+            snippet_source=snippet_source,
             parser_source=ParserSource.FALLBACK_URL,
         )
         by_id[external_id] = vacancy
         ordered_ids.append(external_id)
+        card_diagnostics.append(
+            ParserCardDiagnostic(
+                card_index=len(card_diagnostics) + 1,
+                external_id=external_id,
+                title=title,
+                company=vacancy.company,
+                email_subject_context=email_subject_context,
+                alert_query=alert_query,
+                snippet_source=snippet_source,
+                promotional_snippet_detected=False,
+                card_begin=None,
+                card_end=None,
+                text_length=len(plain_content),
+                visible_text_length=len(plain_content),
+                visible_text_preview=_truncate_text(_clean_text(plain_content), max_len=500),
+            )
+        )
 
-    return [by_id[job_id] for job_id in ordered_ids]
+    vacancies = [by_id[job_id] for job_id in ordered_ids]
+    diagnostics = _build_parser_extraction_diagnostics(vacancies=vacancies, cards=card_diagnostics)
+    return vacancies, diagnostics
 
 
 def extract_email_text_parts(message: Message) -> tuple[str, str]:
@@ -360,6 +489,12 @@ def _apply_text_to_card(card: _Card, text: str) -> None:
     if _is_noise_text(text):
         return
 
+    if _is_promotional_text(text):
+        card.promotional_snippet_detected = True
+        if card.snippet_source == "missing":
+            card.snippet_source = "promo"
+        return
+
     company, location = _split_company_location(text)
     if company:
         if not card.company:
@@ -375,6 +510,7 @@ def _apply_text_to_card(card: _Card, text: str) -> None:
 
     if not card.snippet and len(text.split()) >= 4:
         card.snippet = text
+        card.snippet_source = _classify_nonpromo_snippet_source(text)
 
 
 def _split_company_location(text: str) -> tuple[str | None, str | None]:
@@ -397,6 +533,20 @@ def _is_noise_text(value: str) -> bool:
     return False
 
 
+def _is_promotional_text(value: str) -> bool:
+    normalized = _clean_text(value).lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in PROMOTIONAL_MARKERS)
+
+
+def _is_footer_boundary_text(value: str) -> bool:
+    normalized = _clean_text(value).lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in FOOTER_BOUNDARY_MARKERS)
+
+
 def _clean_optional(value: str | None) -> str | None:
     cleaned = _clean_text(value)
     return cleaned if cleaned else None
@@ -409,3 +559,91 @@ def _clean_text(value: str | None) -> str:
     unescaped = ZERO_WIDTH_RE.sub("", unescaped)
     cleaned = " ".join(unescaped.replace("\xa0", " ").split())
     return cleaned.strip()
+
+
+def _truncate_text(value: str, *, max_len: int) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[:max_len]
+
+
+def _build_visible_text_preview(parts: list[str]) -> str:
+    text = "\n".join(part for part in parts if part).strip()
+    if not text:
+        return ""
+    return _truncate_text(text, max_len=500)
+
+
+def _classify_snippet_source(snippet: str | None) -> str:
+    if snippet is None or not snippet.strip():
+        return "missing"
+    lowered = snippet.strip().lower()
+    if _is_promotional_text(lowered):
+        return "promo"
+    return _classify_nonpromo_snippet_source(lowered)
+
+
+def _classify_nonpromo_snippet_source(snippet: str) -> str:
+    lowered = snippet.strip().lower()
+    words = lowered.split()
+    if len(words) <= 6:
+        return "subtitle"
+    if len(words) <= 20:
+        return "body"
+    return "description"
+
+
+def _extract_alert_query(subject: str | None) -> str | None:
+    cleaned = _clean_optional(subject)
+    if not cleaned:
+        return None
+    match = re.match(r"^\s*\"?(?P<query>.+?)\"?\s+posted\s+(?:in the past|on)\b", cleaned, flags=re.IGNORECASE)
+    if not match:
+        return None
+    query = _clean_text(match.group("query"))
+    if not query:
+        return None
+    query_lower = query.lower()
+    if " at " in query_lower:
+        return None
+    if len(query.split()) > 6:
+        return None
+    if not any(token in query_lower for token in ("java", "kotlin", "jvm", "spring", "backend")):
+        return None
+    if any(token in query_lower for token in ("engineer", "developer", "software", "architect", "analyst")):
+        return None
+    if any(marker in query_lower for marker in (" at ", " - ")):
+        return None
+    return query
+
+
+def _build_parser_extraction_diagnostics(
+    *,
+    vacancies: list[LinkedInEmailVacancy],
+    cards: list[ParserCardDiagnostic],
+) -> ParserExtractionDiagnostics:
+    cards_found = len(cards)
+    cards_with_description = sum(1 for card in cards if card.snippet_source in {"description", "body"})
+    cards_with_promotional_snippet = sum(1 for card in cards if card.snippet_source == "promo")
+    cards_without_snippet = sum(1 for card in cards if card.snippet_source == "missing")
+    cards_with_real_snippet = sum(1 for card in cards if card.snippet_source in {"description", "subtitle", "body"})
+    cards_with_only_title = sum(
+        1
+        for vacancy in vacancies
+        if vacancy.title.strip()
+        and not (vacancy.company or "").strip()
+        and not (vacancy.location or "").strip()
+        and not (vacancy.snippet or "").strip()
+    )
+    return ParserExtractionDiagnostics(
+        cards_found=cards_found,
+        cards_with_description=cards_with_description,
+        cards_with_real_snippet=cards_with_real_snippet,
+        cards_with_promotional_snippet=cards_with_promotional_snippet,
+        cards_without_snippet=cards_without_snippet,
+        cards_with_only_title=cards_with_only_title,
+        card_diagnostics=cards,
+    )

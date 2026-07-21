@@ -3,7 +3,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 from app.collectors.email_imap_client import RawEmailMessage
-from app.collectors.linkedin_email_parser import parse_linkedin_email
+from app.collectors.linkedin_email_parser import parse_linkedin_email, parse_linkedin_email_with_diagnostics
 from app.collectors.linkedin_models import ContentCompleteness, ParserSource
 
 
@@ -86,3 +86,137 @@ def test_duplicate_prevention_between_structured_and_fallback() -> None:
     vacancies = parse_linkedin_email(_raw_message_from_html(html_payload))
 
     assert [item.external_id for item in vacancies] == ["1111111111", "2222222222"]
+
+
+def test_parser_diagnostics_include_card_boundaries_and_visible_text() -> None:
+    html_payload = (FIXTURES_DIR / "alert_structured_cards.html").read_text(encoding="utf-8")
+    vacancies, diagnostics = parse_linkedin_email_with_diagnostics(_raw_message_from_html(html_payload))
+
+    assert len(vacancies) == 2
+    assert diagnostics.cards_found == 2
+    assert diagnostics.card_diagnostics
+    first = diagnostics.card_diagnostics[0]
+    assert first.card_index == 1
+    assert first.card_begin is not None
+    assert first.card_end is not None
+    assert first.visible_text_length > 0
+    assert first.visible_text_preview
+    assert "<a " not in first.visible_text_preview.lower()
+    assert "href=" not in first.visible_text_preview.lower()
+
+
+def test_parser_diagnostics_show_alert_context_per_card() -> None:
+    html_payload = (FIXTURES_DIR / "alert_structured_cards.html").read_text(encoding="utf-8")
+    _, diagnostics = parse_linkedin_email_with_diagnostics(_raw_message_from_html(html_payload))
+
+    assert diagnostics.card_diagnostics
+    for card in diagnostics.card_diagnostics:
+        assert card.email_subject_context == "Job alert"
+
+
+def test_promotional_snippet_is_flagged_in_diagnostics() -> None:
+    html_payload = """
+    <html><body>
+      <a href="https://www.linkedin.com/jobs/view/9999999999/">Java API Developer</a>
+      <div>Nityo • Hybrid</div>
+      <div>Stand out and let hirers know you're open to work.</div>
+    </body></html>
+    """
+    vacancies, diagnostics = parse_linkedin_email_with_diagnostics(_raw_message_from_html(html_payload))
+    assert vacancies[0].snippet is None
+    assert vacancies[0].content_completeness == ContentCompleteness.PARTIAL
+    assert diagnostics.cards_found == 1
+    card = diagnostics.card_diagnostics[0]
+    assert card.snippet_source == "promo"
+    assert card.promotional_snippet_detected is True
+    assert diagnostics.cards_with_promotional_snippet == 1
+
+
+def test_alert_query_is_sanitized_from_subject() -> None:
+    message = EmailMessage()
+    message["From"] = "jobs-noreply@linkedin.com"
+    message["Subject"] = "JVM Backend posted in the past 24 hours"
+    message.set_content("Plain fallback")
+    message.add_alternative('<html><body><a href="https://www.linkedin.com/jobs/view/1234567890/">Senior Java Developer</a></body></html>', subtype="html")
+    raw = RawEmailMessage(
+        uid="1",
+        message_id="<m1>",
+        from_address="jobs-noreply@linkedin.com",
+        subject="JVM Backend posted in the past 24 hours",
+        received_at=datetime.now(timezone.utc),
+        email_message=message,
+    )
+    vacancies = parse_linkedin_email(raw)
+    assert vacancies
+    assert vacancies[0].alert_query == "JVM Backend"
+
+
+def test_vacancy_subject_is_not_used_as_alert_query() -> None:
+    message = EmailMessage()
+    message["From"] = "jobs-noreply@linkedin.com"
+    message["Subject"] = "Software Engineer - Backend (Remote) at Hire Feed"
+    message.set_content("Plain fallback")
+    message.add_alternative('<html><body><a href="https://www.linkedin.com/jobs/view/1234567891/">Senior Java Developer</a></body></html>', subtype="html")
+    raw = RawEmailMessage(
+        uid="1",
+        message_id="<m2>",
+        from_address="jobs-noreply@linkedin.com",
+        subject="Software Engineer - Backend (Remote) at Hire Feed",
+        received_at=datetime.now(timezone.utc),
+        email_message=message,
+    )
+    vacancies = parse_linkedin_email(raw)
+    assert vacancies
+    assert vacancies[0].alert_query is None
+
+
+def test_footer_does_not_extend_last_card_text() -> None:
+    html_payload = """
+    <html><body>
+      <a href="https://www.linkedin.com/jobs/view/7000000001/">Senior Java Developer</a>
+      <div>NE Group</div>
+      <div>Hyderabad</div>
+      <div>See all jobs</div>
+      <div>Try Premium</div>
+      <div>Install LinkedIn Widgets</div>
+      <div>You are receiving Job Alert emails</div>
+    </body></html>
+    """
+    vacancies, diagnostics = parse_linkedin_email_with_diagnostics(_raw_message_from_html(html_payload))
+    assert len(vacancies) == 1
+    card = diagnostics.card_diagnostics[0]
+    assert "try premium" not in card.visible_text_preview.lower()
+    assert "install linkedin widgets" not in card.visible_text_preview.lower()
+
+
+def test_subject_from_vacancy_a_is_not_injected_into_vacancy_b_analysis_text() -> None:
+    message = EmailMessage()
+    message["From"] = "jobs-noreply@linkedin.com"
+    message["Subject"] = "Software Engineer - Backend (Remote) at Hire Feed"
+    message.set_content("Plain fallback")
+    message.add_alternative(
+        """
+        <html><body>
+          <a href="https://www.linkedin.com/jobs/view/8000000001/">Software Engineer - Backend (Remote)</a>
+          <div>Hire Feed</div>
+          <a href="https://www.linkedin.com/jobs/view/8000000002/">Senior Java Developer</a>
+          <div>NE Group</div>
+          <div>Hyderabad</div>
+        </body></html>
+        """,
+        subtype="html",
+    )
+    raw = RawEmailMessage(
+        uid="1",
+        message_id="<m3>",
+        from_address="jobs-noreply@linkedin.com",
+        subject="Software Engineer - Backend (Remote) at Hire Feed",
+        received_at=datetime.now(timezone.utc),
+        email_message=message,
+    )
+    vacancies = parse_linkedin_email(raw)
+    assert len(vacancies) >= 2
+    second = vacancies[1]
+    analysis_text = second.to_analysis_text()
+    assert "Alert context:" not in analysis_text
+    assert "Hire Feed" not in analysis_text

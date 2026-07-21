@@ -301,6 +301,7 @@ def collect_linkedin_email(
         min=1,
         help="Override bounded lookback window for bootstrap/rescan.",
     ),
+    parser_trace: bool = typer.Option(False, "--parser-trace", help="Print detailed parser card-boundary diagnostics."),
 ) -> None:
     try:
         settings = Settings()
@@ -351,7 +352,7 @@ def collect_linkedin_email(
         _sync_application_history(report.processed)
     diagnostics_method = getattr(collector, "last_sync_diagnostics", None)
     if callable(diagnostics_method):
-        _print_linkedin_sync_diagnostics(diagnostics_method(), verbose=False)
+        _print_linkedin_sync_diagnostics(diagnostics_method(), verbose=False, parser_trace=parser_trace)
     _print_linkedin_results(report=report, include_ignore=include_ignore, dry_run=dry_run)
     _print_linkedin_summary(report)
 
@@ -440,6 +441,7 @@ def send_linkedin_telegram(
         min=1,
         help="Override bounded lookback window for bootstrap/rescan.",
     ),
+    parser_trace: bool = typer.Option(False, "--parser-trace", help="Print detailed parser card-boundary diagnostics."),
 ) -> None:
     try:
         settings = Settings()
@@ -496,7 +498,7 @@ def send_linkedin_telegram(
         _sync_application_history(report.processed)
     diagnostics_method = getattr(collector, "last_sync_diagnostics", None)
     if callable(diagnostics_method):
-        _print_linkedin_sync_diagnostics(diagnostics_method(), verbose=verbose)
+        _print_linkedin_sync_diagnostics(diagnostics_method(), verbose=verbose, parser_trace=parser_trace)
     for item in report.processed:
         if item.evaluation is None:
             if verbose and item.skipped_by_prefilter:
@@ -788,6 +790,7 @@ def run_pipeline(
                         limit=20,
                         skip_seen=True,
                         mark_seen=True,
+                        verbose=verbose,
                     )
                     analyze_ms = max(0, int((time.monotonic() - analyze_start) * 1000))
                     telegram_start = time.monotonic()
@@ -857,6 +860,18 @@ def run_pipeline(
                                         for reason, count in sorted(source_diag.classification_counts.items())
                                     )
                                     _run_log(f"{source_name}: classification_counts {counts_line}", component="main")
+                                if source_diag.extraction_stats:
+                                    stats = source_diag.extraction_stats
+                                    _run_log(
+                                        f"{source_name}: extraction_stats "
+                                        f"cards_found={stats.get('cards_found', 0)} "
+                                        f"cards_with_description={stats.get('cards_with_description', 0)} "
+                                        f"cards_with_real_snippet={stats.get('cards_with_real_snippet', 0)} "
+                                        f"cards_with_promotional_snippet={stats.get('cards_with_promotional_snippet', 0)} "
+                                        f"cards_without_snippet={stats.get('cards_without_snippet', 0)} "
+                                        f"cards_with_only_title={stats.get('cards_with_only_title', 0)}",
+                                        component="main",
+                                    )
                                 for event in source_diag.classification_events:
                                     _run_log(f"{source_name}: {event}", component="main")
                                 for event in source_diag.rejection_events:
@@ -1362,7 +1377,12 @@ def _print_linkedin_summary(report: LinkedInEmailCollectReport) -> None:
     )
 
 
-def _print_linkedin_sync_diagnostics(diagnostics: LinkedInSyncDiagnostics, *, verbose: bool) -> None:
+def _print_linkedin_sync_diagnostics(
+    diagnostics: LinkedInSyncDiagnostics,
+    *,
+    verbose: bool,
+    parser_trace: bool = False,
+) -> None:
     checkpoint_value = diagnostics.checkpoint_after or diagnostics.checkpoint_before or 0
     typer.echo(
         "LinkedIn IMAP sync: "
@@ -1398,10 +1418,24 @@ def _print_linkedin_sync_diagnostics(diagnostics: LinkedInSyncDiagnostics, *, ve
                     for reason, count in sorted(diagnostics.classification_counts.items())
                 )
             )
+        if diagnostics.extraction_stats:
+            stats = diagnostics.extraction_stats
+            typer.echo(
+                "LinkedIn parser extraction stats: "
+                f"cards_found={stats.get('cards_found', 0)} "
+                f"cards_with_description={stats.get('cards_with_description', 0)} "
+                f"cards_with_real_snippet={stats.get('cards_with_real_snippet', 0)} "
+                f"cards_with_promotional_snippet={stats.get('cards_with_promotional_snippet', 0)} "
+                f"cards_without_snippet={stats.get('cards_without_snippet', 0)} "
+                f"cards_with_only_title={stats.get('cards_with_only_title', 0)}"
+            )
         for event in diagnostics.classification_events:
             typer.echo(f"LinkedIn IMAP message: {event}")
         for event in diagnostics.rejection_events:
             typer.echo(f"LinkedIn IMAP message: {event}")
+        if parser_trace:
+            for event in diagnostics.parser_events:
+                typer.echo(f"LinkedIn parser: {event}")
         typer.echo(
             "LinkedIn IMAP timings: "
             f"connect={diagnostics.timings_ms.get('connect', 0)}ms "
@@ -1468,6 +1502,7 @@ def _analyze_pipeline_items(
     limit: int,
     skip_seen: bool,
     mark_seen: bool,
+    verbose: bool = False,
 ) -> None:
     for item in pipeline.items:
         if item.vacancy is None or item.duplicate:
@@ -1511,8 +1546,16 @@ def _analyze_pipeline_items(
         vacancy = item.vacancy
         if vacancy is None:
             continue
+        analysis_text = vacancy.to_analysis_text()
+        if verbose:
+            identity = item.identity or f"{vacancy.source}:{vacancy.external_id}"
+            item.verbose_events = _build_parsed_vacancy_events(
+                identity=identity,
+                vacancy=vacancy,
+                analysis_text=analysis_text,
+            )
         try:
-            evaluation = analyzer.analyze(vacancy.to_analysis_text(), content_completeness="FULL")
+            evaluation = analyzer.analyze(analysis_text, content_completeness="FULL")
         except Exception as exc:  # noqa: BLE001
             item.error = str(exc)
             item.error_stage = "analyze"
@@ -1643,6 +1686,8 @@ def _pipeline_verbose_outcomes(pipeline: PipelineResult) -> list[str]:
             continue
         if item.analysis_result is None:
             continue
+        if item.verbose_events:
+            outcomes.extend(item.verbose_events)
         score = _format_score(item.analysis_result.match_percentage)
         reason = _quote_log_text(item.analysis_result.decision_reason or item.analysis_result.summary)
         if item.analysis_result.decision == Decision.STRONG_MATCH:
@@ -1651,14 +1696,20 @@ def _pipeline_verbose_outcomes(pipeline: PipelineResult) -> list[str]:
             outcomes.append(f'POTENTIAL {identity} title="{_quote_log_text(title)}" score={score} reason="{reason}"')
         else:
             outcomes.append(f'IGNORE {identity} title="{_quote_log_text(title)}" score={score} reason="{reason}"')
+        flags = _decision_input_flags(item.vacancy, item.vacancy.to_analysis_text())
+        outcomes.append(
+            "DECISION_INPUT_FIELDS "
+            f"title={flags['title']} company={flags['company']} location={flags['location']} "
+            f"snippet={flags['snippet']} alert_query={flags['alert_query']} url={flags['url']}"
+        )
         for warning in item.analysis_result.warning_signals:
             code = _quote_log_text(warning.get("code", "nuance"))
             source = _quote_log_text(warning.get("source", "heuristic"))
             evidence = _quote_log_text(warning.get("evidence", ""))
-            if evidence:
-                outcomes.append(f'WARNING {identity} code={code} source="{source}" evidence="{evidence}"')
-            else:
-                outcomes.append(f'WARNING {identity} code={code} source="{source}"')
+            if not evidence:
+                continue
+            outcomes.append(f'WARNING {identity} code={code} source="{source}" evidence="{evidence}"')
+            outcomes.append(f'WARNING_SOURCE_TEXT "{_format_observability_value(evidence, max_len=200)}"')
 
         if item.telegram_already_delivered:
             outcomes.append(f"ALREADY_DELIVERED {identity} {title}")
@@ -1736,6 +1787,7 @@ def _collect_from_collectors(
 def _collect_source_items(collector: VacancyCollector) -> tuple[int, list[NormalizedVacancy]]:
     if hasattr(collector, "_collect_unique_vacancies"):
         items, _emails, _parse_errors, extracted = collector._collect_unique_vacancies()  # noqa: SLF001
+        raw_preview_getter = getattr(collector, "raw_text_preview", None)
         normalized = [
             NormalizedVacancy(
                 source=collector.SOURCE,
@@ -1747,6 +1799,11 @@ def _collect_source_items(collector: VacancyCollector) -> tuple[int, list[Normal
                 description=item.to_analysis_text(),
                 url=item.url,
                 published_at=item.received_at.isoformat() if item.received_at else None,
+                snippet=getattr(item, "snippet", None),
+                email_subject_context=getattr(item, "email_subject_context", None),
+                alert_query=getattr(item, "alert_query", None),
+                snippet_source=getattr(item, "snippet_source", None),
+                raw_text_preview=raw_preview_getter(item.external_id) if callable(raw_preview_getter) else None,
             )
             for item in items
         ]
@@ -1814,8 +1871,16 @@ def _analyze_collected_vacancies(
                 seen_jobs.mark_seen(vacancy.source, vacancy.external_id)
             continue
 
+        analysis_text = vacancy.to_analysis_text()
+        verbose_outcomes.extend(
+            _build_parsed_vacancy_events(
+                identity=f"{vacancy.source}:{vacancy.external_id}",
+                vacancy=vacancy,
+                analysis_text=analysis_text,
+            )
+        )
         try:
-            evaluation = analyzer.analyze(vacancy.to_analysis_text(), content_completeness="FULL")
+            evaluation = analyzer.analyze(analysis_text, content_completeness="FULL")
         except Exception as exc:  # noqa: BLE001
             report.errors += 1
             source_counters.errors += 1
@@ -1847,16 +1912,22 @@ def _analyze_collected_vacancies(
                 f'IGNORE {vacancy.source}:{vacancy.external_id} title="{_quote_log_text(vacancy.title)}" '
                 f"score={_format_score(evaluation.match_percentage)} reason=\"{_quote_log_text(evaluation.decision_reason or evaluation.summary)}\""
             )
+        flags = _decision_input_flags(vacancy, analysis_text)
+        verbose_outcomes.append(
+            "DECISION_INPUT_FIELDS "
+            f"title={flags['title']} company={flags['company']} location={flags['location']} "
+            f"snippet={flags['snippet']} alert_query={flags['alert_query']} url={flags['url']}"
+        )
         for warning in evaluation.warning_signals:
             code = _quote_log_text(warning.get("code", "nuance"))
             source = _quote_log_text(warning.get("source", "heuristic"))
             evidence = _quote_log_text(warning.get("evidence", ""))
-            if evidence:
-                verbose_outcomes.append(
-                    f'WARNING {vacancy.source}:{vacancy.external_id} code={code} source="{source}" evidence="{evidence}"'
-                )
-            else:
-                verbose_outcomes.append(f'WARNING {vacancy.source}:{vacancy.external_id} code={code} source="{source}"')
+            if not evidence:
+                continue
+            verbose_outcomes.append(
+                f'WARNING {vacancy.source}:{vacancy.external_id} code={code} source="{source}" evidence="{evidence}"'
+            )
+            verbose_outcomes.append(f'WARNING_SOURCE_TEXT "{_format_observability_value(evidence, max_len=200)}"')
         report.processed.append(
             LinkedInProcessedVacancy(
                 external_id=vacancy.external_id,
@@ -2831,6 +2902,7 @@ class PipelineItem:
     telegram_eligible: bool = False
     telegram_delivered: bool = False
     telegram_already_delivered: bool = False
+    verbose_events: list[str] | None = None
     error: str | None = None
     error_stage: str | None = None
 
@@ -3161,6 +3233,112 @@ def _format_score(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:.1f}"
+
+
+def _format_observability_value(value: str | None, *, max_len: int = 500) -> str:
+    if value is None:
+        return "<empty>"
+    text = value.strip()
+    if not text:
+        return "<empty>"
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}\n(first {max_len} characters)"
+
+
+def _extract_labeled_value(text: str, label: str) -> str | None:
+    prefix = f"{label}:"
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.lower().startswith(prefix.lower()):
+            continue
+        value = line[len(prefix) :].strip()
+        return value or None
+    return None
+
+
+def _extract_snippet_value(text: str) -> str | None:
+    lines = text.splitlines()
+    start: int | None = None
+    for idx, raw_line in enumerate(lines):
+        if raw_line.strip().lower() == "snippet:":
+            start = idx + 1
+            break
+    if start is None:
+        return None
+    collected: list[str] = []
+    for raw_line in lines[start:]:
+        line = raw_line.strip()
+        lowered = line.lower()
+        if lowered.startswith("alert context:") or lowered.startswith("alert query:") or lowered.startswith("source url:") or lowered.startswith("content completeness:"):
+            break
+        if line:
+            collected.append(raw_line.rstrip())
+    if not collected:
+        return None
+    return "\n".join(collected).strip()
+
+
+def _decision_input_flags(vacancy: NormalizedVacancy, analysis_text: str) -> dict[str, str]:
+    title = vacancy.title
+    company = vacancy.company or _extract_labeled_value(analysis_text, "Company")
+    location = vacancy.location or _extract_labeled_value(analysis_text, "Location")
+    snippet = vacancy.snippet or _extract_snippet_value(analysis_text)
+    alert_query = vacancy.alert_query or _extract_labeled_value(analysis_text, "Alert query")
+    url = vacancy.url or _extract_labeled_value(analysis_text, "Source URL")
+    return {
+        "title": "yes" if bool((title or "").strip()) else "no",
+        "company": "yes" if bool((company or "").strip()) else "no",
+        "location": "yes" if bool((location or "").strip()) else "no",
+        "snippet": "yes" if bool((snippet or "").strip()) else "no",
+        "alert_query": "yes" if bool((alert_query or "").strip()) else "no",
+        "url": "yes" if bool((url or "").strip()) else "no",
+    }
+
+
+def _build_parsed_vacancy_events(*, identity: str, vacancy: NormalizedVacancy, analysis_text: str) -> list[str]:
+    title = vacancy.title or _extract_labeled_value(analysis_text, "Title")
+    company = vacancy.company or _extract_labeled_value(analysis_text, "Company")
+    location = vacancy.location or _extract_labeled_value(analysis_text, "Location")
+    snippet = vacancy.snippet or _extract_snippet_value(analysis_text)
+    alert_query = vacancy.alert_query or _extract_labeled_value(analysis_text, "Alert query")
+    url = vacancy.url or _extract_labeled_value(analysis_text, "Source URL")
+    raw_preview = vacancy.raw_text_preview
+    snippet_source = vacancy.snippet_source or "missing"
+    completeness = _extract_labeled_value(analysis_text, "Content completeness")
+    return [
+        f"PARSED {identity}",
+        "",
+        "title:",
+        _format_observability_value(title),
+        "",
+        "company:",
+        _format_observability_value(company),
+        "",
+        "location:",
+        _format_observability_value(location),
+        "",
+        "url:",
+        _format_observability_value(url),
+        "",
+        "snippet:",
+        _format_observability_value(snippet),
+        "",
+        "snippet_source:",
+        _format_observability_value(snippet_source),
+        "",
+        "alert_query:",
+        _format_observability_value(alert_query),
+        "",
+        "content_completeness:",
+        _format_observability_value(completeness),
+        "",
+        "VISIBLE_TEXT_PREVIEW:",
+        _format_observability_value(raw_preview),
+        "",
+        "analysis_text:",
+        _format_observability_value(analysis_text, max_len=100000),
+    ]
 
 
 def _recover_and_requeue_abandoned_preparations(

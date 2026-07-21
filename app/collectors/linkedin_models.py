@@ -27,7 +27,9 @@ class LinkedInEmailVacancy:
     email_message_id: str
     received_at: datetime | None
     content_completeness: ContentCompleteness
-    alert_context: str | None = None
+    email_subject_context: str | None = None
+    alert_query: str | None = None
+    snippet_source: str = "missing"
     parser_source: ParserSource = ParserSource.FALLBACK_URL
 
     def to_analysis_text(self) -> str:
@@ -39,8 +41,8 @@ class LinkedInEmailVacancy:
         if self.snippet:
             lines.append("Snippet:")
             lines.append(self.snippet)
-        if self.alert_context:
-            lines.append(f"Alert context: {self.alert_context}")
+        if self.alert_query:
+            lines.append(f"Alert query: {self.alert_query}")
         lines.append(f"Source URL: {self.url}")
         lines.append(f"Content completeness: {self.content_completeness.value}")
         return "\n".join(lines)

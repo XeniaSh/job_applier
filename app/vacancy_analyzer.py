@@ -31,8 +31,13 @@ class VacancyAnalyzer:
     def analyze(self, vacancy: str, content_completeness: str = "FULL") -> VacancyEvaluation:
         skills = self._skills_loader()
         prompt = self._prompt_loader()
+        title_text = _extract_title_from_vacancy_text(vacancy) or ""
         extraction = self._llm_client.extract_vacancy(prompt=prompt, vacancy=vacancy)
-        comparison = compare_requirements(extraction=extraction, candidate_skills=skills)
+        comparison = compare_requirements(
+            extraction=extraction,
+            candidate_skills=skills,
+            vacancy_title=title_text,
+        )
 
         decision = comparison.decision
         gaps = _select_gaps_for_output(
@@ -50,9 +55,9 @@ class VacancyAnalyzer:
 
         completeness = content_completeness.upper().strip()
         title_text = _extract_title_from_vacancy_text(vacancy) or extraction.role_type
-        alert_context = _extract_alert_context(vacancy)
-        incomplete_title_class = _classify_incomplete_title(title=title_text, alert_context=alert_context)
-        has_explicit_jvm_evidence = _has_explicit_jvm_evidence(extraction)
+        alert_query = _extract_alert_query(vacancy)
+        incomplete_title_class = _classify_incomplete_title(title=title_text, alert_query=alert_query)
+        has_explicit_jvm_evidence = _has_explicit_jvm_evidence(extraction, title_text=title_text)
         location_nuance, location_cap = _build_location_nuance(
             location_values=comparison.location_restrictions,
             uncertainty_values=comparison.uncertainties,
@@ -130,6 +135,7 @@ class VacancyAnalyzer:
             location_nuance=location_nuance,
             lead_nuance=lead_nuance,
             explicit_skill_count=explicit_skill_count,
+            title_text=title_text,
         )
         warning_signals = _build_warning_signals(
             nuances=nuances,
@@ -163,6 +169,7 @@ def _build_decision_reason(
     location_nuance: str | None,
     lead_nuance: str | None,
     explicit_skill_count: int,
+    title_text: str,
 ) -> str:
     role = extraction.role_type.strip() or "role"
     mandatory = set(comparison.missing_mandatory)
@@ -172,6 +179,7 @@ def _build_decision_reason(
     role_text = role.lower()
     evidence_text = " ".join(
         [
+            title_text.lower(),
             role_text,
             extraction.short_summary.lower(),
             " ".join(extraction.mandatory_skills).lower(),
@@ -223,7 +231,7 @@ def _build_decision_reason(
             return "Role is relevant but lead-level expectations need manual verification."
         if not has_jvm_evidence and "backend" in role_text and not has_conflicting_stack:
             return "Backend role but the email summary does not specify the technology stack."
-        if explicit_skill_count < 3:
+        if explicit_skill_count < 3 and not any(token in title_text.lower() for token in ("java", "kotlin", "jvm", "spring")):
             return "Backend signal is present, but the email card lacks enough explicit stack evidence."
         if mandatory:
             missing = ", ".join(sorted(mandatory)[:2])
@@ -375,8 +383,8 @@ def _build_lead_warning(vacancy_text: str) -> tuple[str | None, dict[str, str] |
         lowered = line.lower()
         if lowered.startswith("title:"):
             section = "title"
-        elif lowered.startswith("alert context:"):
-            section = "alert_context"
+        elif lowered.startswith("alert query:"):
+            section = "alert_query"
         elif lowered.startswith("snippet:"):
             section = "description"
             continue
@@ -519,21 +527,21 @@ def _extract_title_from_vacancy_text(vacancy_text: str) -> str | None:
     return None
 
 
-def _extract_alert_context(vacancy_text: str) -> str | None:
+def _extract_alert_query(vacancy_text: str) -> str | None:
     for line in vacancy_text.splitlines():
-        if line.lower().startswith("alert context:"):
+        if line.lower().startswith("alert query:"):
             value = " ".join(line.split(":", 1)[1].strip().split())
             return value or None
     return None
 
 
-def _has_explicit_jvm_evidence(extraction: VacancyExtraction) -> bool:
+def _has_explicit_jvm_evidence(extraction: VacancyExtraction, *, title_text: str = "") -> bool:
     all_skills = [*extraction.mandatory_skills, *extraction.optional_skills]
-    text = " ".join(all_skills).lower()
+    text = f"{title_text.lower()} {' '.join(all_skills).lower()}".strip()
     return any(token in text for token in ("java", "kotlin", "jvm", "spring"))
 
 
-def _classify_incomplete_title(*, title: str, alert_context: str | None) -> str:
+def _classify_incomplete_title(*, title: str, alert_query: str | None) -> str:
     text = title.lower()
     hard_negative_markers = (
         "frontend",
@@ -575,8 +583,8 @@ def _classify_incomplete_title(*, title: str, alert_context: str | None) -> str:
     if has_backend_marker or has_generic_backend_context:
         return "generic_backend"
 
-    if alert_context:
-        weak_context = alert_context.lower()
+    if alert_query:
+        weak_context = alert_query.lower()
         if any(marker in weak_context for marker in jvm_explicit_markers) and any(
             marker in text for marker in ("engineer", "developer", "platform")
         ):

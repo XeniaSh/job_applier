@@ -6,7 +6,12 @@ import time
 from dataclasses import dataclass, field
 
 from app.collectors.email_imap_client import EmailIMAPClient, ImapSyncResult
-from app.collectors.linkedin_email_parser import parse_linkedin_email
+from app.collectors.linkedin_email_parser import (
+    ParserCardDiagnostic,
+    ParserExtractionDiagnostics,
+    parse_linkedin_email,
+    parse_linkedin_email_with_diagnostics,
+)
 from app.collectors.linkedin_models import LinkedInEmailVacancy
 from app.collectors.title_filter import evaluate_title
 from app.collectors.vacancy_collector import NormalizedVacancy, VacancyCollector
@@ -73,6 +78,8 @@ class LinkedInSyncDiagnostics:
     search_criteria: str
     rejection_events: list[str]
     classification_events: list[str]
+    parser_events: list[str]
+    extraction_stats: dict[str, int]
     checkpoint_advanced: bool
     uidvalidity_changed: bool
     timings_ms: dict[str, int]
@@ -120,10 +127,13 @@ class LinkedInEmailCollector(VacancyCollector):
             search_criteria="",
             rejection_events=[],
             classification_events=[],
+            parser_events=[],
+            extraction_stats={},
             checkpoint_advanced=False,
             uidvalidity_changed=False,
             timings_ms={},
         )
+        self._last_visible_preview_by_external_id: dict[str, str] = {}
 
     def collect_and_analyze(
         self,
@@ -236,6 +246,11 @@ class LinkedInEmailCollector(VacancyCollector):
                     description=vacancy.to_analysis_text(),
                     url=vacancy.url,
                     published_at=vacancy.received_at.isoformat() if vacancy.received_at else None,
+                    snippet=vacancy.snippet,
+                    email_subject_context=vacancy.email_subject_context,
+                    alert_query=vacancy.alert_query,
+                    snippet_source=vacancy.snippet_source,
+                    raw_text_preview=self._last_visible_preview_by_external_id.get(vacancy.external_id),
                 )
             )
         return normalized
@@ -252,7 +267,11 @@ class LinkedInEmailCollector(VacancyCollector):
     def last_sync_diagnostics(self) -> LinkedInSyncDiagnostics:
         return self._last_sync_diagnostics
 
+    def raw_text_preview(self, external_id: str) -> str | None:
+        return self._last_visible_preview_by_external_id.get(str(external_id))
+
     def _collect_unique_vacancies(self, *, rescan: bool = False) -> tuple[list[LinkedInEmailVacancy], int, int, int]:
+        self._last_visible_preview_by_external_id = {}
         checkpoint_before = None
         checkpoint_uidvalidity = None
         checkpoint = None
@@ -310,6 +329,15 @@ class LinkedInEmailCollector(VacancyCollector):
         parse_errors = 0
         extracted = 0
         parsed_messages = 0
+        parser_events: list[str] = []
+        stats_agg = {
+            "cards_found": 0,
+            "cards_with_description": 0,
+            "cards_with_real_snippet": 0,
+            "cards_with_promotional_snippet": 0,
+            "cards_without_snippet": 0,
+            "cards_with_only_title": 0,
+        }
         parse_start = time.monotonic()
         for raw_message in raw_messages:
             try:
@@ -318,10 +346,26 @@ class LinkedInEmailCollector(VacancyCollector):
                 parse_errors += 1
                 logger.error("LinkedIn email parse failed: %s", exc)
                 continue
+            diagnostics = _fallback_parser_diagnostics(
+                vacancies=vacancies,
+                email_subject_context=raw_message.subject,
+            )
+            try:
+                _, richer_diagnostics = parse_linkedin_email_with_diagnostics(raw_message)
+                diagnostics = richer_diagnostics
+            except Exception:  # noqa: BLE001
+                pass
 
+            _accumulate_parser_stats(stats_agg, diagnostics)
+            parser_events.extend(_render_parser_events(diagnostics))
             parsed_messages += 1
             extracted += len(vacancies)
             for vacancy in vacancies:
+                if vacancy.external_id not in self._last_visible_preview_by_external_id:
+                    self._last_visible_preview_by_external_id[vacancy.external_id] = _preview_for_external_id(
+                        diagnostics=diagnostics,
+                        external_id=vacancy.external_id,
+                    )
                 if vacancy.external_id not in unique_vacancies:
                     unique_vacancies[vacancy.external_id] = vacancy
         parse_ms = max(0, int((time.monotonic() - parse_start) * 1000))
@@ -371,6 +415,8 @@ class LinkedInEmailCollector(VacancyCollector):
             search_criteria=sync_result.search_criteria,
             rejection_events=sync_result.rejection_events,
             classification_events=sync_result.classification_events,
+            parser_events=parser_events,
+            extraction_stats=stats_agg,
             checkpoint_advanced=checkpoint_advanced,
             uidvalidity_changed=sync_result.uidvalidity_changed,
             timings_ms=timings,
@@ -381,3 +427,87 @@ class LinkedInEmailCollector(VacancyCollector):
         username = self._email_client.username.strip().lower()
         digest = hashlib.sha256(username.encode("utf-8")).hexdigest()
         return f"sha256:{digest}"
+
+
+def _accumulate_parser_stats(stats: dict[str, int], diagnostics: ParserExtractionDiagnostics) -> None:
+    stats["cards_found"] += diagnostics.cards_found
+    stats["cards_with_description"] += diagnostics.cards_with_description
+    stats["cards_with_real_snippet"] += diagnostics.cards_with_real_snippet
+    stats["cards_with_promotional_snippet"] += diagnostics.cards_with_promotional_snippet
+    stats["cards_without_snippet"] += diagnostics.cards_without_snippet
+    stats["cards_with_only_title"] += diagnostics.cards_with_only_title
+
+
+def _preview_for_external_id(*, diagnostics: ParserExtractionDiagnostics, external_id: str) -> str:
+    for card in diagnostics.card_diagnostics:
+        if card.external_id == str(external_id):
+            return card.visible_text_preview
+    return ""
+
+
+def _render_parser_events(diagnostics: ParserExtractionDiagnostics) -> list[str]:
+    events: list[str] = []
+    for card in diagnostics.card_diagnostics:
+        title = card.title or "<empty>"
+        company = card.company or "<empty>"
+        alert_context = card.email_subject_context or "<empty>"
+        alert_query = card.alert_query or "<empty>"
+        events.extend(
+            [
+                f"CARD card_index={card.card_index} title={title} company={company} alert_context={alert_context}",
+                f"alert_query={alert_query}",
+                f"CARD_BEGIN {card.card_begin if card.card_begin is not None else 'n/a'}",
+                f"CARD_END {card.card_end if card.card_end is not None else 'n/a'}",
+                f"TEXT_LENGTH {card.text_length}",
+                f"VISIBLE_TEXT_LENGTH {card.visible_text_length}",
+                f"VISIBLE_TEXT_PREVIEW {_safe_preview(card.visible_text_preview)}",
+                f"snippet_source={card.snippet_source}",
+            ]
+        )
+        if card.promotional_snippet_detected:
+            events.append("PROMOTIONAL_SNIPPET_DETECTED")
+    return events
+
+
+def _safe_preview(value: str) -> str:
+    text = " ".join((value or "").strip().split())
+    if not text:
+        return "<empty>"
+    if len(text) <= 500:
+        return text
+    return text[:500]
+
+
+def _fallback_parser_diagnostics(
+    *,
+    vacancies: list[LinkedInEmailVacancy],
+    email_subject_context: str | None,
+) -> ParserExtractionDiagnostics:
+    cards: list[ParserCardDiagnostic] = []
+    for idx, vacancy in enumerate(vacancies, start=1):
+        cards.append(
+            ParserCardDiagnostic(
+                card_index=idx,
+                external_id=vacancy.external_id,
+                title=vacancy.title,
+                company=vacancy.company,
+                email_subject_context=email_subject_context,
+                alert_query=vacancy.alert_query,
+                snippet_source=vacancy.snippet_source if vacancy.snippet_source else ("missing" if not (vacancy.snippet or "").strip() else "body"),
+                promotional_snippet_detected=False,
+                card_begin=None,
+                card_end=None,
+                text_length=0,
+                visible_text_length=0,
+                visible_text_preview=(vacancy.snippet or "").strip()[:500],
+            )
+        )
+    return ParserExtractionDiagnostics(
+        cards_found=len(cards),
+        cards_with_description=0,
+        cards_with_real_snippet=sum(1 for card in cards if card.snippet_source != "missing"),
+        cards_with_promotional_snippet=0,
+        cards_without_snippet=sum(1 for card in cards if card.snippet_source == "missing"),
+        cards_with_only_title=0,
+        card_diagnostics=cards,
+    )

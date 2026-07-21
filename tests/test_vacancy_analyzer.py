@@ -645,7 +645,7 @@ def test_partial_python_backend_and_frontend_remain_ignore() -> None:
     assert frontend_result.decision == Decision.IGNORE
 
 
-def test_alert_context_is_weak_evidence_and_not_strong() -> None:
+def test_alert_query_is_weak_evidence_and_not_strong() -> None:
     class WeakContextClient(FakeLLMClient):
         def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
             return VacancyExtraction(
@@ -675,11 +675,48 @@ def test_alert_context_is_weak_evidence_and_not_strong() -> None:
         prompt_loader=lambda: "PROMPT_CONTENT",
     )
     result = analyzer.analyze(
-        "Title: Software Engineer - Platform\nAlert context: Kotlin Backend",
+        "Title: Software Engineer - Platform\nAlert query: Kotlin Backend",
         content_completeness="PARTIAL",
     )
     assert result.decision == Decision.POTENTIAL_MATCH
     assert result.match_percentage is None
+
+
+def test_java_title_counts_as_explicit_stack_evidence_for_reason() -> None:
+    class JavaTitleClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            _ = prompt, vacancy
+            return VacancyExtraction(
+                mandatory_skills=[],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority=None,
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Senior Software Developer",
+                short_summary="Backend team role",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=JavaTitleClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot"],
+            practical_skills=[],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9},
+        ),
+        prompt_loader=lambda: "PROMPT_CONTENT",
+    )
+    result = analyzer.analyze(
+        "Title: Senior Java Developer\nCompany: NE Group\nLocation: Hyderabad\nContent completeness: PARTIAL",
+        content_completeness="PARTIAL",
+    )
+    assert "lacks enough explicit stack evidence" not in result.decision_reason.lower()
 
 
 def test_decision_reason_present_for_all_decisions() -> None:
@@ -779,7 +816,7 @@ def test_hire_feed_backend_title_has_specific_reason() -> None:
         ),
         prompt_loader=lambda: "PROMPT",
     )
-    result = analyzer.analyze("Title: Software Engineer - Backend (Remote)\nAlert context: Hire Feed", content_completeness="FULL")
+    result = analyzer.analyze("Title: Software Engineer - Backend (Remote)\nAlert query: Hire Feed", content_completeness="FULL")
     reason = result.decision_reason.strip()
     assert reason
     assert len(reason) > 12

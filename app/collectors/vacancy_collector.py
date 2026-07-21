@@ -17,6 +17,11 @@ class NormalizedVacancy:
     description: str
     url: str
     published_at: str | None
+    snippet: str | None = None
+    email_subject_context: str | None = None
+    alert_query: str | None = None
+    snippet_source: str | None = None
+    raw_text_preview: str | None = None
 
     def to_analysis_text(self) -> str:
         lines = [f"Title: {self.title}"]

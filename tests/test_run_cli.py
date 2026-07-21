@@ -46,17 +46,33 @@ def _evaluation(
     )
 
 
-def _vacancy(*, source: str, external_id: str, title: str) -> cli_module.NormalizedVacancy:
+def _vacancy(
+    *,
+    source: str,
+    external_id: str,
+    title: str,
+    company: str = "ACME",
+    location: str = "Remote",
+    description: str | None = None,
+    snippet: str | None = None,
+    alert_query: str | None = None,
+    snippet_source: str | None = None,
+    raw_text_preview: str | None = None,
+) -> cli_module.NormalizedVacancy:
     return cli_module.NormalizedVacancy(
         source=source,
         external_id=external_id,
         title=title,
-        company="ACME",
-        location="Remote",
+        company=company,
+        location=location,
         employment=None,
-        description=title,
+        description=description or title,
         url=f"https://www.linkedin.com/jobs/view/{external_id}/",
         published_at=None,
+        snippet=snippet,
+        alert_query=alert_query,
+        snippet_source=snippet_source,
+        raw_text_preview=raw_text_preview,
     )
 
 
@@ -290,6 +306,257 @@ def test_run_verbose_mode_prints_per_vacancy_outcomes(monkeypatch, tmp_path: Pat
     assert 'POTENTIAL linkedin-email:3 title="Potential Role" score=' in result.output
     assert 'reason="Role is partially aligned with Java backend profile."' in result.output
     assert "ALREADY_DELIVERED linkedin-email:3 Potential Role" in result.output
+
+
+def test_run_non_verbose_does_not_print_parsed_blocks(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    _bootstrap_common(monkeypatch, decision=Decision.POTENTIAL_MATCH)
+    _run_single_cycle(monkeypatch)
+    monkeypatch.setattr(
+        cli_module,
+        "LinkedInEmailCollector",
+        lambda **kwargs: type(
+            "L",
+            (),
+            {"SOURCE": "linkedin-email", "collect": lambda self: [_vacancy(source="linkedin-email", external_id="101", title="Senior Java Developer")]},
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
+    monkeypatch.setattr(
+        cli_module,
+        "evaluate_title",
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": True,
+                "reason": "Explicit Java/JVM signal in title",
+                "normalized_title": title.lower(),
+                "positive_rules": ["java"],
+                "negative_rules": [],
+                "decision": "PASS",
+            },
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})())
+    monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: type("D", (), {"was_sent": lambda self, source, external_id, chat_id: True, "save_sent": lambda self, **kwargs: None, "mark_history_status": lambda self, **kwargs: None, "upsert_application_history": lambda self, **kwargs: None, "get_state": lambda self, key: None, "set_state": lambda self, key, value: None, "pop_state": lambda self, key: None, "list_by_status": lambda self, **kwargs: [], "claim_for_preparation": lambda self, **kwargs: False, "save_preparation": lambda self, prep: None, "get_preparation": lambda self, source, external_id: None, "clear_preparation_aux_message_ids": lambda self, source, external_id: None, "set_preparation_aux_message_id": lambda self, source, external_id, message_kind, message_id: None, "get_delivery": lambda self, source, external_id, chat_id: None, "recover_abandoned_preparing": lambda self, **kwargs: [], "count_by_status": lambda self, **kwargs: 0})())
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
+
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 0
+    assert "PARSED linkedin-email:101" not in result.output
+    assert "DECISION_INPUT_FIELDS" not in result.output
+    assert "WARNING_SOURCE_TEXT" not in result.output
+
+
+def test_run_verbose_logs_parsed_vacancy_inputs_and_warning_source(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    _run_single_cycle(monkeypatch)
+
+    long_raw_preview = "X" * 550
+
+    class Analyzer:
+        def analyze(self, *args, **kwargs):
+            _ = args, kwargs
+            return _evaluation(
+                Decision.POTENTIAL_MATCH,
+                warning_signals=[
+                    {
+                        "code": "lead_level",
+                        "source": "description",
+                        "evidence": "lead architecture decisions and mentor backend engineers",
+                    }
+                ],
+            )
+
+    monkeypatch.setattr(cli_module, "build_analyzer", lambda settings: Analyzer())
+    monkeypatch.setattr(cli_module, "LLMClient", lambda **kwargs: object())
+    monkeypatch.setattr(cli_module, "EmailIMAPClient", lambda **kwargs: object())
+    monkeypatch.setattr(cli_module, "PreparationService", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_requested_applications",
+        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0, 0, 0),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "LinkedInEmailCollector",
+        lambda **kwargs: type(
+            "L",
+            (),
+            {
+                "SOURCE": "linkedin-email",
+                "collect": lambda self: [
+                    _vacancy(
+                        source="linkedin-email",
+                        external_id="88",
+                        title="Senior Java Developer",
+                        company="GCash",
+                        location="Metro Manila",
+                        description="Senior Java Developer responsible for backend services.",
+                        snippet="Senior Java Developer responsible for backend services.",
+                        alert_query="Java Kafka",
+                        snippet_source="description",
+                        raw_text_preview=long_raw_preview,
+                    )
+                ],
+            },
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
+    monkeypatch.setattr(
+        cli_module,
+        "evaluate_title",
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": True,
+                "reason": "Explicit Java/JVM signal in title",
+                "normalized_title": title.lower(),
+                "positive_rules": ["java"],
+                "negative_rules": [],
+                "decision": "PASS",
+            },
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})())
+    monkeypatch.setattr(
+        cli_module,
+        "TelegramDeliveryStorage",
+        lambda: type(
+            "D",
+            (),
+            {
+                "was_sent": lambda self, source, external_id, chat_id: True,
+                "save_sent": lambda self, **kwargs: None,
+                "mark_history_status": lambda self, **kwargs: None,
+                "upsert_application_history": lambda self, **kwargs: None,
+                "get_state": lambda self, key: None,
+                "set_state": lambda self, key, value: None,
+                "pop_state": lambda self, key: None,
+                "list_by_status": lambda self, **kwargs: [],
+                "claim_for_preparation": lambda self, **kwargs: False,
+                "save_preparation": lambda self, prep: None,
+                "get_preparation": lambda self, source, external_id: None,
+                "clear_preparation_aux_message_ids": lambda self, source, external_id: None,
+                "set_preparation_aux_message_id": lambda self, source, external_id, message_kind, message_id: None,
+                "get_delivery": lambda self, source, external_id, chat_id: None,
+                "recover_abandoned_preparing": lambda self, **kwargs: [],
+                "count_by_status": lambda self, **kwargs: 0,
+            },
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
+
+    result = CliRunner().invoke(cli_module.app, ["run", "--verbose"])
+    assert result.exit_code == 0
+    assert "PARSED linkedin-email:88" in result.output
+    assert "analysis_text:" in result.output
+    assert "VISIBLE_TEXT_PREVIEW:" in result.output
+    assert "(first 500 characters)" in result.output
+    assert "DECISION_INPUT_FIELDS title=yes company=yes location=yes snippet=yes alert_query=yes url=yes" in result.output
+    assert "WARNING linkedin-email:88 code=lead_level source=\"description\"" in result.output
+    assert "WARNING_SOURCE_TEXT" in result.output
+
+
+def test_run_verbose_logs_empty_fields_as_empty(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    _run_single_cycle(monkeypatch)
+
+    class Analyzer:
+        def analyze(self, *args, **kwargs):
+            _ = args, kwargs
+            return _evaluation(Decision.POTENTIAL_MATCH)
+
+    monkeypatch.setattr(cli_module, "build_analyzer", lambda settings: Analyzer())
+    monkeypatch.setattr(cli_module, "LLMClient", lambda **kwargs: object())
+    monkeypatch.setattr(cli_module, "EmailIMAPClient", lambda **kwargs: object())
+    monkeypatch.setattr(cli_module, "PreparationService", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_requested_applications",
+        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0, 0, 0),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "LinkedInEmailCollector",
+        lambda **kwargs: type(
+            "L",
+            (),
+            {
+                "SOURCE": "linkedin-email",
+                "collect": lambda self: [
+                    _vacancy(
+                        source="linkedin-email",
+                        external_id="89",
+                        title="Software Engineer",
+                        company="",
+                        location="",
+                        description="Software Engineer",
+                        snippet=None,
+                        alert_query=None,
+                        snippet_source="missing",
+                        raw_text_preview=None,
+                    )
+                ],
+            },
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
+    monkeypatch.setattr(
+        cli_module,
+        "evaluate_title",
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": True,
+                "reason": "No incompatible title signal",
+                "normalized_title": title.lower(),
+                "positive_rules": [],
+                "negative_rules": [],
+                "decision": "PASS",
+            },
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})())
+    monkeypatch.setattr(
+        cli_module,
+        "TelegramDeliveryStorage",
+        lambda: type(
+            "D",
+            (),
+            {
+                "was_sent": lambda self, source, external_id, chat_id: True,
+                "save_sent": lambda self, **kwargs: None,
+                "mark_history_status": lambda self, **kwargs: None,
+                "upsert_application_history": lambda self, **kwargs: None,
+                "get_state": lambda self, key: None,
+                "set_state": lambda self, key, value: None,
+                "pop_state": lambda self, key: None,
+                "list_by_status": lambda self, **kwargs: [],
+                "claim_for_preparation": lambda self, **kwargs: False,
+                "save_preparation": lambda self, prep: None,
+                "get_preparation": lambda self, source, external_id: None,
+                "clear_preparation_aux_message_ids": lambda self, source, external_id: None,
+                "set_preparation_aux_message_id": lambda self, source, external_id, message_kind, message_id: None,
+                "get_delivery": lambda self, source, external_id, chat_id: None,
+                "recover_abandoned_preparing": lambda self, **kwargs: [],
+                "count_by_status": lambda self, **kwargs: 0,
+            },
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
+
+    result = CliRunner().invoke(cli_module.app, ["run", "--verbose"])
+    assert result.exit_code == 0
+    assert "PARSED linkedin-email:89" in result.output
+    assert "company:" in result.output and "<empty>" in result.output
+    assert "location:" in result.output
+    assert "snippet:" in result.output
+    assert "alert_query:" in result.output
+    assert "VISIBLE_TEXT_PREVIEW:" in result.output
 
 
 def test_verbose_logging_does_not_trigger_extra_analysis_calls(monkeypatch, tmp_path: Path) -> None:

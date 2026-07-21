@@ -336,6 +336,7 @@ class DeterministicMatchResult:
 def compare_requirements(
     extraction: VacancyExtraction,
     candidate_skills: CandidateSkillsProfile,
+    vacancy_title: str | None = None,
 ) -> DeterministicMatchResult:
     extraction = sanitize_extraction(extraction=extraction, candidate_skills=candidate_skills)
     aliases = _build_alias_lookup(candidate_skills)
@@ -408,7 +409,8 @@ def compare_requirements(
     role_text = _normalize_text(extraction.role_type)
     skills_text = _normalize_text(" ".join([*extraction.mandatory_skills, *extraction.optional_skills]))
     summary_text = _normalize_text(extraction.short_summary)
-    evidence_text = f"{role_text} {skills_text} {summary_text}"
+    title_text = _normalize_text(vacancy_title or "")
+    evidence_text = f"{title_text} {role_text} {skills_text} {summary_text}"
     has_jvm_evidence = _contains_any(evidence_text, JVM_EVIDENCE_TERMS)
     has_conflicting_stack = _contains_any(evidence_text, CONFLICTING_STACK_TERMS)
     has_backend_signal = _contains_any(evidence_text, BACKEND_SIGNAL_TERMS)
