@@ -1,4 +1,4 @@
-from app.collectors.title_filter import should_accept_title
+from app.collectors.title_filter import evaluate_title, should_accept_title
 
 
 def test_title_filter_accepts_backend_jvm_titles() -> None:
@@ -16,3 +16,10 @@ def test_title_filter_rejects_non_target_titles() -> None:
     assert not should_accept_title("Mobile Engineer")
     assert not should_accept_title("Data Scientist")
     assert not should_accept_title("ML Engineer")
+
+
+def test_title_filter_returns_rule_based_reasons() -> None:
+    assert evaluate_title("Frontend React Developer").reason == "Frontend title"
+    assert evaluate_title("QA Tester").reason == "QA/test role"
+    assert evaluate_title("Android Mobile Engineer").reason == "Mobile role"
+    assert evaluate_title("Software Engineer, Micro Platforms").reason == "Generic software title without Java/backend evidence"

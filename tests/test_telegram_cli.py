@@ -593,7 +593,7 @@ def test_verbose_outcome_and_prepared_cards_counter(monkeypatch) -> None:
     )
     assert result.exit_code == 0
     assert "SKIP IGNORE Ignore role" in result.output
-    assert "SKIP TITLE_FILTER Frontend Engineer" in result.output
+    assert 'SKIP PREFILTERED title="Frontend Engineer" reason=' in result.output
     assert "WOULD_SEND POTENTIAL_MATCH Potential role" in result.output
     assert "SKIP STRONG_MATCH Strong role" in result.output
     assert "Подготовлено карточек: 1" in result.output

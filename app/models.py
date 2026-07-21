@@ -94,6 +94,7 @@ class VacancyExtraction(BaseModel):
 class VacancyEvaluation(BaseModel):
     decision: Decision
     summary: str
+    decision_reason: str = ""
     matched_points: list[str] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
     nuances: list[str] = Field(default_factory=list)

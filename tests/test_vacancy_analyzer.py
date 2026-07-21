@@ -680,3 +680,107 @@ def test_alert_context_is_weak_evidence_and_not_strong() -> None:
     )
     assert result.decision == Decision.POTENTIAL_MATCH
     assert result.match_percentage is None
+
+
+def test_decision_reason_present_for_all_decisions() -> None:
+    class StrongClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["java", "spring boot", "kafka"],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority=None,
+                responsibilities=[],
+                employment_conditions=["remote worldwide"],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Java Backend Engineer",
+                short_summary="Strong java backend role",
+            )
+
+    class PotentialClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["java", "spring boot"],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority="Lead",
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Backend Lead (Java/Kotlin)",
+                short_summary="Lead backend role",
+            )
+
+    class IgnoreClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["python", "django"],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority=None,
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Python Backend Engineer",
+                short_summary="Python backend role",
+            )
+
+    profile = lambda: CandidateSkillsProfile(
+        strong_skills=["java", "spring boot", "kafka"],
+        practical_skills=["postgresql"],
+        absent_skills=[],
+        aliases={},
+        experience_years=6,
+        core_skills=["java", "spring boot"],
+        skill_weights={"java": 10, "spring boot": 9, "kafka": 7, "postgresql": 6},
+    )
+    strong = VacancyAnalyzer(llm_client=StrongClient(), skills_loader=profile, prompt_loader=lambda: "PROMPT").analyze("x", content_completeness="FULL")
+    potential = VacancyAnalyzer(llm_client=PotentialClient(), skills_loader=profile, prompt_loader=lambda: "PROMPT").analyze("x", content_completeness="PARTIAL")
+    ignore = VacancyAnalyzer(llm_client=IgnoreClient(), skills_loader=profile, prompt_loader=lambda: "PROMPT").analyze("x", content_completeness="FULL")
+
+    assert strong.decision == Decision.STRONG_MATCH
+    assert potential.decision == Decision.POTENTIAL_MATCH
+    assert ignore.decision == Decision.IGNORE
+    for result in (strong, potential, ignore):
+        reason = result.decision_reason.strip().lower()
+        assert reason
+        assert "not a good fit" not in reason
+
+
+def test_hire_feed_backend_title_has_specific_reason() -> None:
+    class HireFeedClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["python", "django"],
+                optional_skills=["postgresql"],
+                minimum_experience_years=None,
+                seniority=None,
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Software Engineer - Backend (Remote)",
+                short_summary="Software Engineer - Backend (Remote) at Hire Feed",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=HireFeedClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot"],
+            practical_skills=["kafka"],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9, "kafka": 7},
+        ),
+        prompt_loader=lambda: "PROMPT",
+    )
+    result = analyzer.analyze("Title: Software Engineer - Backend (Remote)\nAlert context: Hire Feed", content_completeness="FULL")
+    reason = result.decision_reason.strip()
+    assert reason
+    assert len(reason) > 12
+    assert any(token in reason.lower() for token in ("java", "kotlin", "python", "location", "backend", "profile"))

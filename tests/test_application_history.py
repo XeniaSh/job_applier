@@ -16,6 +16,7 @@ def test_first_processing_creates_history_and_is_idempotent(tmp_path: Path) -> N
         location="Remote",
         url="https://www.linkedin.com/jobs/view/1001/",
         decision="POTENTIAL_MATCH",
+        decision_reason="Role is partially aligned with Java backend profile.",
         recommended_resume="java-backend",
     )
     rows = storage.list_application_history()
@@ -30,12 +31,14 @@ def test_first_processing_creates_history_and_is_idempotent(tmp_path: Path) -> N
         location="Another",
         url="https://www.linkedin.com/jobs/view/1001/",
         decision="STRONG_MATCH",
+        decision_reason="Core Java backend requirements are fully matched.",
         recommended_resume="kotlin-backend",
     )
     rows_again = storage.list_application_history()
     assert len(rows_again) == 1
     assert rows_again[0].first_seen_at == first_seen
     assert rows_again[0].title == "Java Backend Engineer"
+    assert rows_again[0].decision_reason == "Role is partially aligned with Java backend profile."
 
 
 def test_lifecycle_timestamps_and_no_overwrite(tmp_path: Path) -> None:
@@ -48,6 +51,7 @@ def test_lifecycle_timestamps_and_no_overwrite(tmp_path: Path) -> None:
         location=None,
         url=None,
         decision=None,
+        decision_reason=None,
         recommended_resume=None,
     )
     storage.mark_history_status(source="linkedin-email", external_id="1002", status="SENT", timestamp_field="sent_at")
@@ -92,6 +96,7 @@ def test_history_filtering_and_stats(monkeypatch, tmp_path: Path) -> None:
         location=None,
         url=None,
         decision="POTENTIAL_MATCH",
+        decision_reason="Role is partially aligned with Java backend profile.",
         recommended_resume="java-backend",
     )
     storage.upsert_application_history(
@@ -102,6 +107,7 @@ def test_history_filtering_and_stats(monkeypatch, tmp_path: Path) -> None:
         location=None,
         url=None,
         decision="POTENTIAL_MATCH",
+        decision_reason="Role is partially aligned with Java backend profile.",
         recommended_resume="java-backend",
     )
     storage.upsert_application_history(
@@ -112,6 +118,7 @@ def test_history_filtering_and_stats(monkeypatch, tmp_path: Path) -> None:
         location=None,
         url=None,
         decision="STRONG_MATCH",
+        decision_reason="Core Java backend requirements are fully matched.",
         recommended_resume="kotlin-backend",
     )
     for external_id in ("1", "2", "3"):
@@ -178,6 +185,7 @@ def test_callbacks_update_delivery_and_history(monkeypatch, tmp_path: Path) -> N
         location=None,
         url=None,
         decision="POTENTIAL_MATCH",
+        decision_reason="Role is partially aligned with Java backend profile.",
         recommended_resume="java-backend",
     )
 
@@ -245,6 +253,7 @@ def test_no_full_descriptions_or_cover_letters_stored(tmp_path: Path) -> None:
         location="Remote",
         url="https://www.linkedin.com/jobs/view/z1/",
         decision="POTENTIAL_MATCH",
+        decision_reason="Role is partially aligned with Java backend profile.",
         recommended_resume="java-backend",
     )
     with storage._connect() as conn:  # noqa: SLF001 - test introspection

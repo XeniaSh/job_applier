@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from app.collectors.email_imap_client import EmailIMAPClient, ImapSyncResult
 from app.collectors.linkedin_email_parser import parse_linkedin_email
 from app.collectors.linkedin_models import LinkedInEmailVacancy
-from app.collectors.title_filter import should_accept_title
+from app.collectors.title_filter import evaluate_title
 from app.collectors.vacancy_collector import NormalizedVacancy, VacancyCollector
 from app.models import Decision, VacancyEvaluation
 from app.storage.imap_checkpoint import ImapCheckpointStorage
@@ -28,6 +28,7 @@ class LinkedInProcessedVacancy:
     content_completeness: str
     evaluation: VacancyEvaluation | None
     skipped_by_prefilter: bool = False
+    decision_reason: str | None = None
     source: str = "linkedin-email"
 
 
@@ -151,7 +152,8 @@ class LinkedInEmailCollector(VacancyCollector):
                     continue
             report.new_vacancies += 1
 
-            if not should_accept_title(vacancy.title):
+            title_gate = evaluate_title(vacancy.title)
+            if not title_gate.accepted:
                 report.prefiltered += 1
                 report.processed.append(
                     LinkedInProcessedVacancy(
@@ -163,6 +165,7 @@ class LinkedInEmailCollector(VacancyCollector):
                         content_completeness=vacancy.content_completeness.value,
                         evaluation=None,
                         skipped_by_prefilter=True,
+                        decision_reason=title_gate.reason,
                     )
                 )
                 if mark_seen and not dry_run:
@@ -179,6 +182,7 @@ class LinkedInEmailCollector(VacancyCollector):
                         url=vacancy.url,
                         content_completeness=vacancy.content_completeness.value,
                         evaluation=None,
+                    decision_reason=None,
                     )
                 )
                 continue
@@ -211,6 +215,7 @@ class LinkedInEmailCollector(VacancyCollector):
                     url=vacancy.url,
                     content_completeness=vacancy.content_completeness.value,
                     evaluation=evaluation,
+                    decision_reason=evaluation.decision_reason,
                 )
             )
 

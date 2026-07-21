@@ -123,10 +123,19 @@ class VacancyAnalyzer:
                 ],
                 limit=3,
             )
+        decision_reason = _build_decision_reason(
+            decision=decision,
+            extraction=extraction,
+            comparison=comparison,
+            location_nuance=location_nuance,
+            lead_nuance=lead_nuance,
+            explicit_skill_count=explicit_skill_count,
+        )
 
         return VacancyEvaluation(
             decision=decision,
             summary=extraction.short_summary,
+            decision_reason=decision_reason,
             matched_points=_clean_and_limit(comparison.matched_mandatory, limit=5),
             gaps=gaps,
             nuances=nuances,
@@ -138,6 +147,49 @@ class VacancyAnalyzer:
             recommended_resume=recommended_resume,
             recommended_cover_template=_recommend_cover_template(extraction.role_type, extraction.short_summary),
         )
+
+
+def _build_decision_reason(
+    *,
+    decision: Decision,
+    extraction: VacancyExtraction,
+    comparison,
+    location_nuance: str | None,
+    lead_nuance: str | None,
+    explicit_skill_count: int,
+) -> str:
+    role = extraction.role_type.strip() or "role"
+    mandatory = set(comparison.missing_mandatory)
+    location_text = " ".join(comparison.location_restrictions).lower()
+    uncertainty_text = " ".join(comparison.uncertainties).lower()
+    all_constraints = f"{location_text} {uncertainty_text}"
+    if decision == Decision.STRONG_MATCH:
+        if comparison.matched_mandatory:
+            top = ", ".join(comparison.matched_mandatory[:3])
+            return f"Core requirements are matched ({top}) with strong backend alignment."
+        return "Core backend requirements are matched with strong alignment."
+    if decision == Decision.POTENTIAL_MATCH:
+        if location_nuance:
+            return "Role appears relevant but location/remote constraints require confirmation."
+        if lead_nuance:
+            return "Role is relevant but lead-level expectations need manual verification."
+        if explicit_skill_count < 3:
+            return "Backend signal is present, but the email card lacks enough explicit stack evidence."
+        if mandatory:
+            missing = ", ".join(sorted(mandatory)[:2])
+            return f"Role is relevant, but some required skills are missing ({missing})."
+        return "Backend role matches partially, but evidence is not strong enough for a full match."
+    if any(token in all_constraints for token in ("incompatible", "must reside in philippines", "country restriction")):
+        return "Location restriction is incompatible with the candidate profile."
+    role_text = role.lower()
+    if any(token in role_text for token in ("frontend", "react", "angular", "qa", "tester", "devops", "python")):
+        return f'Role focus is "{role}", which is outside the target Java backend scope.'
+    if not any(token in (set(extraction.mandatory_skills) | set(extraction.optional_skills)) for token in ("java", "kotlin", "jvm", "spring boot")):
+        return "No Java/Kotlin/JVM requirement is explicitly present in the vacancy requirements."
+    if mandatory:
+        missing = ", ".join(sorted(mandatory)[:3])
+        return f"Required skills are missing for this profile ({missing})."
+    return "Vacancy requirements do not align with the target Java backend profile."
 
 
 def _clean_and_limit(values: list[str], limit: int) -> list[str]:

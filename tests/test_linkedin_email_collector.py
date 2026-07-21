@@ -84,7 +84,7 @@ def test_duplicate_job_ids_within_run_and_seen_skipped(monkeypatch) -> None:
         ]
 
     monkeypatch.setattr(module, "parse_linkedin_email", fake_parser)
-    monkeypatch.setattr(module, "should_accept_title", lambda title: True)
+    monkeypatch.setattr(module, "evaluate_title", lambda title: type("Gate", (), {"accepted": True, "reason": "allowed"})())
     collector = LinkedInEmailCollector(
         email_client=_FakeEmailClient(messages=[_raw_message()]),
         analyzer=_FakeAnalyzer(),
@@ -107,7 +107,7 @@ def test_prefilter_avoids_llm_call(monkeypatch) -> None:
             LinkedInEmailVacancy("1", "Frontend React Engineer", None, None, "https://www.linkedin.com/jobs/view/1/", None, "m", None, ContentCompleteness.MINIMAL)
         ],
     )
-    monkeypatch.setattr(module, "should_accept_title", lambda title: False)
+    monkeypatch.setattr(module, "evaluate_title", lambda title: type("Gate", (), {"accepted": False, "reason": "Frontend title"})())
     analyzer = _FakeAnalyzer()
     seen_jobs = _FakeSeenJobs()
     collector = LinkedInEmailCollector(
@@ -134,7 +134,7 @@ def test_malformed_email_does_not_stop_run(monkeypatch) -> None:
         ]
 
     monkeypatch.setattr(module, "parse_linkedin_email", fake_parser)
-    monkeypatch.setattr(module, "should_accept_title", lambda title: True)
+    monkeypatch.setattr(module, "evaluate_title", lambda title: type("Gate", (), {"accepted": True, "reason": "allowed"})())
 
     collector = LinkedInEmailCollector(
         email_client=_FakeEmailClient(messages=[_raw_message("<bad>"), _raw_message("<good>")]),
@@ -157,7 +157,7 @@ def test_dry_run_no_llm_and_no_mark_seen(monkeypatch) -> None:
             LinkedInEmailVacancy("1", "Java Backend", None, None, "https://www.linkedin.com/jobs/view/1/", None, "m", None, ContentCompleteness.MINIMAL)
         ],
     )
-    monkeypatch.setattr(module, "should_accept_title", lambda title: True)
+    monkeypatch.setattr(module, "evaluate_title", lambda title: type("Gate", (), {"accepted": True, "reason": "allowed"})())
     analyzer = _FakeAnalyzer()
     seen_jobs = _FakeSeenJobs()
     collector = LinkedInEmailCollector(
@@ -185,7 +185,7 @@ def test_limit_respected(monkeypatch) -> None:
             LinkedInEmailVacancy("2", "Java Backend", None, None, "https://www.linkedin.com/jobs/view/2/", None, "m", None, ContentCompleteness.MINIMAL),
         ],
     )
-    monkeypatch.setattr(module, "should_accept_title", lambda title: True)
+    monkeypatch.setattr(module, "evaluate_title", lambda title: type("Gate", (), {"accepted": True, "reason": "allowed"})())
     collector = LinkedInEmailCollector(
         email_client=_FakeEmailClient(messages=[_raw_message()]),
         analyzer=_FakeAnalyzer(),
@@ -206,7 +206,7 @@ def test_skip_seen_false_keeps_seen_vacancies_for_analysis(monkeypatch) -> None:
             LinkedInEmailVacancy("1", "Java Backend", None, None, "https://www.linkedin.com/jobs/view/1/", None, "m", None, ContentCompleteness.MINIMAL)
         ],
     )
-    monkeypatch.setattr(module, "should_accept_title", lambda title: True)
+    monkeypatch.setattr(module, "evaluate_title", lambda title: type("Gate", (), {"accepted": True, "reason": "allowed"})())
     analyzer = _FakeAnalyzer()
     collector = LinkedInEmailCollector(
         email_client=_FakeEmailClient(messages=[_raw_message()]),
@@ -236,7 +236,7 @@ def test_limit_applies_after_dedup_across_messages(monkeypatch) -> None:
         ]
 
     monkeypatch.setattr(module, "parse_linkedin_email", fake_parser)
-    monkeypatch.setattr(module, "should_accept_title", lambda title: True)
+    monkeypatch.setattr(module, "evaluate_title", lambda title: type("Gate", (), {"accepted": True, "reason": "allowed"})())
     analyzer = _FakeAnalyzer()
     collector = LinkedInEmailCollector(
         email_client=_FakeEmailClient(messages=[_raw_message("<m1>"), _raw_message("<m2>")]),

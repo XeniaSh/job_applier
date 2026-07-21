@@ -70,6 +70,7 @@ class ApplicationHistoryRecord:
     location: str | None
     url: str | None
     decision: str | None
+    decision_reason: str | None
     recommended_resume: str | None
     first_seen_at: str
     sent_at: str | None

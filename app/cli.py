@@ -28,7 +28,7 @@ from app.collectors.linkedin_email_collector import (
     LinkedInSyncDiagnostics,
 )
 from app.collectors.linkedin_email_parser import extract_email_text_parts, parse_linkedin_email
-from app.collectors.title_filter import should_accept_title
+from app.collectors.title_filter import evaluate_title
 from app.collectors.vacancy_collector import Collector, CollectorResult, NormalizedVacancy, VacancyCollector, vacancy_identity
 from app.application.preparation_service import (
     ApplicationPreparationError,
@@ -500,7 +500,8 @@ def send_linkedin_telegram(
     for item in report.processed:
         if item.evaluation is None:
             if verbose and item.skipped_by_prefilter:
-                typer.echo(f"SKIP TITLE_FILTER {item.title}")
+                reason = _quote_log_text(item.decision_reason or "Title does not contain an allowed Java/backend role signal")
+                typer.echo(f'SKIP PREFILTERED title="{_quote_log_text(item.title)}" reason="{reason}"')
             continue
         seen_info = seen_jobs.is_seen("linkedin-email", item.external_id)
         delivered_info = deliveries.was_sent("linkedin-email", item.external_id, settings.telegram_chat_id)
@@ -1489,8 +1490,10 @@ def _analyze_pipeline_items(
             item.preanalysis_outcome = "already_seen"
             continue
 
-        if not should_accept_title(vacancy.title):
+        title_gate = evaluate_title(vacancy.title)
+        if not title_gate.accepted:
             item.title_filtered = True
+            item.prefilter_reason = title_gate.reason
             item.preanalysis_outcome = "prefiltered"
             if mark_seen:
                 seen_jobs.mark_seen(item.storage_source, item.storage_external_id)
@@ -1540,6 +1543,7 @@ def _deliver_pipeline_items(
                     content_completeness="FULL",
                     evaluation=None,
                     skipped_by_prefilter=True,
+                    decision_reason=item.prefilter_reason,
                     source=item.source,
                 )
             )
@@ -1556,6 +1560,7 @@ def _deliver_pipeline_items(
                 url=item.vacancy.url,
                 content_completeness="FULL",
                 evaluation=item.analysis_result,
+                decision_reason=item.analysis_result.decision_reason,
                 source=item.source,
             )
         )
@@ -1618,21 +1623,22 @@ def _pipeline_verbose_outcomes(pipeline: PipelineResult) -> list[str]:
             outcomes.append(f"INVALID_IDENTITY {title}")
             continue
         if item.preanalysis_outcome == "prefiltered":
-            outcomes.append(f"PREFILTERED {identity} {title}")
+            reason = _quote_log_text(item.prefilter_reason or "Title does not contain an allowed Java/backend role signal")
+            outcomes.append(f'PREFILTERED {identity} title="{_quote_log_text(title)}" reason="{reason}"')
             continue
         if item.preanalysis_outcome == "error":
             outcomes.append(f"ERROR {identity} {item.error or 'preanalysis_error'}")
             continue
-        if item.preanalysis_outcome == "new":
-            outcomes.append(f"NEW {identity} {title}")
         if item.analysis_result is None:
             continue
+        score = _format_score(item.analysis_result.match_percentage)
+        reason = _quote_log_text(item.analysis_result.decision_reason or item.analysis_result.summary)
         if item.analysis_result.decision == Decision.STRONG_MATCH:
-            outcomes.append(f"STRONG {identity} {title}")
+            outcomes.append(f'STRONG {identity} title="{_quote_log_text(title)}" score={score} reason="{reason}"')
         elif item.analysis_result.decision == Decision.POTENTIAL_MATCH:
-            outcomes.append(f"POTENTIAL {identity} {title}")
+            outcomes.append(f'POTENTIAL {identity} title="{_quote_log_text(title)}" score={score} reason="{reason}"')
         else:
-            outcomes.append(f"IGNORE {identity} {title}")
+            outcomes.append(f'IGNORE {identity} title="{_quote_log_text(title)}" score={score} reason="{reason}"')
 
         if item.telegram_already_delivered:
             outcomes.append(f"ALREADY_DELIVERED {identity} {title}")
@@ -1757,10 +1763,13 @@ def _analyze_collected_vacancies(
         report.new_vacancies += 1
         source_counters.new += 1
 
-        if not should_accept_title(vacancy.title):
+        title_gate = evaluate_title(vacancy.title)
+        if not title_gate.accepted:
             report.prefiltered += 1
             source_counters.prefiltered += 1
-            verbose_outcomes.append(f"TITLE_FILTER {vacancy.title}")
+            verbose_outcomes.append(
+                f'PREFILTERED {vacancy.source}:{vacancy.external_id} title="{_quote_log_text(vacancy.title)}" reason="{_quote_log_text(title_gate.reason)}"'
+            )
             report.processed.append(
                 LinkedInProcessedVacancy(
                     external_id=vacancy.external_id,
@@ -1771,6 +1780,7 @@ def _analyze_collected_vacancies(
                     content_completeness="FULL",
                     evaluation=None,
                     skipped_by_prefilter=True,
+                    decision_reason=title_gate.reason,
                     source=vacancy.source,
                 )
             )
@@ -1793,15 +1803,24 @@ def _analyze_collected_vacancies(
         if evaluation.decision == Decision.STRONG_MATCH:
             report.strong_matches += 1
             source_counters.strong += 1
-            verbose_outcomes.append(f"STRONG {vacancy.title}")
+            verbose_outcomes.append(
+                f'STRONG {vacancy.source}:{vacancy.external_id} title="{_quote_log_text(vacancy.title)}" '
+                f"score={_format_score(evaluation.match_percentage)} reason=\"{_quote_log_text(evaluation.decision_reason or evaluation.summary)}\""
+            )
         elif evaluation.decision == Decision.POTENTIAL_MATCH:
             report.potential_matches += 1
             source_counters.potential += 1
-            verbose_outcomes.append(f"POTENTIAL {vacancy.title}")
+            verbose_outcomes.append(
+                f'POTENTIAL {vacancy.source}:{vacancy.external_id} title="{_quote_log_text(vacancy.title)}" '
+                f"score={_format_score(evaluation.match_percentage)} reason=\"{_quote_log_text(evaluation.decision_reason or evaluation.summary)}\""
+            )
         else:
             report.ignored += 1
             source_counters.ignore += 1
-            verbose_outcomes.append(f"IGNORE {vacancy.title}")
+            verbose_outcomes.append(
+                f'IGNORE {vacancy.source}:{vacancy.external_id} title="{_quote_log_text(vacancy.title)}" '
+                f"score={_format_score(evaluation.match_percentage)} reason=\"{_quote_log_text(evaluation.decision_reason or evaluation.summary)}\""
+            )
         report.processed.append(
             LinkedInProcessedVacancy(
                 external_id=vacancy.external_id,
@@ -1811,6 +1830,7 @@ def _analyze_collected_vacancies(
                 url=vacancy.url,
                 content_completeness="FULL",
                 evaluation=evaluation,
+                decision_reason=evaluation.decision_reason,
                 source=vacancy.source,
             )
         )
@@ -2646,6 +2666,7 @@ def _upsert_history_item(item: LinkedInProcessedVacancy) -> None:
         location=item.location,
         url=item.url,
         decision=evaluation.decision.value if evaluation else None,
+        decision_reason=(evaluation.decision_reason if evaluation else item.decision_reason),
         recommended_resume=evaluation.recommended_resume.value if evaluation else None,
     )
 
@@ -2759,6 +2780,7 @@ class PipelineItem:
     already_seen: bool = False
     invalid_identity: bool = False
     title_filtered: bool = False
+    prefilter_reason: str | None = None
     analysis_result: VacancyEvaluation | None = None
     telegram_eligible: bool = False
     telegram_delivered: bool = False
@@ -3082,6 +3104,17 @@ def _format_log_time() -> str:
 
 def _component_log(component: str) -> Callable[[str], None]:
     return lambda message: _run_log(message, component=component)
+
+
+def _quote_log_text(value: str) -> str:
+    normalized = " ".join(value.strip().split())
+    return normalized.replace('"', "'")
+
+
+def _format_score(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.1f}"
 
 
 def _recover_and_requeue_abandoned_preparations(

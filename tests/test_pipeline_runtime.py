@@ -128,7 +128,7 @@ def test_pipeline_accepts_new_collector_without_code_changes(monkeypatch) -> Non
         safe_error_formatter=lambda source, exc: f"{source}:{exc}",
     )
 
-    monkeypatch.setattr(cli_module, "should_accept_title", lambda title: True)
+    monkeypatch.setattr(cli_module, "evaluate_title", lambda title: type("Gate", (), {"accepted": True, "reason": "allowed"})())
     analyzer = type("A", (), {"analyze": lambda self, *args, **kwargs: _evaluation(Decision.POTENTIAL_MATCH)})()
     seen_jobs = type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})()
 
@@ -188,7 +188,7 @@ def test_malformed_vacancies_are_visible_not_silently_dropped(monkeypatch) -> No
         collectors=[cli_module.RuntimeCollector(name="linkedin-email", collect_fn=lambda: [malformed])],
         safe_error_formatter=lambda source, exc: f"{source}:{exc}",
     )
-    monkeypatch.setattr(cli_module, "should_accept_title", lambda title: True)
+    monkeypatch.setattr(cli_module, "evaluate_title", lambda title: type("Gate", (), {"accepted": True, "reason": "allowed"})())
     analyzer = type("A", (), {"analyze": lambda self, *args, **kwargs: _evaluation()})()
     seen_jobs = type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})()
     cli_module._analyze_pipeline_items(
@@ -210,7 +210,7 @@ def test_identity_drives_dedupe_and_seen_lookup(monkeypatch) -> None:
         collectors=[cli_module.RuntimeCollector(name="linkedin-email", collect_fn=lambda: [vacancy])],
         safe_error_formatter=lambda source, exc: f"{source}:{exc}",
     )
-    monkeypatch.setattr(cli_module, "should_accept_title", lambda title: True)
+    monkeypatch.setattr(cli_module, "evaluate_title", lambda title: type("Gate", (), {"accepted": True, "reason": "allowed"})())
     calls: list[tuple[str, str]] = []
 
     class Seen:

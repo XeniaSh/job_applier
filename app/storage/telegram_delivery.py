@@ -327,6 +327,7 @@ class TelegramDeliveryStorage:
         location: str | None,
         url: str | None,
         decision: str | None,
+        decision_reason: str | None,
         recommended_resume: str | None,
     ) -> None:
         first_seen_at = datetime.now(timezone.utc).isoformat()
@@ -334,15 +335,16 @@ class TelegramDeliveryStorage:
             conn.execute(
                 """
                 insert into application_history (
-                    source, external_id, title, company, location, url, decision, recommended_resume, first_seen_at, current_status
+                    source, external_id, title, company, location, url, decision, decision_reason, recommended_resume, first_seen_at, current_status
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(source, external_id) do update set
                     title = coalesce(application_history.title, excluded.title),
                     company = coalesce(application_history.company, excluded.company),
                     location = coalesce(application_history.location, excluded.location),
                     url = coalesce(application_history.url, excluded.url),
                     decision = coalesce(application_history.decision, excluded.decision),
+                    decision_reason = coalesce(application_history.decision_reason, excluded.decision_reason),
                     recommended_resume = coalesce(application_history.recommended_resume, excluded.recommended_resume)
                 """,
                 (
@@ -353,6 +355,7 @@ class TelegramDeliveryStorage:
                     location,
                     url,
                     decision,
+                    decision_reason,
                     recommended_resume,
                     first_seen_at,
                     HISTORY_STATUS_FOUND,
@@ -490,7 +493,7 @@ class TelegramDeliveryStorage:
             rows = conn.execute(
                 f"""
                 select
-                    source, external_id, title, company, location, url, decision, recommended_resume,
+                    source, external_id, title, company, location, url, decision, decision_reason, recommended_resume,
                     first_seen_at, sent_at, prepared_at, applied_at, skipped_at, current_status,
                     coalesce(applied_at, skipped_at, prepared_at, sent_at, first_seen_at) as display_date
                 from application_history
@@ -509,14 +512,15 @@ class TelegramDeliveryStorage:
                 location=str(row[4]) if row[4] is not None else None,
                 url=str(row[5]) if row[5] is not None else None,
                 decision=str(row[6]) if row[6] is not None else None,
-                recommended_resume=str(row[7]) if row[7] is not None else None,
-                first_seen_at=str(row[8]),
-                sent_at=str(row[9]) if row[9] is not None else None,
-                prepared_at=str(row[10]) if row[10] is not None else None,
-                applied_at=str(row[11]) if row[11] is not None else None,
-                skipped_at=str(row[12]) if row[12] is not None else None,
-                current_status=str(row[13]),
-                display_date=str(row[14]),
+                decision_reason=str(row[7]) if row[7] is not None else None,
+                recommended_resume=str(row[8]) if row[8] is not None else None,
+                first_seen_at=str(row[9]),
+                sent_at=str(row[10]) if row[10] is not None else None,
+                prepared_at=str(row[11]) if row[11] is not None else None,
+                applied_at=str(row[12]) if row[12] is not None else None,
+                skipped_at=str(row[13]) if row[13] is not None else None,
+                current_status=str(row[14]),
+                display_date=str(row[15]),
             )
             for row in rows
         ]
@@ -940,6 +944,7 @@ class TelegramDeliveryStorage:
                     location text,
                     url text,
                     decision text,
+                    decision_reason text,
                     recommended_resume text,
                     first_seen_at text not null,
                     sent_at text,
@@ -951,6 +956,7 @@ class TelegramDeliveryStorage:
                 )
                 """
             )
+            self._ensure_history_columns(conn)
             conn.commit()
 
     def _ensure_preparation_columns(self, conn: sqlite3.Connection) -> None:
@@ -968,6 +974,12 @@ class TelegramDeliveryStorage:
             if name in existing:
                 continue
             conn.execute(f"alter table application_preparations add column {name} {type_name}")
+
+    def _ensure_history_columns(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("pragma table_info(application_history)").fetchall()
+        existing = {str(row[1]) for row in rows}
+        if "decision_reason" not in existing:
+            conn.execute("alter table application_history add column decision_reason text")
 
 
 def _parse_iso_datetime(value: object) -> datetime | None:
