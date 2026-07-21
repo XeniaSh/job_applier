@@ -61,7 +61,7 @@ def _bootstrap_common(monkeypatch, *, decision: Decision = Decision.POTENTIAL_MA
     monkeypatch.setattr(
         cli_module,
         "_prepare_requested_applications",
-        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0, 0),
+        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0, 0, 0),
     )
 
 
@@ -477,3 +477,15 @@ def test_run_poll_failure_logs_method_status_and_description(monkeypatch, tmp_pa
     assert "method=editMessageText" in result.output
     assert "HTTP 400" in result.output
     assert 'description="Bad Request: message to edit not found"' in result.output
+
+
+def test_log_timestamp_includes_seconds_and_milliseconds() -> None:
+    stamp = cli_module._format_log_time()
+    assert re.fullmatch(r"\d{2}:\d{2}:\d{2}\.\d{3}", stamp) is not None
+
+
+def test_run_log_uses_shared_timestamp_formatter(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli_module, "_format_log_time", lambda: "07:12:08.142")
+    cli_module._run_log("Prepare start linkedin-email:1")
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "[07:12:08.142] Prepare start linkedin-email:1"

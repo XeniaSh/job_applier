@@ -15,6 +15,7 @@ from app.telegram.models import (
 STATUS_SENT = "SENT"
 STATUS_SKIPPED = "SKIPPED"
 STATUS_PREPARE_REQUESTED = "PREPARE_REQUESTED"
+STATUS_PREPARING = "PREPARING"
 STATUS_FAILED = "FAILED"
 STATUS_PREPARED = "PREPARED"
 STATUS_PREPARATION_FAILED = "PREPARATION_FAILED"
@@ -23,6 +24,7 @@ ALLOWED_STATUSES = {
     STATUS_SENT,
     STATUS_SKIPPED,
     STATUS_PREPARE_REQUESTED,
+    STATUS_PREPARING,
     STATUS_FAILED,
     STATUS_PREPARED,
     STATUS_PREPARATION_FAILED,
@@ -184,6 +186,25 @@ class TelegramDeliveryStorage:
                 (str(chat_id), status, int(limit)),
             ).fetchall()
         return [(str(source), str(external_id)) for source, external_id in rows]
+
+    def claim_for_preparation(self, *, source: str, external_id: str, chat_id: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                update telegram_deliveries
+                set status = ?
+                where source = ? and external_id = ? and chat_id = ? and status = ?
+                """,
+                (
+                    STATUS_PREPARING,
+                    source,
+                    external_id,
+                    str(chat_id),
+                    STATUS_PREPARE_REQUESTED,
+                ),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
 
     def upsert_application_history(
         self,

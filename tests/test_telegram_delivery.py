@@ -5,6 +5,7 @@ import pytest
 from app.storage.telegram_delivery import (
     STATUS_FAILED,
     STATUS_APPLIED,
+    STATUS_PREPARING,
     STATUS_PREPARED,
     STATUS_PREPARE_REQUESTED,
     STATUS_PREPARATION_FAILED,
@@ -176,6 +177,22 @@ def test_set_status_validation_and_missing_record(tmp_path: Path) -> None:
         storage.set_status("linkedin-email", "1", "WRONG_STATUS")
     with pytest.raises(KeyError):
         storage.set_status("linkedin-email", "404", STATUS_PREPARED)
+
+
+def test_claim_for_preparation_is_atomic(tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    storage.save_sent(source="linkedin-email", external_id="777", chat_id="123", message_id=1)
+    storage.update_status(
+        source="linkedin-email",
+        external_id="777",
+        chat_id="123",
+        status=STATUS_PREPARE_REQUESTED,
+    )
+    assert storage.claim_for_preparation(source="linkedin-email", external_id="777", chat_id="123") is True
+    assert storage.claim_for_preparation(source="linkedin-email", external_id="777", chat_id="123") is False
+    row = storage.get_delivery("linkedin-email", "777")
+    assert row is not None
+    assert row.status == STATUS_PREPARING
 
 
 def test_resume_cache_crud(tmp_path: Path) -> None:

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import threading
 
 from typer.testing import CliRunner
 
@@ -427,3 +428,371 @@ def test_callback_polling_does_not_prepare_cover_letters(monkeypatch) -> None:
 
     result = CliRunner().invoke(cli_module.app, ["poll-telegram-actions", "--once"])
     assert result.exit_code == 0
+
+
+def test_priority_vacancy_prepared_before_older_queue_item(monkeypatch) -> None:
+    _set_env(monkeypatch)
+    settings = cli_module.Settings()
+    order: list[str] = []
+
+    class FakeService:
+        def prepare(self, source, external_id):
+            _ = source
+            order.append(external_id)
+            return _prepared(external_id, "resumes/java-backend.pdf")
+
+    class FakeStorage:
+        def __init__(self):
+            self.status = {
+                ("linkedin-email", "4419655778"): "PREPARE_REQUESTED",
+                ("linkedin-email", "4441937215"): "PREPARE_REQUESTED",
+            }
+
+        def list_by_status(self, *, chat_id, status, limit):
+            _ = chat_id, status, limit
+            return [("linkedin-email", "4419655778"), ("linkedin-email", "4441937215")]
+
+        def get_delivery(self, source, external_id):
+            value = self.status.get((source, external_id))
+            if value is None:
+                return None
+            return type("D", (), {"status": value})()
+
+        def claim_for_preparation(self, *, source, external_id, chat_id):
+            _ = chat_id
+            key = (source, external_id)
+            if self.status.get(key) != "PREPARE_REQUESTED":
+                return False
+            self.status[key] = "PREPARING"
+            return True
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, chat_id
+            return ("123", 200 + int(external_id[-2:]))
+
+        def update_status(self, *, source, external_id, chat_id, status):
+            _ = chat_id
+            self.status[(source, external_id)] = status
+
+        def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    class FakeClient:
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    storage = FakeStorage()
+    result = cli_module._prepare_requested_applications(
+        settings=settings,
+        service=FakeService(),
+        storage=storage,
+        telegram_client=FakeClient(),
+        limit=20,
+        dry_run=False,
+        print_dry_run_items=False,
+        priority_vacancy_keys=[("linkedin-email", "4441937215")],
+    )
+    assert order == ["4441937215", "4419655778"]
+    assert result.prepared_successfully == 2
+
+
+def test_priority_duplicates_and_preparing_ready_not_regenerated(monkeypatch) -> None:
+    _set_env(monkeypatch)
+    settings = cli_module.Settings()
+    order: list[str] = []
+
+    class FakeService:
+        def prepare(self, source, external_id):
+            _ = source
+            order.append(external_id)
+            return _prepared(external_id, "resumes/java-backend.pdf")
+
+    class FakeStorage:
+        def __init__(self):
+            self.status = {
+                ("linkedin-email", "1"): "PREPARE_REQUESTED",
+                ("linkedin-email", "2"): "PREPARING",
+                ("linkedin-email", "3"): "PREPARED",
+            }
+
+        def list_by_status(self, *, chat_id, status, limit):
+            _ = chat_id, status, limit
+            return [("linkedin-email", "1")]
+
+        def get_delivery(self, source, external_id):
+            value = self.status.get((source, external_id))
+            if value is None:
+                return None
+            return type("D", (), {"status": value})()
+
+        def claim_for_preparation(self, *, source, external_id, chat_id):
+            _ = chat_id
+            key = (source, external_id)
+            if self.status.get(key) != "PREPARE_REQUESTED":
+                return False
+            self.status[key] = "PREPARING"
+            return True
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 42)
+
+        def update_status(self, *, source, external_id, chat_id, status):
+            _ = chat_id
+            self.status[(source, external_id)] = status
+
+        def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    class FakeClient:
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    storage = FakeStorage()
+    result = cli_module._prepare_requested_applications(
+        settings=settings,
+        service=FakeService(),
+        storage=storage,
+        telegram_client=FakeClient(),
+        limit=20,
+        dry_run=False,
+        print_dry_run_items=False,
+        priority_vacancy_keys=[
+            ("linkedin-email", "1"),
+            ("linkedin-email", "1"),
+            ("linkedin-email", "2"),
+            ("linkedin-email", "3"),
+        ],
+    )
+    assert order == ["1"]
+    assert result.prepared_successfully == 1
+
+
+def test_failed_preparation_can_be_retried_with_claim(monkeypatch) -> None:
+    _set_env(monkeypatch)
+    settings = cli_module.Settings()
+    calls = {"n": 0}
+
+    class FakeService:
+        def prepare(self, source, external_id):
+            _ = source, external_id
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise cli_module.ApplicationPreparationError("boom")
+            return _prepared(external_id, "resumes/java-backend.pdf")
+
+    class FakeStorage:
+        def __init__(self):
+            self.status = {("linkedin-email", "9"): "PREPARE_REQUESTED"}
+
+        def list_by_status(self, *, chat_id, status, limit):
+            _ = chat_id, status, limit
+            rows = []
+            for (source, external_id), value in self.status.items():
+                if value == "PREPARE_REQUESTED":
+                    rows.append((source, external_id))
+            return rows
+
+        def get_delivery(self, source, external_id):
+            value = self.status.get((source, external_id))
+            if value is None:
+                return None
+            return type("D", (), {"status": value})()
+
+        def claim_for_preparation(self, *, source, external_id, chat_id):
+            _ = chat_id
+            key = (source, external_id)
+            if self.status.get(key) != "PREPARE_REQUESTED":
+                return False
+            self.status[key] = "PREPARING"
+            return True
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 77)
+
+        def update_status(self, *, source, external_id, chat_id, status):
+            _ = chat_id
+            self.status[(source, external_id)] = status
+
+        def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    class FakeClient:
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    storage = FakeStorage()
+    first = cli_module._prepare_requested_applications(
+        settings=settings,
+        service=FakeService(),
+        storage=storage,
+        telegram_client=FakeClient(),
+        limit=20,
+        dry_run=False,
+        print_dry_run_items=False,
+    )
+    assert first.errors_count == 1
+    storage.status[("linkedin-email", "9")] = "PREPARE_REQUESTED"
+    second = cli_module._prepare_requested_applications(
+        settings=settings,
+        service=FakeService(),
+        storage=storage,
+        telegram_client=FakeClient(),
+        limit=20,
+        dry_run=False,
+        print_dry_run_items=False,
+        priority_vacancy_keys=[("linkedin-email", "9")],
+    )
+    assert second.prepared_successfully == 1
+
+
+def test_callback_acknowledged_while_other_generation_running_then_priority_runs_next(monkeypatch) -> None:
+    _set_env(monkeypatch)
+    settings = cli_module.Settings()
+    generation_order: list[str] = []
+    b_started = threading.Event()
+    release_b = threading.Event()
+
+    class BlockingService:
+        def prepare(self, source, external_id):
+            _ = source
+            generation_order.append(external_id)
+            if external_id == "4441994095":
+                b_started.set()
+                release_b.wait(timeout=5.0)
+            return _prepared(external_id, "resumes/java-backend.pdf")
+
+    class Storage:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.state = {}
+            self.status = {
+                ("linkedin-email", "4441994095"): "PREPARE_REQUESTED",
+                ("linkedin-email", "4419025659"): "SENT",
+            }
+
+        def get_state(self, key):
+            return self.state.get(key)
+
+        def set_state(self, key, value):
+            self.state[key] = value
+
+        def get_delivery(self, source, external_id):
+            with self.lock:
+                value = self.status.get((source, external_id))
+            if value is None:
+                return None
+            return type("D", (), {"status": value})()
+
+        def claim_for_preparation(self, *, source, external_id, chat_id):
+            _ = chat_id
+            key = (source, external_id)
+            with self.lock:
+                if self.status.get(key) != "PREPARE_REQUESTED":
+                    return False
+                self.status[key] = "PREPARING"
+            return True
+
+        def list_by_status(self, *, chat_id, status, limit):
+            _ = chat_id, status, limit
+            with self.lock:
+                rows = [(s, e) for (s, e), value in self.status.items() if value == "PREPARE_REQUESTED"]
+            rows.sort(key=lambda item: item[1])
+            return rows
+
+        def update_status(self, *, source, external_id, chat_id, status):
+            _ = chat_id
+            with self.lock:
+                self.status[(source, external_id)] = status
+
+        def update_delivery_and_history(self, **kwargs):
+            with self.lock:
+                self.status[(kwargs["source"], kwargs["external_id"])] = kwargs["delivery_status"]
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Role", "Company", "https://www.linkedin.com/jobs/view/1/")
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, chat_id
+            return ("123", 10 if external_id == "4441994095" else 11)
+
+        def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    class Client:
+        def __init__(self):
+            self.answers: list[tuple[str, str | None]] = []
+
+        def answer_callback_query(self, callback_query_id, text=None):
+            self.answers.append((callback_query_id, text))
+
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    storage = Storage()
+    client = Client()
+
+    worker_done = threading.Event()
+
+    def run_first_generation():
+        cli_module._prepare_requested_applications(
+            settings=settings,
+            service=BlockingService(),
+            storage=storage,
+            telegram_client=client,
+            limit=20,
+            dry_run=False,
+            print_dry_run_items=False,
+            priority_vacancy_keys=[("linkedin-email", "4441994095")],
+        )
+        worker_done.set()
+
+    thread = threading.Thread(target=run_first_generation, daemon=True)
+    thread.start()
+    assert b_started.wait(timeout=5.0)
+
+    callback_update = {
+        "callback_query": {
+            "id": "cb-A",
+            "data": "prepare:li:4419025659",
+            "message": {"chat": {"id": "123"}, "message_id": 11},
+        }
+    }
+    cli_module._process_callback_update(
+        update=callback_update,
+        client=client,
+        storage=storage,
+        configured_chat_id="123",
+    )
+    assert ("cb-A", "Добавлено в очередь на подготовку отклика") in client.answers
+    assert generation_order == ["4441994095"]
+
+    release_b.set()
+    assert worker_done.wait(timeout=5.0)
+    priority = cli_module._drain_prepare_priorities(storage=storage)
+    cli_module._prepare_requested_applications(
+        settings=settings,
+        service=BlockingService(),
+        storage=storage,
+        telegram_client=client,
+        limit=20,
+        dry_run=False,
+        print_dry_run_items=False,
+        priority_vacancy_keys=priority,
+    )
+
+    assert generation_order == ["4441994095", "4419025659"]

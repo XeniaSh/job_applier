@@ -795,6 +795,86 @@ def test_poll_telegram_actions_persists_offset_and_repeated_updates(monkeypatch)
     assert storage.state["telegram_update_offset"] == "102"
 
 
+def test_poll_consumes_expired_callback_and_processes_next_update(monkeypatch) -> None:
+    _set_base_env(monkeypatch, with_telegram=True)
+    storage_state = {}
+    calls = {"updated": 0, "answers": 0}
+    logs: list[str] = []
+
+    class FakeStorage:
+        def get_state(self, key):
+            return storage_state.get(key)
+
+        def set_state(self, key, value):
+            storage_state[key] = value
+
+        def update_delivery_and_history(self, **kwargs):
+            calls["updated"] += 1
+            _ = kwargs
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Role", "Company", "https://www.linkedin.com/jobs/view/1/")
+
+    class FakeClient:
+        def get_updates(self, offset, timeout=25):
+            _ = timeout
+            if offset is None:
+                return [
+                    {
+                        "update_id": 10,
+                        "callback_query": {
+                            "id": "expired",
+                            "data": "prepare:li:1",
+                            "message": {"chat": {"id": "123"}, "message_id": 10},
+                        },
+                    },
+                    {
+                        "update_id": 11,
+                        "callback_query": {
+                            "id": "ok",
+                            "data": "skip:li:2",
+                            "message": {
+                                "chat": {"id": "123"},
+                                "message_id": 11,
+                                "reply_markup": {"inline_keyboard": [[{"text": "open", "url": "https://www.linkedin.com/jobs/view/2/"}]]},
+                            },
+                        },
+                    },
+                ]
+            return []
+
+        def answer_callback_query(self, callback_query_id, text=None):
+            calls["answers"] += 1
+            if callback_query_id == "expired":
+                raise cli_module.TelegramRequestError(
+                    "Telegram API request failed.",
+                    method="answerCallbackQuery",
+                    http_status=400,
+                    error_code=400,
+                    description="Bad Request: query is too old and response timeout expired or query ID is invalid",
+                )
+            _ = text
+
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    next_offset, prepare_requests = cli_module._poll_telegram_actions_once(
+        client=FakeClient(),
+        storage=FakeStorage(),
+        configured_chat_id="123",
+        offset=None,
+        timeout=1,
+        timing_logger=lambda line: logs.append(line),
+    )
+
+    assert next_offset == 12
+    assert storage_state["telegram_update_offset"] == "12"
+    assert prepare_requests == 1
+    assert calls["updated"] == 2
+    assert any("Callback acknowledgement expired linkedin-email:1; update consumed" in line for line in logs)
+
+
 def test_telegram_chat_id_output(monkeypatch) -> None:
     _set_base_env(monkeypatch, with_telegram=False)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
