@@ -929,11 +929,8 @@ def run_pipeline(
             _run_log(f"Failed signaling prepare worker: {exc}", component="main")
         _run_log("Waiting for worker thread", component="main")
         try:
-            prepare_thread.join(timeout=5.0)
-            if prepare_thread.is_alive():
-                _run_log("Worker join timeout; thread still alive.", component="main")
-            else:
-                _run_log("Worker joined", component="main")
+            prepare_thread.join()
+            _run_log("Worker joined", component="main")
         except Exception as exc:  # noqa: BLE001
             _run_log(f"Worker join failed: {exc}", component="main")
         _run_log("Releasing singleton lock", component="main")
@@ -3138,6 +3135,7 @@ def _prepare_worker_loop(
                 resume_cache_service=worker_resume_cache,
                 timing_logger=_component_log("worker") if verbose else None,
                 priority_vacancy_keys=priority_keys,
+                stop_requested=stop_event.is_set,
             )
             if priority_keys and verbose:
                 _run_log(
@@ -3230,6 +3228,7 @@ def _prepare_requested_applications(
     resume_cache_service: ResumeCacheService | None = None,
     timing_logger: Callable[[str], None] | None = None,
     priority_vacancy_keys: list[tuple[str, str]] | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> PreparationRunResult:
     queue = storage.list_by_status(
         chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
@@ -3261,6 +3260,12 @@ def _prepare_requested_applications(
     _ = resume_cache_service
 
     for source, external_id in ordered_keys:
+        if stop_requested is not None and stop_requested():
+            if timing_logger is not None:
+                timing_logger("Exiting after current task")
+            break
+        if timing_logger is not None:
+            timing_logger(f"Worker preparing {source}:{external_id}")
         one = _prepare_one_application(
             source=source,
             external_id=external_id,
@@ -3272,6 +3277,8 @@ def _prepare_requested_applications(
             print_dry_run_items=print_dry_run_items,
             timing_logger=timing_logger,
         )
+        if timing_logger is not None:
+            timing_logger(f"Worker preparation finished {source}:{external_id}")
         generated_packages += one.generated_packages
         prepared_successfully += one.prepared_successfully
         telegram_sent += one.telegram_sent
@@ -3280,6 +3287,11 @@ def _prepare_requested_applications(
         pdf_uploaded += one.pdf_uploaded
         pdf_missing += one.pdf_missing
         pdf_errors += one.pdf_errors
+        if stop_requested is not None and stop_requested():
+            if timing_logger is not None:
+                timing_logger("Shutdown pending after preparation")
+                timing_logger("Exiting after current task")
+            break
 
     return PreparationRunResult(
         queue_items=queue_items,

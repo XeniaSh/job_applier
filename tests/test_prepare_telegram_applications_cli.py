@@ -796,3 +796,80 @@ def test_callback_acknowledged_while_other_generation_running_then_priority_runs
     )
 
     assert generation_order == ["4441994095", "4419025659"]
+
+
+def test_prepare_stops_after_current_item_when_shutdown_requested(monkeypatch) -> None:
+    _set_env(monkeypatch)
+    settings = cli_module.Settings()
+    generation_order: list[str] = []
+    events: list[str] = []
+    stop = {"requested": False}
+
+    class FakeService:
+        def prepare(self, source, external_id):
+            _ = source
+            generation_order.append(external_id)
+            if external_id == "1":
+                stop["requested"] = True
+            return _prepared(external_id, "resumes/java-backend.pdf")
+
+    class FakeStorage:
+        def __init__(self):
+            self.status = {
+                ("linkedin-email", "1"): "PREPARE_REQUESTED",
+                ("linkedin-email", "2"): "PREPARE_REQUESTED",
+            }
+
+        def list_by_status(self, *, chat_id, status, limit):
+            _ = chat_id, status, limit
+            return [("linkedin-email", "1"), ("linkedin-email", "2")]
+
+        def get_delivery(self, source, external_id):
+            value = self.status.get((source, external_id))
+            if value is None:
+                return None
+            return type("D", (), {"status": value})()
+
+        def claim_for_preparation(self, *, source, external_id, chat_id):
+            _ = chat_id
+            key = (source, external_id)
+            if self.status.get(key) != "PREPARE_REQUESTED":
+                return False
+            self.status[key] = "PREPARING"
+            return True
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 42)
+
+        def update_status(self, *, source, external_id, chat_id, status):
+            _ = chat_id
+            self.status[(source, external_id)] = status
+
+        def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    class FakeClient:
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    result = cli_module._prepare_requested_applications(
+        settings=settings,
+        service=FakeService(),
+        storage=FakeStorage(),
+        telegram_client=FakeClient(),
+        limit=20,
+        dry_run=False,
+        print_dry_run_items=False,
+        timing_logger=events.append,
+        stop_requested=lambda: stop["requested"],
+    )
+
+    assert generation_order == ["1"]
+    assert result.prepared_successfully == 1
+    assert "Worker preparation finished linkedin-email:1" in events
+    assert "Shutdown pending after preparation" in events
+    assert "Exiting after current task" in events
