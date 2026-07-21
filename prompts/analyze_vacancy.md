@@ -19,6 +19,7 @@ Use exactly this schema:
 Rules:
 - Extract from vacancy text only.
 - Extract only technologies explicitly mentioned in the vacancy.
+- If a vacancy is backend-themed but does not explicitly list technologies, keep skill lists empty rather than inferring a stack.
 - Do not evaluate candidate fit.
 - Do not mention candidate skills, gaps, matches, or decisions.
 - Keep each list concise and deduplicated.

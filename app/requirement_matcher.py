@@ -8,6 +8,61 @@ from app.skills_profile_loader import CandidateSkillsProfile
 
 OPTIONAL_WEIGHT_MULTIPLIER = 0.3
 DEFAULT_SKILL_WEIGHT = 1
+JVM_EVIDENCE_TERMS = (
+    "java",
+    "kotlin",
+    "jvm",
+    "spring",
+    "spring boot",
+    "micronaut",
+    "quarkus",
+    "jakarta ee",
+)
+CONFLICTING_STACK_TERMS = (
+    "python",
+    "django",
+    "flask",
+    "fastapi",
+    "go",
+    "golang",
+    "node",
+    "node.js",
+    "typescript",
+    "javascript",
+    "dotnet",
+    ".net",
+    "c#",
+    "ruby",
+    "rails",
+    "php",
+    "laravel",
+    "frontend",
+    "react",
+    "angular",
+    "vue",
+    "mobile",
+    "android",
+    "ios",
+    "qa",
+    "tester",
+    "devops",
+    "sre",
+    "data science",
+    "data scientist",
+    "machine learning",
+    "ml",
+    "embedded",
+)
+BACKEND_SIGNAL_TERMS = (
+    "backend",
+    "back-end",
+    "back end",
+    "microservice",
+    "microservices",
+    "platform",
+    "api",
+    "server-side",
+)
 
 
 def _normalize_skill_name(value: str) -> str:
@@ -231,6 +286,10 @@ def _apply_cap(decision: Decision, cap: Decision) -> Decision:
     return cap if _decision_rank(decision) > _decision_rank(cap) else decision
 
 
+def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(token in text for token in tokens)
+
+
 def sanitize_extraction(
     extraction: VacancyExtraction,
     candidate_skills: CandidateSkillsProfile,
@@ -346,9 +405,21 @@ def compare_requirements(
             decision = Decision.IGNORE
 
     matched_all = set(matched_mandatory) | set(matched_optional)
-    has_language_core = "java" in matched_all or "kotlin" in matched_all
-    if not has_language_core:
-        decision = Decision.IGNORE
+    role_text = _normalize_text(extraction.role_type)
+    skills_text = _normalize_text(" ".join([*extraction.mandatory_skills, *extraction.optional_skills]))
+    summary_text = _normalize_text(extraction.short_summary)
+    evidence_text = f"{role_text} {skills_text} {summary_text}"
+    has_jvm_evidence = _contains_any(evidence_text, JVM_EVIDENCE_TERMS)
+    has_conflicting_stack = _contains_any(evidence_text, CONFLICTING_STACK_TERMS)
+    has_backend_signal = _contains_any(evidence_text, BACKEND_SIGNAL_TERMS)
+
+    # Strong requires explicit positive JVM evidence.
+    if decision == Decision.STRONG_MATCH and not has_jvm_evidence:
+        decision = Decision.POTENTIAL_MATCH
+    # Missing Java/JVM evidence is uncertainty, not rejection.
+    if decision == Decision.IGNORE and not has_conflicting_stack and (has_backend_signal or not has_jvm_evidence):
+        decision = Decision.POTENTIAL_MATCH
+
     if "spring boot" in seen_mandatory and "spring boot" not in matched_all:
         decision = _apply_cap(decision, Decision.POTENTIAL_MATCH)
     if core_skills:
@@ -356,7 +427,6 @@ def compare_requirements(
         if len(missing_core) == len([skill for skill in core_skills if skill in seen_mandatory]):
             decision = _apply_cap(decision, Decision.POTENTIAL_MATCH)
 
-    role_text = _normalize_text(extraction.role_type)
     conditions_text = " ".join([*extraction.employment_conditions, *extraction.uncertainties])
     location_text = " ".join(extraction.location_restrictions)
     all_constraint_text = _normalize_text(f"{conditions_text} {location_text}")
@@ -366,6 +436,8 @@ def compare_requirements(
     python_first = "python" in role_text or "python" in " ".join(extraction.mandatory_skills)
     meaningful_jvm = any(skill in (set(extraction.mandatory_skills) | set(extraction.optional_skills)) for skill in ("java", "kotlin", "spring boot", "jvm"))
     if python_first and not meaningful_jvm:
+        decision = Decision.IGNORE
+    if has_conflicting_stack and not has_jvm_evidence:
         decision = Decision.IGNORE
     if any(token in all_constraint_text for token in ("unpaid", "equity-only", "equity only", "без оплаты", "без зарплаты")):
         decision = Decision.IGNORE

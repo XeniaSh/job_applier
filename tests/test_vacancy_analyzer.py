@@ -784,3 +784,129 @@ def test_hire_feed_backend_title_has_specific_reason() -> None:
     assert reason
     assert len(reason) > 12
     assert any(token in reason.lower() for token in ("java", "kotlin", "python", "location", "backend", "profile"))
+
+
+def test_policy_examples_for_strong_potential_ignore() -> None:
+    profile = lambda: CandidateSkillsProfile(
+        strong_skills=["java", "spring boot", "kafka"],
+        practical_skills=["postgresql"],
+        absent_skills=[],
+        aliases={},
+        experience_years=6,
+        core_skills=["java", "spring boot"],
+        skill_weights={"java": 10, "spring boot": 9, "kafka": 7, "postgresql": 6},
+    )
+
+    class Client(FakeLLMClient):
+        def __init__(self, extraction: VacancyExtraction) -> None:
+            super().__init__()
+            self._extraction = extraction
+
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            _ = prompt, vacancy
+            return self._extraction
+
+    def run_case(extraction: VacancyExtraction) -> Decision:
+        analyzer = VacancyAnalyzer(llm_client=Client(extraction), skills_loader=profile, prompt_loader=lambda: "PROMPT")
+        result = analyzer.analyze("dummy", content_completeness="FULL")
+        assert result.decision_reason.strip()
+        return result.decision
+
+    assert run_case(
+        VacancyExtraction(
+            mandatory_skills=["java"],
+            optional_skills=["spring boot"],
+            minimum_experience_years=None,
+            seniority=None,
+            responsibilities=[],
+            employment_conditions=[],
+            location_restrictions=[],
+            uncertainties=[],
+            role_type="Java Backend Developer",
+            short_summary="Java backend role",
+        )
+    ) == Decision.STRONG_MATCH
+    assert run_case(
+        VacancyExtraction(
+            mandatory_skills=["java", "spring boot"],
+            optional_skills=[],
+            minimum_experience_years=None,
+            seniority=None,
+            responsibilities=[],
+            employment_conditions=[],
+            location_restrictions=[],
+            uncertainties=[],
+            role_type="Java Spring Boot Engineer",
+            short_summary="Java Spring role",
+        )
+    ) == Decision.STRONG_MATCH
+    assert run_case(
+        VacancyExtraction(
+            mandatory_skills=[],
+            optional_skills=[],
+            minimum_experience_years=None,
+            seniority=None,
+            responsibilities=[],
+            employment_conditions=[],
+            location_restrictions=[],
+            uncertainties=[],
+            role_type="Senior Software Engineer - Backend",
+            short_summary="Backend role without stack in email summary",
+        )
+    ) == Decision.POTENTIAL_MATCH
+    assert run_case(
+        VacancyExtraction(
+            mandatory_skills=[],
+            optional_skills=[],
+            minimum_experience_years=None,
+            seniority=None,
+            responsibilities=[],
+            employment_conditions=[],
+            location_restrictions=[],
+            uncertainties=[],
+            role_type="Backend Engineer",
+            short_summary="Backend role",
+        )
+    ) == Decision.POTENTIAL_MATCH
+    assert run_case(
+        VacancyExtraction(
+            mandatory_skills=["python", "django"],
+            optional_skills=[],
+            minimum_experience_years=None,
+            seniority=None,
+            responsibilities=[],
+            employment_conditions=[],
+            location_restrictions=[],
+            uncertainties=[],
+            role_type="Backend Engineer (Python)",
+            short_summary="Python backend role",
+        )
+    ) == Decision.IGNORE
+    assert run_case(
+        VacancyExtraction(
+            mandatory_skills=["node.js", "typescript"],
+            optional_skills=[],
+            minimum_experience_years=None,
+            seniority=None,
+            responsibilities=[],
+            employment_conditions=[],
+            location_restrictions=[],
+            uncertainties=[],
+            role_type="Backend Engineer (Node.js)",
+            short_summary="Node backend role",
+        )
+    ) == Decision.IGNORE
+    assert run_case(
+        VacancyExtraction(
+            mandatory_skills=["react"],
+            optional_skills=[],
+            minimum_experience_years=None,
+            seniority=None,
+            responsibilities=[],
+            employment_conditions=[],
+            location_restrictions=[],
+            uncertainties=[],
+            role_type="React Frontend Engineer",
+            short_summary="Frontend role",
+        )
+    ) == Decision.IGNORE

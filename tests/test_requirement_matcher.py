@@ -70,14 +70,14 @@ def test_missing_redis_and_webflux_still_strong_match() -> None:
     assert result.match_percentage == 97.1
 
 
-def test_missing_java_produces_ignore() -> None:
+def test_missing_java_is_potential_without_conflicting_stack() -> None:
     result = compare_requirements(
         extraction=_extraction(mandatory_skills=["java", "kafka"]),
         candidate_skills=_skills_profile(experience_years=6).model_copy(
             update={"strong_skills": ["spring boot", "kafka", "postgresql"]}
         ),
     )
-    assert result.decision == Decision.IGNORE
+    assert result.decision == Decision.POTENTIAL_MATCH
 
 
 def test_missing_mandatory_spring_boot_caps_potential() -> None:
@@ -116,7 +116,7 @@ def test_score_70_is_potential_match() -> None:
     assert result.decision == Decision.POTENTIAL_MATCH
 
 
-def test_score_50_is_ignore() -> None:
+def test_score_50_is_potential_without_conflicting_stack() -> None:
     profile = _skills_profile().model_copy(
         update={
             "strong_skills": ["java"],
@@ -130,7 +130,7 @@ def test_score_50_is_ignore() -> None:
         candidate_skills=profile,
     )
     assert result.match_percentage == 50.0
-    assert result.decision == Decision.IGNORE
+    assert result.decision == Decision.POTENTIAL_MATCH
 
 
 def test_optional_skills_contribute_only_30_percent() -> None:

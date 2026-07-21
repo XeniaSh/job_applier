@@ -163,6 +163,48 @@ def _build_decision_reason(
     location_text = " ".join(comparison.location_restrictions).lower()
     uncertainty_text = " ".join(comparison.uncertainties).lower()
     all_constraints = f"{location_text} {uncertainty_text}"
+    role_text = role.lower()
+    evidence_text = " ".join(
+        [
+            role_text,
+            extraction.short_summary.lower(),
+            " ".join(extraction.mandatory_skills).lower(),
+            " ".join(extraction.optional_skills).lower(),
+        ]
+    )
+    has_jvm_evidence = any(
+        token in evidence_text
+        for token in ("java", "kotlin", "jvm", "spring", "spring boot", "micronaut", "quarkus", "jakarta ee")
+    )
+    has_conflicting_stack = any(
+        token in evidence_text
+        for token in (
+            "python",
+            "django",
+            "flask",
+            "fastapi",
+            "go",
+            "golang",
+            "node",
+            "node.js",
+            "typescript",
+            "javascript",
+            ".net",
+            "dotnet",
+            "php",
+            "ruby",
+            "frontend",
+            "react",
+            "angular",
+            "mobile",
+            "qa",
+            "devops",
+            "data scientist",
+            "machine learning",
+            "ml",
+            "embedded",
+        )
+    )
     if decision == Decision.STRONG_MATCH:
         if comparison.matched_mandatory:
             top = ", ".join(comparison.matched_mandatory[:3])
@@ -173,6 +215,8 @@ def _build_decision_reason(
             return "Role appears relevant but location/remote constraints require confirmation."
         if lead_nuance:
             return "Role is relevant but lead-level expectations need manual verification."
+        if not has_jvm_evidence and "backend" in role_text and not has_conflicting_stack:
+            return "Backend role but the email summary does not specify the technology stack."
         if explicit_skill_count < 3:
             return "Backend signal is present, but the email card lacks enough explicit stack evidence."
         if mandatory:
@@ -181,7 +225,8 @@ def _build_decision_reason(
         return "Backend role matches partially, but evidence is not strong enough for a full match."
     if any(token in all_constraints for token in ("incompatible", "must reside in philippines", "country restriction")):
         return "Location restriction is incompatible with the candidate profile."
-    role_text = role.lower()
+    if has_conflicting_stack:
+        return f'Primary stack in the vacancy points to "{role}", not the target Java backend stack.'
     if any(token in role_text for token in ("frontend", "react", "angular", "qa", "tester", "devops", "python")):
         return f'Role focus is "{role}", which is outside the target Java backend scope.'
     if not any(token in (set(extraction.mandatory_skills) | set(extraction.optional_skills)) for token in ("java", "kotlin", "jvm", "spring boot")):
