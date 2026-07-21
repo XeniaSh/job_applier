@@ -218,3 +218,45 @@ def test_connection_failure(monkeypatch) -> None:
 
     with pytest.raises(EmailConnectionError):
         client.list_mailboxes()
+
+
+def test_incremental_uid_search_falls_back_to_all_filter_when_server_returns_stale_uid() -> None:
+    class _UidFallbackIMAP(_FakeIMAP):
+        def uid(self, command: str, *args: str):
+            if command.lower() == "search":
+                if args and str(args[0]).upper() == "UID":
+                    # Simulate provider bug: UID range query returns stale UID.
+                    return ("OK", [b"51"])
+                return ("OK", [b"1 2 3 51"])
+            if command.lower() == "fetch":
+                raise AssertionError("No fetch expected when filtered result is empty")
+            return super().uid(command, *args)
+
+        def response(self, code: str):
+            if code == "UIDVALIDITY":
+                return ("UIDVALIDITY", [b"13"])
+            return (code, [])
+
+    client = EmailIMAPClient(
+        host="imap.gmail.com",
+        port=993,
+        username="user",
+        password="app-password",
+        folder="INBOX",
+        search_days=7,
+        mark_as_read=False,
+        adapter=_UidFallbackIMAP(messages={}),
+    )
+
+    result = client.fetch_linkedin_messages_sync(
+        checkpoint_uid=51,
+        checkpoint_uidvalidity="13",
+        incremental_enabled=True,
+        bootstrap_lookback_days=7,
+        bootstrap_message_limit=500,
+        batch_size=200,
+        rescan=False,
+    )
+    assert result.mode == "incremental"
+    assert result.messages_fetched == 0
+    assert result.search_criteria.endswith("(fallback=ALL-filter)")

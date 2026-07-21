@@ -4,6 +4,7 @@ import imaplib
 import logging
 import re
 import ssl
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
@@ -37,6 +38,21 @@ class RawEmailMessage:
     email_message: Message
 
 
+@dataclass(frozen=True)
+class ImapSyncResult:
+    mode: str
+    checkpoint_before: int | None
+    checkpoint_after: int | None
+    highest_uid_seen: int | None
+    uidvalidity: str | None
+    uidvalidity_changed: bool
+    messages_matched: int
+    messages_fetched: int
+    search_criteria: str
+    timings_ms: dict[str, int]
+    messages: list[RawEmailMessage]
+
+
 class IMAPAdapter(Protocol):
     def login(self, username: str, password: str): ...
 
@@ -49,6 +65,8 @@ class IMAPAdapter(Protocol):
     def close(self): ...
 
     def logout(self): ...
+
+    def response(self, code: str): ...
 
 
 class EmailIMAPClient:
@@ -80,38 +98,93 @@ class EmailIMAPClient:
         self._mark_as_read = mark_as_read
         self._provided_adapter = adapter
 
-    def fetch_linkedin_messages(self) -> list[RawEmailMessage]:
-        client = self._open_authenticated_client()
+    @property
+    def folder(self) -> str:
+        return self._folder
 
+    @property
+    def username(self) -> str:
+        return self._username
+
+    def fetch_linkedin_messages(self) -> list[RawEmailMessage]:
+        result = self.fetch_linkedin_messages_sync(
+            checkpoint_uid=None,
+            checkpoint_uidvalidity=None,
+            incremental_enabled=False,
+            bootstrap_lookback_days=self._search_days,
+            bootstrap_message_limit=500,
+            batch_size=500,
+            rescan=False,
+        )
+        return result.messages
+
+    def fetch_linkedin_messages_sync(
+        self,
+        *,
+        checkpoint_uid: int | None,
+        checkpoint_uidvalidity: str | None,
+        incremental_enabled: bool,
+        bootstrap_lookback_days: int,
+        bootstrap_message_limit: int,
+        batch_size: int,
+        rescan: bool,
+    ) -> ImapSyncResult:
+        timings_ms: dict[str, int] = {}
+        start_connect = time.monotonic()
+        client = self._open_authenticated_client()
+        timings_ms["connect"] = max(0, int((time.monotonic() - start_connect) * 1000))
+        mode = "incremental"
+        start_select = time.monotonic()
         try:
             status, _ = client.select(f'"{self._folder}"')
             if status != "OK":
                 raise EmailConnectionError(
                     f"Cannot select mailbox folder: {self._folder}"
                 )
+            timings_ms["select"] = max(0, int((time.monotonic() - start_select) * 1000))
 
-            since_date = (
-                datetime.now(timezone.utc) - timedelta(days=self._search_days)
-            ).strftime("%d-%b-%Y")
+            uidvalidity = self._read_uidvalidity(client)
+            uidvalidity_changed = checkpoint_uidvalidity is not None and uidvalidity is not None and checkpoint_uidvalidity != uidvalidity
+            if rescan:
+                mode = "rescan"
+            elif not incremental_enabled or checkpoint_uid is None or uidvalidity_changed:
+                mode = "bootstrap"
 
-            status, data = client.uid(
-                "search",
-                None,
-                f'(SINCE "{since_date}")',
-            )
+            start_search = time.monotonic()
+            if mode == "incremental" and checkpoint_uid is not None:
+                uids, search_criteria = self._search_uids_newer_than(client=client, last_uid=checkpoint_uid)
+            else:
+                uids, search_criteria = self._search_uids_since_days(client=client, days=max(1, bootstrap_lookback_days))
+                if bootstrap_message_limit > 0:
+                    uids = uids[-bootstrap_message_limit:]
+            timings_ms["search"] = max(0, int((time.monotonic() - start_search) * 1000))
 
-            if status != "OK" or not data:
-                return []
+            if batch_size > 0:
+                uids = uids[:batch_size]
 
-            uids = [uid.decode("utf-8") for uid in data[0].split() if uid]
+            highest_uid_seen = max(uids) if uids else checkpoint_uid
+            if not uids:
+                return ImapSyncResult(
+                    mode=mode,
+                    checkpoint_before=checkpoint_uid,
+                    checkpoint_after=checkpoint_uid,
+                    highest_uid_seen=highest_uid_seen,
+                    uidvalidity=uidvalidity,
+                    uidvalidity_changed=uidvalidity_changed,
+                    messages_matched=0,
+                    messages_fetched=0,
+                    search_criteria=search_criteria,
+                    timings_ms=timings_ms,
+                    messages=[],
+                )
 
+            start_fetch = time.monotonic()
             messages: list[RawEmailMessage] = []
-
-            for uid in uids:
+            for uid in sorted(uids):
                 try:
                     raw_message = self._fetch_message_by_uid(
                         client=client,
-                        uid=uid,
+                        uid=str(uid),
                     )
                 except EmailMessageError:
                     logger.warning(
@@ -131,12 +204,25 @@ class EmailIMAPClient:
                 if self._mark_as_read:
                     client.uid(
                         "store",
-                        uid,
+                        str(uid),
                         "+FLAGS",
                         "(\\Seen)",
                     )
+            timings_ms["fetch"] = max(0, int((time.monotonic() - start_fetch) * 1000))
 
-            return messages
+            return ImapSyncResult(
+                mode=mode,
+                checkpoint_before=checkpoint_uid,
+                checkpoint_after=highest_uid_seen,
+                highest_uid_seen=highest_uid_seen,
+                uidvalidity=uidvalidity,
+                uidvalidity_changed=uidvalidity_changed,
+                messages_matched=len(messages),
+                messages_fetched=len(uids),
+                search_criteria=search_criteria,
+                timings_ms=timings_ms,
+                messages=messages,
+            )
 
         finally:
             self._cleanup_client(client)
@@ -268,6 +354,59 @@ class EmailIMAPClient:
 
         return client
 
+    def _search_uids_newer_than(self, *, client: IMAPAdapter, last_uid: int) -> tuple[list[int], str]:
+        start_uid = max(1, int(last_uid) + 1)
+        criteria = f"UID {start_uid}:*"
+        status, data = client.uid(
+            "search",
+            "UID",
+            f"{start_uid}:*",
+        )
+        if status != "OK" or not data:
+            return [], criteria
+        uids = _parse_uid_list(data[0] if data else b"")
+        # Some providers respond to UID range search with stale/invalid UIDs.
+        # Fallback to ALL+local filtering to preserve incremental semantics.
+        if uids and min(uids) <= int(last_uid):
+            fallback_status, fallback_data = client.uid("search", "ALL")
+            if fallback_status != "OK" or not fallback_data:
+                return [], criteria
+            all_uids = _parse_uid_list(fallback_data[0] if fallback_data else b"")
+            filtered = [uid for uid in all_uids if uid > int(last_uid)]
+            return filtered, f"{criteria} (fallback=ALL-filter)"
+        return uids, criteria
+
+    def _search_uids_since_days(self, *, client: IMAPAdapter, days: int) -> tuple[list[int], str]:
+        since_date = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+        ).strftime("%d-%b-%Y")
+        criteria = f'SINCE "{since_date}"'
+        status, data = client.uid(
+            "search",
+            "SINCE",
+            since_date,
+        )
+        if status != "OK" or not data:
+            return [], criteria
+        return _parse_uid_list(data[0] if data else b""), criteria
+
+    def _read_uidvalidity(self, client: IMAPAdapter) -> str | None:
+        response_method = getattr(client, "response", None)
+        if not callable(response_method):
+            return None
+        try:
+            _code, values = response_method("UIDVALIDITY")
+        except Exception:  # noqa: BLE001
+            return None
+        if not values:
+            return None
+        first = values[0]
+        if isinstance(first, bytes):
+            return first.decode("utf-8", errors="ignore").strip() or None
+        if isinstance(first, str):
+            return first.strip() or None
+        return None
+
     @staticmethod
     def _cleanup_client(client: IMAPAdapter) -> None:
         try:
@@ -361,3 +500,17 @@ def _decode_header_value(value: str) -> str:
     except Exception:  # noqa: BLE001
         decoded = value
     return " ".join(decoded.replace("\r", " ").replace("\n", " ").split())
+
+
+def _parse_uid_list(raw_data: object) -> list[int]:
+    if isinstance(raw_data, bytes):
+        text = raw_data.decode("utf-8", errors="ignore")
+    elif isinstance(raw_data, str):
+        text = raw_data
+    else:
+        return []
+    result: list[int] = []
+    for chunk in text.split():
+        if chunk.isdigit():
+            result.append(int(chunk))
+    return result

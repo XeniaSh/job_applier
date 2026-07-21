@@ -1,6 +1,8 @@
 from pathlib import Path
 from datetime import timezone
 from dataclasses import dataclass
+import hashlib
+import inspect
 import logging
 import os
 import re
@@ -22,6 +24,7 @@ from app.collectors.linkedin_email_collector import (
     LinkedInEmailCollectReport,
     LinkedInEmailCollector,
     LinkedInProcessedVacancy,
+    LinkedInSyncDiagnostics,
 )
 from app.collectors.linkedin_email_parser import extract_email_text_parts, parse_linkedin_email
 from app.collectors.title_filter import should_accept_title
@@ -40,6 +43,7 @@ from app.models import Decision, VacancyEvaluation
 from app.prompt_loader import PromptLoadError, load_analysis_prompt
 from app.skills_profile_loader import SkillsProfileLoadError, load_candidate_skills
 from app.storage.seen_jobs import SeenJobsStorage
+from app.storage.imap_checkpoint import ImapCheckpointStorage
 from app.storage.telegram_delivery import (
     ALLOWED_STATUSES,
     STATUS_APPLIED,
@@ -236,6 +240,40 @@ def _print_summary(report: HHCollectReport) -> None:
     )
 
 
+def _build_linkedin_email_collector(
+    *,
+    settings: Settings,
+    analyzer: VacancyAnalyzer,
+    seen_jobs: SeenJobsStorage,
+    email_client: EmailIMAPClient,
+    bootstrap_lookback_days: int | None = None,
+) -> LinkedInEmailCollector:
+    checkpoint_storage = ImapCheckpointStorage()
+    kwargs = {
+        "email_client": email_client,
+        "analyzer": analyzer,
+        "seen_jobs": seen_jobs,
+    }
+    signature = inspect.signature(LinkedInEmailCollector)
+    parameters = signature.parameters
+    if "checkpoint_storage" in parameters:
+        kwargs["checkpoint_storage"] = checkpoint_storage
+    if "incremental_enabled" in parameters:
+        kwargs["incremental_enabled"] = settings.linkedin_email_incremental_enabled
+    if "bootstrap_message_limit" in parameters:
+        kwargs["bootstrap_message_limit"] = settings.linkedin_email_bootstrap_message_limit
+    if "bootstrap_lookback_days" in parameters:
+        kwargs["bootstrap_lookback_days"] = bootstrap_lookback_days or settings.linkedin_email_bootstrap_lookback_days
+    if "batch_size" in parameters:
+        kwargs["batch_size"] = settings.linkedin_email_batch_size
+    return LinkedInEmailCollector(**kwargs)
+
+
+def _linkedin_account_key(username: str) -> str:
+    digest = hashlib.sha256(username.strip().lower().encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
 @app.command("collect-linkedin-email")
 def collect_linkedin_email(
     limit: int = typer.Option(20, "--limit", min=1, help="Maximum new vacancies to analyze."),
@@ -244,6 +282,18 @@ def collect_linkedin_email(
         False,
         "--dry-run",
         help="Parse emails and print metadata without LLM analysis and without mark seen.",
+    ),
+    rescan: bool = typer.Option(False, "--rescan", help="Run bounded historical scan without changing checkpoint."),
+    reset_imap_checkpoint: bool = typer.Option(
+        False,
+        "--reset-imap-checkpoint",
+        help="Reset saved IMAP UID checkpoint before collection.",
+    ),
+    since_days: int | None = typer.Option(
+        None,
+        "--since-days",
+        min=1,
+        help="Override bounded lookback window for bootstrap/rescan.",
     ),
 ) -> None:
     try:
@@ -267,11 +317,15 @@ def collect_linkedin_email(
         search_days=settings.linkedin_email_search_days,
         mark_as_read=settings.linkedin_email_mark_as_read,
     )
-    collector = LinkedInEmailCollector(
-        email_client=email_client,
+    collector = _build_linkedin_email_collector(
+        settings=settings,
         analyzer=analyzer,
         seen_jobs=seen_jobs,
+        email_client=email_client,
+        bootstrap_lookback_days=since_days,
     )
+    if reset_imap_checkpoint:
+        collector.reset_checkpoint()
 
     try:
         report = collector.collect_and_analyze(
@@ -280,6 +334,7 @@ def collect_linkedin_email(
             skip_seen=True,
             mark_seen=True,
             analyze_in_dry_run=False,
+            rescan=rescan,
         )
     except (EmailConnectionError, EmailAuthenticationError) as exc:
         _ = exc
@@ -288,6 +343,9 @@ def collect_linkedin_email(
 
     if not dry_run:
         _sync_application_history(report.processed)
+    diagnostics_method = getattr(collector, "last_sync_diagnostics", None)
+    if callable(diagnostics_method):
+        _print_linkedin_sync_diagnostics(diagnostics_method(), verbose=False)
     _print_linkedin_results(report=report, include_ignore=include_ignore, dry_run=dry_run)
     _print_linkedin_summary(report)
 
@@ -339,6 +397,23 @@ def collect_greenhouse(
     _print_linkedin_summary(report)
 
 
+@app.command("reset-imap-checkpoint")
+def reset_imap_checkpoint(
+    folder: str | None = typer.Option(None, "--folder", help="Mailbox folder (defaults to configured folder)."),
+) -> None:
+    settings = Settings()
+    checkpoint_storage = ImapCheckpointStorage()
+    removed = checkpoint_storage.reset(
+        source=LinkedInEmailCollector.SOURCE,
+        account_key=_linkedin_account_key(settings.linkedin_email_username),
+        folder=folder or settings.linkedin_email_folder,
+    )
+    if removed:
+        typer.echo("IMAP checkpoint reset.")
+    else:
+        typer.echo("IMAP checkpoint not found.")
+
+
 @app.command("send-linkedin-telegram")
 def send_linkedin_telegram(
     limit: int = typer.Option(20, "--limit", min=1),
@@ -347,6 +422,18 @@ def send_linkedin_telegram(
     dry_run: bool = typer.Option(False, "--dry-run"),
     verbose: bool = typer.Option(False, "--verbose"),
     backfill: bool = typer.Option(False, "--backfill"),
+    rescan: bool = typer.Option(False, "--rescan", help="Run bounded historical scan without changing checkpoint."),
+    reset_imap_checkpoint: bool = typer.Option(
+        False,
+        "--reset-imap-checkpoint",
+        help="Reset saved IMAP UID checkpoint before collection.",
+    ),
+    since_days: int | None = typer.Option(
+        None,
+        "--since-days",
+        min=1,
+        help="Override bounded lookback window for bootstrap/rescan.",
+    ),
 ) -> None:
     try:
         settings = Settings()
@@ -375,11 +462,15 @@ def send_linkedin_telegram(
         search_days=settings.linkedin_email_search_days,
         mark_as_read=settings.linkedin_email_mark_as_read,
     )
-    collector = LinkedInEmailCollector(
-        email_client=email_client,
+    collector = _build_linkedin_email_collector(
+        settings=settings,
         analyzer=analyzer,
         seen_jobs=seen_jobs,
+        email_client=email_client,
+        bootstrap_lookback_days=since_days,
     )
+    if reset_imap_checkpoint:
+        collector.reset_checkpoint()
 
     try:
         report = collector.collect_and_analyze(
@@ -388,6 +479,7 @@ def send_linkedin_telegram(
             skip_seen=(not dry_run and not backfill),
             analyze_in_dry_run=dry_run,
             mark_seen=False,
+            rescan=rescan,
         )
     except (EmailConnectionError, EmailAuthenticationError) as exc:
         _ = exc
@@ -396,6 +488,9 @@ def send_linkedin_telegram(
 
     if not dry_run:
         _sync_application_history(report.processed)
+    diagnostics_method = getattr(collector, "last_sync_diagnostics", None)
+    if callable(diagnostics_method):
+        _print_linkedin_sync_diagnostics(diagnostics_method(), verbose=verbose)
     for item in report.processed:
         if item.evaluation is None:
             if verbose and item.skipped_by_prefilter:
@@ -593,15 +688,23 @@ def run_pipeline(
     )
     seen_jobs = SeenJobsStorage()
     deliveries = TelegramDeliveryStorage()
-    linkedin_collector = LinkedInEmailCollector(
-        email_client=email_client,
+    linkedin_collector = _build_linkedin_email_collector(
+        settings=settings,
         analyzer=analyzer,
         seen_jobs=seen_jobs,
+        email_client=email_client,
     )
-    collectors: list[Collector] = [RuntimeCollector(name="linkedin-email", collect_fn=linkedin_collector.collect)]
+    runtime_collectors: list[RuntimeCollector] = [
+        RuntimeCollector(
+            name="linkedin-email",
+            collect_fn=linkedin_collector.collect,
+            diagnostics_fn=getattr(linkedin_collector, "last_sync_diagnostics", None),
+        )
+    ]
     if settings.greenhouse_boards:
         greenhouse_collector = GreenhouseCollector(boards=settings.greenhouse_boards)
-        collectors.append(RuntimeCollector(name="greenhouse", collect_fn=greenhouse_collector.collect))
+        runtime_collectors.append(RuntimeCollector(name="greenhouse", collect_fn=greenhouse_collector.collect))
+    collectors: list[Collector] = runtime_collectors
     telegram_client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
     callback_resume_cache = ResumeCacheService(
         resumes_dir=settings.resumes_dir,
@@ -663,6 +766,10 @@ def run_pipeline(
                     cycle_ms = max(0, int((time.monotonic() - cycle_start) * 1000))
 
                     pipeline_result.validate_accounting()
+                    diagnostics_by_source = {
+                        collector.name: collector.diagnostics()
+                        for collector in runtime_collectors
+                    }
                     source_names = _ordered_sources(pipeline_result.sources())
                     for source_name in source_names:
                         if pipeline_result.has_collect_error(source_name):
@@ -678,6 +785,34 @@ def run_pipeline(
                             f"prefiltered={pipeline_result.title_filtered(source_name)} "
                             f"errors={pipeline_result.errors_before_analysis(source_name)}"
                         )
+                        source_diag = diagnostics_by_source.get(source_name)
+                        if source_diag is not None:
+                            if source_diag.sync_mode == "incremental" and source_diag.messages_fetched == 0:
+                                _run_log(
+                                    f"{source_name}: checked new_messages=0 checkpoint={source_diag.checkpoint_after or source_diag.checkpoint_before or 0}"
+                                )
+                            elif verbose:
+                                _run_log(
+                                    f"{source_name}: mode={source_diag.sync_mode} "
+                                    f"checkpoint_before={source_diag.checkpoint_before or 0} "
+                                    f"checkpoint_after={source_diag.checkpoint_after or 0} "
+                                    f"highest_uid_seen={source_diag.highest_uid_seen or 0} "
+                                    f"matched={source_diag.messages_matched} fetched={source_diag.messages_fetched} "
+                                    f"parsed={source_diag.messages_parsed} extracted={source_diag.vacancies_extracted} "
+                                    f"search_criteria={source_diag.search_criteria or 'n/a'} "
+                                    f"checkpoint_advanced={source_diag.checkpoint_advanced} "
+                                    f"uidvalidity_changed={source_diag.uidvalidity_changed}"
+                                )
+                                if source_diag.timings_ms:
+                                    _run_log(
+                                        f"{source_name} timings: "
+                                        f"connect={source_diag.timings_ms.get('connect', 0)}ms "
+                                        f"select={source_diag.timings_ms.get('select', 0)}ms "
+                                        f"search={source_diag.timings_ms.get('search', 0)}ms "
+                                        f"fetch={source_diag.timings_ms.get('fetch', 0)}ms "
+                                        f"parse={source_diag.timings_ms.get('parse', 0)}ms "
+                                        f"checkpoint={source_diag.timings_ms.get('checkpoint', 0)}ms"
+                                    )
                     if len(source_names) > 1:
                         _run_log(f"Merged: unique={pipeline_result.merged_unique()}")
                     _run_log(
@@ -1151,6 +1286,38 @@ def _print_linkedin_summary(report: LinkedInEmailCollectReport) -> None:
             ]
         )
     )
+
+
+def _print_linkedin_sync_diagnostics(diagnostics: LinkedInSyncDiagnostics, *, verbose: bool) -> None:
+    checkpoint_value = diagnostics.checkpoint_after or diagnostics.checkpoint_before or 0
+    typer.echo(
+        "LinkedIn IMAP sync: "
+        f"mode={diagnostics.sync_mode} "
+        f"matched={diagnostics.messages_matched} "
+        f"fetched={diagnostics.messages_fetched} "
+        f"extracted={diagnostics.vacancies_extracted} "
+        f"checkpoint={checkpoint_value}"
+    )
+    if verbose:
+        typer.echo(
+            "LinkedIn IMAP details: "
+            f"checkpoint_before={diagnostics.checkpoint_before or 0} "
+            f"checkpoint_after={diagnostics.checkpoint_after or 0} "
+            f"highest_uid_seen={diagnostics.highest_uid_seen or 0} "
+            f"messages_parsed={diagnostics.messages_parsed} "
+            f"search_criteria={diagnostics.search_criteria or 'n/a'} "
+            f"checkpoint_advanced={diagnostics.checkpoint_advanced} "
+            f"uidvalidity_changed={diagnostics.uidvalidity_changed}"
+        )
+        typer.echo(
+            "LinkedIn IMAP timings: "
+            f"connect={diagnostics.timings_ms.get('connect', 0)}ms "
+            f"select={diagnostics.timings_ms.get('select', 0)}ms "
+            f"search={diagnostics.timings_ms.get('search', 0)}ms "
+            f"fetch={diagnostics.timings_ms.get('fetch', 0)}ms "
+            f"parse={diagnostics.timings_ms.get('parse', 0)}ms "
+            f"checkpoint={diagnostics.timings_ms.get('checkpoint', 0)}ms"
+        )
 
 
 def _collect_pipeline_items(
@@ -2621,9 +2788,15 @@ class PipelineResult:
 class RuntimeCollector:
     name: str
     collect_fn: Callable[[], list[NormalizedVacancy]]
+    diagnostics_fn: Callable[[], LinkedInSyncDiagnostics] | None = None
 
     def collect(self) -> CollectorResult:
         return CollectorResult(source=self.name, vacancies=self.collect_fn())
+
+    def diagnostics(self) -> LinkedInSyncDiagnostics | None:
+        if self.diagnostics_fn is None:
+            return None
+        return self.diagnostics_fn()
 
 
 @dataclass

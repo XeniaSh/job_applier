@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     linkedin_email_folder: str = "INBOX"
     linkedin_email_search_days: int = 7
     linkedin_email_mark_as_read: bool = False
+    linkedin_email_incremental_enabled: bool = True
+    linkedin_email_bootstrap_message_limit: int = 500
+    linkedin_email_bootstrap_lookback_days: int = 7
+    linkedin_email_batch_size: int = 200
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     resumes_dir: Path = Path("resumes")
