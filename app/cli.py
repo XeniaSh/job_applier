@@ -2313,7 +2313,13 @@ def _process_callback_update(
                         )
                 except TelegramMessageNotModifiedError:
                     _ = None
-            _enqueue_prepare_priority(storage=storage, source=source, external_id=external_id)
+            _enqueue_prepare_priority(
+                storage=storage,
+                source=source,
+                external_id=external_id,
+                enqueue_reason="callback_prepare",
+                timing_logger=timing_logger,
+            )
         elif action == "copy":
             get_preparation = getattr(storage, "get_preparation", None)
             prep = get_preparation(source, external_id) if callable(get_preparation) else None
@@ -3140,7 +3146,13 @@ def _recover_and_requeue_abandoned_preparations(
             external_id=external_id,
             auto_retry=True,
         )
-        _enqueue_prepare_priority(storage=storage, source=source, external_id=external_id)
+        _enqueue_prepare_priority(
+            storage=storage,
+            source=source,
+            external_id=external_id,
+            enqueue_reason="startup_recovery",
+            timing_logger=_component_log("main"),
+        )
         _run_log(f"Requeued recovered preparation {source}:{external_id}", component="main")
     return recovered
 
@@ -3207,22 +3219,55 @@ def _reconcile_recovered_preparation_message(
         _run_log(f"Failed to reconcile recovered preparation card {source}:{external_id}: {details}", component="main")
 
 
-def _enqueue_prepare_priority(*, storage: TelegramDeliveryStorage, source: str, external_id: str) -> None:
+def _enqueue_prepare_priority(
+    *,
+    storage: TelegramDeliveryStorage,
+    source: str,
+    external_id: str,
+    enqueue_reason: str,
+    timing_logger: Callable[[str], None] | None = None,
+) -> bool:
     get_state = getattr(storage, "get_state", None)
     set_state = getattr(storage, "set_state", None)
     if not callable(get_state) or not callable(set_state):
-        return
+        return False
+    get_delivery = getattr(storage, "get_delivery", None)
+    if callable(get_delivery):
+        delivery = get_delivery(source, external_id)
+        current_status = delivery.status if delivery is not None else None
+        if current_status != STATUS_PREPARE_REQUESTED:
+            if timing_logger is not None:
+                timing_logger(
+                    f"Queue enqueue skipped {source}:{external_id} reason={enqueue_reason} status={current_status or 'missing'}"
+                )
+            return False
     raw = get_state("prepare_priority_queue")
     items: list[str] = []
     if isinstance(raw, str) and raw.strip():
-        items = [entry for entry in raw.split("\n") if entry.strip()]
+        items = [entry.strip() for entry in raw.split("\n") if entry.strip()]
     key = f"{source}:{external_id}"
-    if key not in items:
-        items.append(key)
+    before_size = len(items)
+    if key in items:
+        if timing_logger is not None:
+            timing_logger(
+                f"Queue enqueue duplicate {source}:{external_id} reason={enqueue_reason} size_before={before_size} size_after={before_size}"
+            )
+        return False
+    items.append(key)
     set_state("prepare_priority_queue", "\n".join(items))
+    after_size = len(items)
+    if timing_logger is not None:
+        timing_logger(
+            f"Queue enqueued {source}:{external_id} reason={enqueue_reason} size_before={before_size} size_after={after_size}"
+        )
+    return True
 
 
-def _drain_prepare_priorities(*, storage: TelegramDeliveryStorage) -> list[tuple[str, str]]:
+def _drain_prepare_priorities(
+    *,
+    storage: TelegramDeliveryStorage,
+    timing_logger: Callable[[str], None] | None = None,
+) -> list[tuple[str, str]]:
     get_state = getattr(storage, "get_state", None)
     set_state = getattr(storage, "set_state", None)
     if not callable(get_state) or not callable(set_state):
@@ -3239,6 +3284,8 @@ def _drain_prepare_priorities(*, storage: TelegramDeliveryStorage) -> list[tuple
         if source and external_id:
             pairs.append((source, external_id))
     set_state("prepare_priority_queue", "")
+    if timing_logger is not None:
+        timing_logger(f"Queue drained count={len(pairs)}")
     return pairs
 
 
@@ -3261,7 +3308,10 @@ def _prepare_worker_loop(
         _run_log("Worker thread started", component="worker")
     while not stop_event.is_set():
         try:
-            priority_keys = _drain_prepare_priorities(storage=worker_storage)
+            priority_keys = _drain_prepare_priorities(
+                storage=worker_storage,
+                timing_logger=_component_log("worker") if verbose else None,
+            )
             if priority_keys and verbose:
                 for source, external_id in priority_keys:
                     _run_log(f"Prepare priority requested {source}:{external_id}", component="worker")

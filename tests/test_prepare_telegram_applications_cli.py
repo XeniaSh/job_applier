@@ -965,3 +965,103 @@ def test_recovered_preparing_processed_before_fifo_when_no_new_priority(monkeypa
         priority_vacancy_keys=priorities,
     )
     assert order[:2] == ["recovered", "old-fifo"]
+
+
+def test_late_enqueue_after_successful_prepare_is_rejected_at_producer(monkeypatch) -> None:
+    _set_env(monkeypatch)
+    settings = cli_module.Settings()
+    order: list[str] = []
+
+    class Service:
+        def prepare(self, source, external_id):
+            _ = source
+            order.append(external_id)
+            return _prepared(external_id, "resumes/java-backend.pdf")
+
+    class Storage:
+        def __init__(self):
+            self.state: dict[str, str] = {}
+            self.status = {("linkedin-email", "4039760488"): "PREPARE_REQUESTED"}
+
+        def get_state(self, key):
+            return self.state.get(key)
+
+        def set_state(self, key, value):
+            self.state[key] = value
+
+        def list_by_status(self, *, chat_id, status, limit):
+            _ = chat_id, status, limit
+            rows = [(s, e) for (s, e), value in self.status.items() if value == "PREPARE_REQUESTED"]
+            rows.sort(key=lambda item: item[1])
+            return rows
+
+        def get_delivery(self, source, external_id):
+            value = self.status.get((source, external_id))
+            if value is None:
+                return None
+            return type("D", (), {"status": value})()
+
+        def claim_for_preparation(self, *, source, external_id, chat_id):
+            _ = chat_id
+            key = (source, external_id)
+            if self.status.get(key) != "PREPARE_REQUESTED":
+                return False
+            self.status[key] = "PREPARING"
+            return True
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 42)
+
+        def update_status(self, *, source, external_id, chat_id, status):
+            _ = chat_id
+            self.status[(source, external_id)] = status
+
+        def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    class Client:
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    storage = Storage()
+    logs: list[str] = []
+    cli_module._prepare_requested_applications(
+        settings=settings,
+        service=Service(),
+        storage=storage,  # type: ignore[arg-type]
+        telegram_client=Client(),  # type: ignore[arg-type]
+        limit=20,
+        dry_run=False,
+        print_dry_run_items=False,
+    )
+    assert order == ["4039760488"]
+
+    # Simulate a late producer call after the item is already prepared.
+    enqueued = cli_module._enqueue_prepare_priority(
+        storage=storage,  # type: ignore[arg-type]
+        source="linkedin-email",
+        external_id="4039760488",
+        enqueue_reason="callback_prepare",
+        timing_logger=logs.append,
+    )
+    assert enqueued is False
+    assert any("Queue enqueue skipped linkedin-email:4039760488 reason=callback_prepare status=PREPARED" in line for line in logs)
+
+    drained = cli_module._drain_prepare_priorities(storage=storage)  # type: ignore[arg-type]
+    assert drained == []
+
+    # No second prepare attempt.
+    cli_module._prepare_requested_applications(
+        settings=settings,
+        service=Service(),
+        storage=storage,  # type: ignore[arg-type]
+        telegram_client=Client(),  # type: ignore[arg-type]
+        limit=20,
+        dry_run=False,
+        print_dry_run_items=False,
+    )
+    assert order == ["4039760488"]
