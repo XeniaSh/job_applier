@@ -23,7 +23,11 @@ def _set_env(monkeypatch, tmp_path: Path, *, interval: int = 300, poll_interval:
     monkeypatch.setenv("TELEGRAM_POLL_INTERVAL_SECONDS", str(poll_interval))
 
 
-def _evaluation(decision: Decision = Decision.POTENTIAL_MATCH) -> VacancyEvaluation:
+def _evaluation(
+    decision: Decision = Decision.POTENTIAL_MATCH,
+    *,
+    warning_signals: list[dict[str, str]] | None = None,
+) -> VacancyEvaluation:
     return VacancyEvaluation(
         decision=decision,
         summary="summary",
@@ -38,6 +42,7 @@ def _evaluation(decision: Decision = Decision.POTENTIAL_MATCH) -> VacancyEvaluat
         evidence_sufficient=True,
         recommended_resume=RecommendedResume.JAVA_BACKEND,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
+        warning_signals=warning_signals or [],
     )
 
 
@@ -83,7 +88,18 @@ def test_run_all_seen_cycle_logs_and_reason(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setattr(
         cli_module,
         "evaluate_title",
-        lambda title: type("Gate", (), {"accepted": True, "reason": "Title has Java/backend role signal"})(),
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": True,
+                "reason": "Title has Java/backend role signal",
+                "normalized_title": title.lower(),
+                "positive_rules": ["java"],
+                "negative_rules": [],
+                "decision": "PASS",
+            },
+        )(),
     )
     monkeypatch.setattr(
         cli_module,
@@ -112,7 +128,18 @@ def test_run_title_filter_only_reason(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         cli_module,
         "evaluate_title",
-        lambda title: type("Gate", (), {"accepted": False, "reason": "Frontend title"})(),
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": False,
+                "reason": "Frontend title",
+                "normalized_title": title.lower(),
+                "positive_rules": [],
+                "negative_rules": ["frontend"],
+                "decision": "REJECT",
+            },
+        )(),
     )
     monkeypatch.setattr(
         cli_module,
@@ -209,7 +236,18 @@ def test_run_verbose_mode_prints_per_vacancy_outcomes(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(
         cli_module,
         "evaluate_title",
-        lambda title: type("Gate", (), {"accepted": title != "Filtered Role", "reason": "Frontend title"})(),
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": title != "Filtered Role",
+                "reason": "Frontend title",
+                "normalized_title": title.lower(),
+                "positive_rules": ["java"] if title != "Filtered Role" else [],
+                "negative_rules": ["frontend"] if title == "Filtered Role" else [],
+                "decision": "PASS" if title != "Filtered Role" else "REJECT",
+            },
+        )(),
     )
 
     class Seen:
@@ -247,6 +285,7 @@ def test_run_verbose_mode_prints_per_vacancy_outcomes(monkeypatch, tmp_path: Pat
     result = CliRunner().invoke(cli_module.app, ["run", "--verbose"])
     assert result.exit_code == 0
     assert "ALREADY_SEEN linkedin-email:1 Seen Role" in result.output
+    assert 'PREFILTER_CHECK title="Filtered Role" normalized=' in result.output
     assert 'PREFILTERED linkedin-email:2 title="Filtered Role" reason="Frontend title"' in result.output
     assert 'POTENTIAL linkedin-email:3 title="Potential Role" score=' in result.output
     assert 'reason="Role is partially aligned with Java backend profile."' in result.output
@@ -287,13 +326,114 @@ def test_verbose_logging_does_not_trigger_extra_analysis_calls(monkeypatch, tmp_
     monkeypatch.setattr(
         cli_module,
         "evaluate_title",
-        lambda title: type("Gate", (), {"accepted": True, "reason": "Title has Java/backend role signal"})(),
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": True,
+                "reason": "Title has Java/backend role signal",
+                "normalized_title": title.lower(),
+                "positive_rules": ["java"],
+                "negative_rules": [],
+                "decision": "PASS",
+            },
+        )(),
     )
     monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
 
     result = CliRunner().invoke(cli_module.app, ["run", "--verbose"])
     assert result.exit_code == 0
     assert calls["count"] == 1
+
+
+def test_verbose_mode_logs_warning_details(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    _run_single_cycle(monkeypatch)
+
+    class Analyzer:
+        def analyze(self, *args, **kwargs):
+            _ = args, kwargs
+            return _evaluation(
+                Decision.POTENTIAL_MATCH,
+                warning_signals=[
+                    {
+                        "code": "lead_level",
+                        "source": "description",
+                        "evidence": "lead architecture decisions and mentor engineers",
+                    }
+                ],
+            )
+
+    monkeypatch.setattr(cli_module, "build_analyzer", lambda settings: Analyzer())
+    monkeypatch.setattr(cli_module, "LLMClient", lambda **kwargs: object())
+    monkeypatch.setattr(cli_module, "EmailIMAPClient", lambda **kwargs: object())
+    monkeypatch.setattr(cli_module, "PreparationService", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_requested_applications",
+        lambda **kwargs: cli_module.PreparationRunResult(0, 0, 0, 0, 0, 0, 0, 0, 0),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "LinkedInEmailCollector",
+        lambda **kwargs: type(
+            "L",
+            (),
+            {
+                "SOURCE": "linkedin-email",
+                "collect": lambda self: [_vacancy(source="linkedin-email", external_id="77", title="Senior Java Developer")],
+            },
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})())
+    monkeypatch.setattr(
+        cli_module,
+        "evaluate_title",
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": True,
+                "reason": "Explicit Java/JVM signal in title",
+                "normalized_title": title.lower(),
+                "positive_rules": ["java"],
+                "negative_rules": [],
+                "decision": "PASS",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "TelegramDeliveryStorage",
+        lambda: type(
+            "D",
+            (),
+            {
+                "was_sent": lambda self, source, external_id, chat_id: True,
+                "save_sent": lambda self, **kwargs: None,
+                "mark_history_status": lambda self, **kwargs: None,
+                "upsert_application_history": lambda self, **kwargs: None,
+                "get_state": lambda self, key: None,
+                "set_state": lambda self, key, value: None,
+                "pop_state": lambda self, key: None,
+                "list_by_status": lambda self, **kwargs: [],
+                "claim_for_preparation": lambda self, **kwargs: False,
+                "save_preparation": lambda self, prep: None,
+                "get_preparation": lambda self, source, external_id: None,
+                "clear_preparation_aux_message_ids": lambda self, source, external_id: None,
+                "set_preparation_aux_message_id": lambda self, source, external_id, message_kind, message_id: None,
+                "get_delivery": lambda self, source, external_id, chat_id: None,
+                "recover_abandoned_preparing": lambda self, **kwargs: [],
+                "count_by_status": lambda self, **kwargs: 0,
+            },
+        )(),
+    )
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
+
+    result = CliRunner().invoke(cli_module.app, ["run", "--verbose"])
+    assert result.exit_code == 0
+    assert "WARNING linkedin-email:77 code=lead_level source=\"description\" evidence=\"lead architecture decisions and mentor engineers\"" in result.output
 
 
 def test_run_default_mode_hides_titles(monkeypatch, tmp_path: Path) -> None:
@@ -363,7 +503,18 @@ def test_run_counters_use_current_cycle_items_only(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(
         cli_module,
         "evaluate_title",
-        lambda title: type("Gate", (), {"accepted": True, "reason": "Title has Java/backend role signal"})(),
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": True,
+                "reason": "Title has Java/backend role signal",
+                "normalized_title": title.lower(),
+                "positive_rules": ["java"],
+                "negative_rules": [],
+                "decision": "PASS",
+            },
+        )(),
     )
     monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: type("R", (), {"message_id": 1})()})())
 

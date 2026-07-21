@@ -19,7 +19,16 @@ def test_title_filter_rejects_non_target_titles() -> None:
 
 
 def test_title_filter_returns_rule_based_reasons() -> None:
-    assert evaluate_title("Frontend React Developer").reason == "Frontend title"
+    assert evaluate_title("Frontend React Developer").reason == "Frontend role"
     assert evaluate_title("QA Tester").reason == "QA/test role"
     assert evaluate_title("Android Mobile Engineer").reason == "Mobile role"
-    assert evaluate_title("Software Engineer, Micro Platforms").reason == "Generic software title without Java/backend evidence"
+    assert evaluate_title("Software Engineer, Micro Platforms").reason == "No incompatible title signal"
+
+
+def test_title_filter_allows_generic_and_java_analyst_titles() -> None:
+    assert evaluate_title("Senior Software Engineer").accepted is True
+    assert evaluate_title("Software Engineer - FinTech (Remote)").accepted is True
+    assert evaluate_title("Software Engineer - Human Data Platforms (Remote)").accepted is True
+    java_analyst = evaluate_title("Software Engineering Analyst (Java)")
+    assert java_analyst.accepted is True
+    assert "java" in java_analyst.positive_rules

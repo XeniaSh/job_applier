@@ -1491,9 +1491,13 @@ def _analyze_pipeline_items(
             continue
 
         title_gate = evaluate_title(vacancy.title)
+        item.prefilter_reason = title_gate.reason
+        item.prefilter_normalized_title = title_gate.normalized_title
+        item.prefilter_positive_rules = list(title_gate.positive_rules)
+        item.prefilter_negative_rules = list(title_gate.negative_rules)
+        item.prefilter_decision = title_gate.decision
         if not title_gate.accepted:
             item.title_filtered = True
-            item.prefilter_reason = title_gate.reason
             item.preanalysis_outcome = "prefiltered"
             if mark_seen:
                 seen_jobs.mark_seen(item.storage_source, item.storage_external_id)
@@ -1616,6 +1620,14 @@ def _pipeline_verbose_outcomes(pipeline: PipelineResult) -> list[str]:
             continue
         title = item.vacancy.title
         identity = item.identity or "<missing_identity>"
+        if item.prefilter_normalized_title is not None:
+            outcomes.append(
+                f'PREFILTER_CHECK title="{_quote_log_text(title)}" normalized="{_quote_log_text(item.prefilter_normalized_title)}" '
+                f"positive_rules={item.prefilter_positive_rules or []} "
+                f"negative_rules={item.prefilter_negative_rules or []} "
+                f"decision={item.prefilter_decision or 'UNKNOWN'} "
+                f'reason="{_quote_log_text(item.prefilter_reason or "")}"'
+            )
         if item.preanalysis_outcome == "already_seen":
             outcomes.append(f"ALREADY_SEEN {identity} {title}")
             continue
@@ -1639,6 +1651,14 @@ def _pipeline_verbose_outcomes(pipeline: PipelineResult) -> list[str]:
             outcomes.append(f'POTENTIAL {identity} title="{_quote_log_text(title)}" score={score} reason="{reason}"')
         else:
             outcomes.append(f'IGNORE {identity} title="{_quote_log_text(title)}" score={score} reason="{reason}"')
+        for warning in item.analysis_result.warning_signals:
+            code = _quote_log_text(warning.get("code", "nuance"))
+            source = _quote_log_text(warning.get("source", "heuristic"))
+            evidence = _quote_log_text(warning.get("evidence", ""))
+            if evidence:
+                outcomes.append(f'WARNING {identity} code={code} source="{source}" evidence="{evidence}"')
+            else:
+                outcomes.append(f'WARNING {identity} code={code} source="{source}"')
 
         if item.telegram_already_delivered:
             outcomes.append(f"ALREADY_DELIVERED {identity} {title}")
@@ -1764,6 +1784,12 @@ def _analyze_collected_vacancies(
         source_counters.new += 1
 
         title_gate = evaluate_title(vacancy.title)
+        if verbose_outcomes is not None:
+            verbose_outcomes.append(
+                f'PREFILTER_CHECK title="{_quote_log_text(vacancy.title)}" normalized="{_quote_log_text(title_gate.normalized_title)}" '
+                f"positive_rules={title_gate.positive_rules} negative_rules={title_gate.negative_rules} "
+                f'decision={title_gate.decision} reason="{_quote_log_text(title_gate.reason)}"'
+            )
         if not title_gate.accepted:
             report.prefiltered += 1
             source_counters.prefiltered += 1
@@ -1821,6 +1847,16 @@ def _analyze_collected_vacancies(
                 f'IGNORE {vacancy.source}:{vacancy.external_id} title="{_quote_log_text(vacancy.title)}" '
                 f"score={_format_score(evaluation.match_percentage)} reason=\"{_quote_log_text(evaluation.decision_reason or evaluation.summary)}\""
             )
+        for warning in evaluation.warning_signals:
+            code = _quote_log_text(warning.get("code", "nuance"))
+            source = _quote_log_text(warning.get("source", "heuristic"))
+            evidence = _quote_log_text(warning.get("evidence", ""))
+            if evidence:
+                verbose_outcomes.append(
+                    f'WARNING {vacancy.source}:{vacancy.external_id} code={code} source="{source}" evidence="{evidence}"'
+                )
+            else:
+                verbose_outcomes.append(f'WARNING {vacancy.source}:{vacancy.external_id} code={code} source="{source}"')
         report.processed.append(
             LinkedInProcessedVacancy(
                 external_id=vacancy.external_id,
@@ -2787,6 +2823,10 @@ class PipelineItem:
     invalid_identity: bool = False
     title_filtered: bool = False
     prefilter_reason: str | None = None
+    prefilter_normalized_title: str | None = None
+    prefilter_positive_rules: list[str] | None = None
+    prefilter_negative_rules: list[str] | None = None
+    prefilter_decision: str | None = None
     analysis_result: VacancyEvaluation | None = None
     telegram_eligible: bool = False
     telegram_delivered: bool = False

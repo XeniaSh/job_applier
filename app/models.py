@@ -105,6 +105,7 @@ class VacancyEvaluation(BaseModel):
     evidence_sufficient: bool = False
     recommended_resume: RecommendedResume
     recommended_cover_template: RecommendedCoverTemplate
+    warning_signals: list[dict[str, str]] = Field(default_factory=list)
 
 
 class CoverLetterResult(BaseModel):

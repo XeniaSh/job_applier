@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 
 from typer.testing import CliRunner
@@ -938,8 +939,10 @@ def test_telegram_debug_lists_records_newest_first_and_filters(monkeypatch, tmp_
     storage = TelegramDeliveryStorage(db_path=db_path)
     storage.save_sent(source="linkedin-email", external_id="300", chat_id="123", message_id=10)
     storage.set_status("linkedin-email", "300", STATUS_PREPARE_REQUESTED)
+    time.sleep(0.002)
     storage.save_sent(source="linkedin-email", external_id="301", chat_id="123", message_id=11)
     storage.set_status("linkedin-email", "301", STATUS_PREPARED)
+    time.sleep(0.002)
     storage.save_sent(source="other-source", external_id="302", chat_id="123", message_id=12)
     storage.set_status("other-source", "302", STATUS_PREPARE_REQUESTED)
 

@@ -61,7 +61,7 @@ class VacancyAnalyzer:
         if location_cap is not None:
             decision = _cap_decision(decision, location_cap)
 
-        lead_nuance = _build_seniority_nuance(vacancy_text=vacancy, extraction=extraction)
+        lead_nuance, lead_signal = _build_lead_warning(vacancy_text=vacancy)
         is_incomplete = completeness in {"PARTIAL", "MINIMAL"}
 
         if is_incomplete:
@@ -131,6 +131,11 @@ class VacancyAnalyzer:
             lead_nuance=lead_nuance,
             explicit_skill_count=explicit_skill_count,
         )
+        warning_signals = _build_warning_signals(
+            nuances=nuances,
+            lead_signal=lead_signal,
+            location_nuance=location_nuance,
+        )
 
         return VacancyEvaluation(
             decision=decision,
@@ -146,6 +151,7 @@ class VacancyAnalyzer:
             evidence_sufficient=evidence_sufficient,
             recommended_resume=recommended_resume,
             recommended_cover_template=_recommend_cover_template(extraction.role_type, extraction.short_summary),
+            warning_signals=warning_signals,
         )
 
 
@@ -348,18 +354,85 @@ def _candidate_targets_lead_roles(profile: CandidateSkillsProfile) -> bool:
     return any(marker in text for marker in markers)
 
 
-def _build_seniority_nuance(vacancy_text: str, extraction: VacancyExtraction) -> str | None:
-    indicators = ("lead", "tech lead", "principal", "staff", "architect", "head of engineering", "manager")
-    text = " ".join(
-        [
-            vacancy_text.lower(),
-            extraction.role_type.lower(),
-            (extraction.seniority or "").lower(),
-        ]
+def _build_lead_warning(vacancy_text: str) -> tuple[str | None, dict[str, str] | None]:
+    markers = (
+        " lead ",
+        "tech lead",
+        "technical leadership",
+        "architecture ownership",
+        "lead architecture",
+        "architect",
+        "principal",
+        "staff engineer",
+        "mentor",
+        "mentoring",
+        "manage team",
+        "people management",
     )
-    if any(marker in text for marker in indicators):
-        return "Роль уровня Lead — стоит проверить ожидания по управлению и архитектурной ответственности"
-    return None
+    section = "description"
+    for raw_line in vacancy_text.splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if lowered.startswith("title:"):
+            section = "title"
+        elif lowered.startswith("alert context:"):
+            section = "alert_context"
+        elif lowered.startswith("snippet:"):
+            section = "description"
+            continue
+        elif lowered.startswith("source url:"):
+            section = "url"
+        if not line:
+            continue
+        padded = f" {lowered} "
+        if not any(marker in padded for marker in markers):
+            continue
+        return (
+            "Роль уровня Lead — стоит проверить ожидания по управлению и архитектурной ответственности",
+            {"code": "lead_level", "source": section, "evidence": line[:160]},
+        )
+    return None, None
+
+
+def _build_warning_signals(
+    *,
+    nuances: list[str],
+    lead_signal: dict[str, str] | None,
+    location_nuance: str | None,
+) -> list[dict[str, str]]:
+    signals: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    if lead_signal is not None:
+        key = (lead_signal.get("code", ""), lead_signal.get("source", ""), lead_signal.get("evidence", ""))
+        seen.add(key)
+        signals.append(lead_signal)
+    for nuance in nuances:
+        text = " ".join(nuance.strip().split())
+        if not text:
+            continue
+        lowered = text.lower()
+        if "роль уровня lead" in lowered:
+            code = "lead_level"
+            source = lead_signal.get("source", "vacancy_text") if lead_signal else "vacancy_text"
+            evidence = lead_signal.get("evidence", text) if lead_signal else text
+        elif location_nuance and text == location_nuance:
+            code = "location_constraint"
+            source = "vacancy_text"
+            evidence = text
+        elif "неполное" in lowered or "нет полного описания" in lowered:
+            code = "incomplete_description"
+            source = "email_summary"
+            evidence = text
+        else:
+            code = "nuance"
+            source = "heuristic"
+            evidence = text
+        key = (code, source, evidence)
+        if key in seen:
+            continue
+        seen.add(key)
+        signals.append({"code": code, "source": source, "evidence": evidence})
+    return signals
 
 
 def _build_location_nuance(

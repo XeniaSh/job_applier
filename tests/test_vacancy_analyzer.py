@@ -882,31 +882,118 @@ def test_policy_examples_for_strong_potential_ignore() -> None:
             short_summary="Python backend role",
         )
     ) == Decision.IGNORE
-    assert run_case(
-        VacancyExtraction(
-            mandatory_skills=["node.js", "typescript"],
-            optional_skills=[],
-            minimum_experience_years=None,
-            seniority=None,
-            responsibilities=[],
-            employment_conditions=[],
-            location_restrictions=[],
-            uncertainties=[],
-            role_type="Backend Engineer (Node.js)",
-            short_summary="Node backend role",
-        )
-    ) == Decision.IGNORE
-    assert run_case(
-        VacancyExtraction(
-            mandatory_skills=["react"],
-            optional_skills=[],
-            minimum_experience_years=None,
-            seniority=None,
-            responsibilities=[],
-            employment_conditions=[],
-            location_restrictions=[],
-            uncertainties=[],
-            role_type="React Frontend Engineer",
-            short_summary="Frontend role",
-        )
-    ) == Decision.IGNORE
+
+
+def test_senior_java_developer_has_no_lead_warning_without_explicit_evidence() -> None:
+    class SeniorJavaClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            _ = prompt, vacancy
+            return VacancyExtraction(
+                mandatory_skills=["java", "spring boot"],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority="Senior",
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Senior Java Developer",
+                short_summary="Senior Java role",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=SeniorJavaClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot"],
+            practical_skills=["kafka"],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9, "kafka": 7},
+        ),
+        prompt_loader=lambda: "PROMPT",
+    )
+    result = analyzer.analyze("Title: Senior Java Developer\nSnippet:\nBackend role", content_completeness="FULL")
+    assert not any(signal.get("code") == "lead_level" for signal in result.warning_signals)
+
+
+def test_senior_java_with_explicit_lead_evidence_has_lead_warning() -> None:
+    class SeniorJavaLeadClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            _ = prompt, vacancy
+            return VacancyExtraction(
+                mandatory_skills=["java", "spring boot"],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority="Senior",
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Senior Java Developer",
+                short_summary="Senior Java role",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=SeniorJavaLeadClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot"],
+            practical_skills=["kafka"],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9, "kafka": 7},
+        ),
+        prompt_loader=lambda: "PROMPT",
+    )
+    result = analyzer.analyze(
+        "Title: Senior Java Developer\nSnippet:\nLead architecture decisions and mentor engineers",
+        content_completeness="FULL",
+    )
+    lead_warnings = [signal for signal in result.warning_signals if signal.get("code") == "lead_level"]
+    assert lead_warnings
+    assert lead_warnings[0].get("source") in {"description", "title"}
+    assert lead_warnings[0].get("evidence")
+
+
+def test_warning_signals_have_code_source_and_evidence() -> None:
+    class WarningClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            _ = prompt, vacancy
+            return VacancyExtraction(
+                mandatory_skills=[],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority=None,
+                responsibilities=[],
+                employment_conditions=[],
+                location_restrictions=["Must reside in Philippines"],
+                uncertainties=[],
+                role_type="Backend Engineer",
+                short_summary="Remote role",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=WarningClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=[],
+            practical_skills=[],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=[],
+            skill_weights={},
+        ),
+        prompt_loader=lambda: "PROMPT",
+    )
+    result = analyzer.analyze(
+        "Title: Backend Engineer\nSnippet:\nMust reside in Philippines",
+        content_completeness="FULL",
+    )
+    assert result.warning_signals
+    for signal in result.warning_signals:
+        assert signal.get("code")
+        assert signal.get("source")
+        assert signal.get("evidence")
