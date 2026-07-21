@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.storage.seen_jobs import DEFAULT_DB_PATH
@@ -187,7 +187,20 @@ class TelegramDeliveryStorage:
             ).fetchall()
         return [(str(source), str(external_id)) for source, external_id in rows]
 
+    def count_by_status(self, *, chat_id: str, status: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select count(*)
+                from telegram_deliveries
+                where chat_id = ? and status = ?
+                """,
+                (str(chat_id), status),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
     def claim_for_preparation(self, *, source: str, external_id: str, chat_id: str) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -203,8 +216,106 @@ class TelegramDeliveryStorage:
                     STATUS_PREPARE_REQUESTED,
                 ),
             )
+            if cursor.rowcount > 0:
+                conn.execute(
+                    """
+                    insert into application_preparations (
+                        source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url, resume_message_id, cover_letter_message_id
+                    )
+                    values (?, ?, ?, null, null, ?, null, null, null, null, null, null, null)
+                    on conflict(source, external_id) do update set
+                        prepared_at = excluded.prepared_at,
+                        status = excluded.status,
+                        error_message = null
+                    """,
+                    (
+                        source,
+                        external_id,
+                        now,
+                        STATUS_PREPARING,
+                    ),
+                )
             conn.commit()
         return cursor.rowcount > 0
+
+    def recover_abandoned_preparing(
+        self,
+        *,
+        worker_alive: bool,
+        timeout_seconds: int,
+    ) -> list[tuple[str, str]]:
+        safe_timeout = max(1, int(timeout_seconds))
+        now = datetime.now(timezone.utc)
+        recovered: list[tuple[str, str]] = []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select d.source, d.external_id, d.chat_id, coalesce(p.prepared_at, d.sent_at) as marker_ts
+                from telegram_deliveries d
+                left join application_preparations p
+                    on p.source = d.source and p.external_id = d.external_id
+                where d.status = ?
+                """,
+                (STATUS_PREPARING,),
+            ).fetchall()
+            for source, external_id, chat_id, marker_ts in rows:
+                should_recover = not worker_alive
+                if worker_alive:
+                    parsed = _parse_iso_datetime(marker_ts)
+                    if parsed is None:
+                        should_recover = True
+                    else:
+                        should_recover = (now - parsed) >= timedelta(seconds=safe_timeout)
+                if not should_recover:
+                    continue
+                cursor = conn.execute(
+                    """
+                    update telegram_deliveries
+                    set status = ?
+                    where source = ? and external_id = ? and chat_id = ? and status = ?
+                    """,
+                    (
+                        STATUS_PREPARE_REQUESTED,
+                        str(source),
+                        str(external_id),
+                        str(chat_id),
+                        STATUS_PREPARING,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    continue
+                conn.execute(
+                    """
+                    update application_preparations
+                    set status = ?
+                    where source = ? and external_id = ? and status = ?
+                    """,
+                    (
+                        STATUS_PREPARE_REQUESTED,
+                        str(source),
+                        str(external_id),
+                        STATUS_PREPARING,
+                    ),
+                )
+                conn.execute(
+                    """
+                    insert into application_history (
+                        source, external_id, first_seen_at, current_status
+                    )
+                    values (?, ?, ?, ?)
+                    on conflict(source, external_id) do update set
+                        current_status = excluded.current_status
+                    """,
+                    (
+                        str(source),
+                        str(external_id),
+                        now.isoformat(),
+                        STATUS_PREPARE_REQUESTED,
+                    ),
+                )
+                recovered.append((str(source), str(external_id)))
+            conn.commit()
+        return recovered
 
     def upsert_application_history(
         self,
@@ -857,3 +968,19 @@ class TelegramDeliveryStorage:
             if name in existing:
                 continue
             conn.execute(f"alter table application_preparations add column {name} {type_name}")
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)

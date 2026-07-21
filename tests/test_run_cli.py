@@ -556,6 +556,148 @@ def test_run_restarts_cleanly_after_keyboard_interrupt(monkeypatch, tmp_path: Pa
     assert "already running" not in second.output.lower()
 
 
+def test_run_logs_recovered_abandoned_preparing_on_startup(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    _bootstrap_common(monkeypatch)
+    _run_single_cycle(monkeypatch)
+    monkeypatch.setattr(cli_module, "LinkedInEmailCollector", lambda **kwargs: type("L", (), {"SOURCE": "linkedin-email", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})())
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
+
+    class RecoveringStorage:
+        def __init__(self):
+            self.state = {}
+
+        def recover_abandoned_preparing(self, *, worker_alive, timeout_seconds):
+            _ = worker_alive, timeout_seconds
+            return [("linkedin-email", "4441994095")]
+
+        def get_state(self, key):
+            return self.state.get(key)
+
+        def set_state(self, key, value):
+            self.state[key] = value
+
+        def was_sent(self, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return False
+
+        def save_sent(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+        def upsert_application_history(self, **kwargs):
+            _ = kwargs
+
+        def list_by_status(self, *, chat_id, status, limit):
+            _ = chat_id, status, limit
+            return []
+
+    monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", RecoveringStorage)
+
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 0
+    assert "Recovered abandoned preparation linkedin-email:4441994095" in result.output
+    assert "Requeued recovered preparation linkedin-email:4441994095" in result.output
+
+
+def test_recovered_preparation_reconciles_existing_message_without_duplicate(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    settings = cli_module.Settings()
+    edited: list[dict] = []
+
+    class Storage:
+        def recover_abandoned_preparing(self, *, worker_alive, timeout_seconds):
+            _ = worker_alive, timeout_seconds
+            return [("linkedin-email", "100")]
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 77)
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Role", "ACME", "https://www.linkedin.com/jobs/view/100/")
+
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return None
+
+        def get_state(self, key):
+            _ = key
+            return None
+
+        def set_state(self, key, value):
+            _ = key, value
+
+    class Client:
+        def edit_message_text(self, **kwargs):
+            edited.append(kwargs)
+
+    storage = Storage()
+    cli_module._recover_and_requeue_abandoned_preparations(
+        settings=settings,
+        storage=storage,  # type: ignore[arg-type]
+        telegram_client=Client(),  # type: ignore[arg-type]
+    )
+    assert len(edited) == 1
+    assert edited[0]["message_id"] == 77
+    assert "Preparation was interrupted." in edited[0]["text"]
+    assert "Retrying automatically..." in edited[0]["text"]
+
+
+def test_recovered_preparation_edit_failure_does_not_block_requeue(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    settings = cli_module.Settings()
+    captured: list[str] = []
+
+    class Storage:
+        def __init__(self):
+            self.state = {}
+
+        def recover_abandoned_preparing(self, *, worker_alive, timeout_seconds):
+            _ = worker_alive, timeout_seconds
+            return [("linkedin-email", "200")]
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 88)
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Role", "ACME", "https://www.linkedin.com/jobs/view/200/")
+
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return None
+
+        def get_state(self, key):
+            return self.state.get(key)
+
+        def set_state(self, key, value):
+            self.state[key] = value
+
+    class FailingClient:
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+            raise cli_module.TelegramRequestError("fail", method="editMessageText", http_status=400, description="bad")
+
+    monkeypatch.setattr(cli_module, "_run_log", lambda message, component="main": captured.append(f"[{component}] {message}"))
+    storage = Storage()
+    recovered = cli_module._recover_and_requeue_abandoned_preparations(
+        settings=settings,
+        storage=storage,  # type: ignore[arg-type]
+        telegram_client=FailingClient(),  # type: ignore[arg-type]
+    )
+    assert recovered == [("linkedin-email", "200")]
+    queue_raw = storage.get_state("prepare_priority_queue") or ""
+    assert "linkedin-email:200" in queue_raw
+    assert any("Failed to reconcile recovered preparation card linkedin-email:200" in line for line in captured)
+
+
 def test_run_verbose_logs_shutdown_lifecycle(monkeypatch, tmp_path: Path) -> None:
     _set_env(monkeypatch, tmp_path)
     _bootstrap_common(monkeypatch)
@@ -577,6 +719,38 @@ def test_run_verbose_logs_shutdown_lifecycle(monkeypatch, tmp_path: Path) -> Non
     assert "[main] Singleton lock released" in result.output
     assert "[poller] Poller exited" in result.output
     assert "[main] Job Applier stopped." in result.output
+
+
+def test_worker_shutdown_logs_single_pending_preserved_message(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    settings = cli_module.Settings()
+    logs: list[str] = []
+
+    class WorkerStorage:
+        def __init__(self):
+            _ = None
+
+        def count_by_status(self, *, chat_id, status):
+            _ = chat_id, status
+            return 1
+
+    monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", WorkerStorage)
+    monkeypatch.setattr(cli_module, "_run_log", lambda message, component="main": logs.append(f"[{component}] {message}"))
+
+    stop_event = threading.Event()
+    stop_event.set()
+    wake_event = threading.Event()
+    cli_module._prepare_worker_loop(
+        settings=settings,
+        service=object(),  # type: ignore[arg-type]
+        telegram_client=object(),  # type: ignore[arg-type]
+        stop_event=stop_event,
+        wakeup_event=wake_event,
+        verbose=True,
+    )
+    assert any("Pending preparations preserved count=1" in line for line in logs)
+    assert not any("Queue not drained pending>=1" in line for line in logs)
+    assert not any("Prepare queue continue pending=" in line for line in logs)
 
 
 def test_lock_prevents_concurrent_external_run_and_allows_retry_after_release(tmp_path: Path) -> None:

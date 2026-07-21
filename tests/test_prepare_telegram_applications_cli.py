@@ -872,3 +872,96 @@ def test_prepare_stops_after_current_item_when_shutdown_requested(monkeypatch) -
     assert result.prepared_successfully == 1
     assert "Shutdown pending after preparation" in events
     assert "Exiting after current task" in events
+
+
+def test_recovered_preparing_processed_before_fifo_when_no_new_priority(monkeypatch) -> None:
+    _set_env(monkeypatch)
+    settings = cli_module.Settings()
+    order: list[str] = []
+
+    class Service:
+        def prepare(self, source, external_id):
+            _ = source
+            order.append(external_id)
+            return _prepared(external_id, "resumes/java-backend.pdf")
+
+    class Storage:
+        def __init__(self):
+            self.state = {}
+            self.status = {
+                ("linkedin-email", "old-fifo"): "PREPARE_REQUESTED",
+                ("linkedin-email", "recovered"): "PREPARE_REQUESTED",
+            }
+
+        def get_state(self, key):
+            return self.state.get(key)
+
+        def set_state(self, key, value):
+            self.state[key] = value
+
+        def recover_abandoned_preparing(self, *, worker_alive, timeout_seconds):
+            _ = worker_alive, timeout_seconds
+            return [("linkedin-email", "recovered")]
+
+        def list_by_status(self, *, chat_id, status, limit):
+            _ = chat_id, status, limit
+            return [("linkedin-email", "old-fifo"), ("linkedin-email", "recovered")]
+
+        def get_delivery(self, source, external_id):
+            value = self.status.get((source, external_id))
+            if value is None:
+                return None
+            return type("D", (), {"status": value})()
+
+        def claim_for_preparation(self, *, source, external_id, chat_id):
+            _ = chat_id
+            key = (source, external_id)
+            if self.status.get(key) != "PREPARE_REQUESTED":
+                return False
+            self.status[key] = "PREPARING"
+            return True
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 42)
+
+        def update_status(self, *, source, external_id, chat_id, status):
+            _ = chat_id
+            self.status[(source, external_id)] = status
+
+        def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Role", "ACME", "https://www.linkedin.com/jobs/view/1/")
+
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return None
+
+    class Client:
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    storage = Storage()
+    cli_module._recover_and_requeue_abandoned_preparations(
+        settings=settings,
+        storage=storage,  # type: ignore[arg-type]
+        telegram_client=Client(),  # type: ignore[arg-type]
+    )
+    priorities = cli_module._drain_prepare_priorities(storage=storage)  # type: ignore[arg-type]
+    cli_module._prepare_requested_applications(
+        settings=settings,
+        service=Service(),
+        storage=storage,  # type: ignore[arg-type]
+        telegram_client=Client(),  # type: ignore[arg-type]
+        limit=20,
+        dry_run=False,
+        print_dry_run_items=False,
+        priority_vacancy_keys=priorities,
+    )
+    assert order[:2] == ["recovered", "old-fifo"]

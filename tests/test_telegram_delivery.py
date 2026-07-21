@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+import sqlite3
 
 import pytest
 
@@ -218,3 +220,75 @@ def test_resume_cache_crud(tmp_path: Path) -> None:
     assert storage.delete_resume_cache("java-backend") is True
     assert storage.delete_resume_cache("java-backend") is False
     assert storage.get_resume_cache("java-backend") is None
+
+
+def test_recover_abandoned_preparing_when_worker_not_alive(tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    storage.save_sent(source="linkedin-email", external_id="901", chat_id="123", message_id=1)
+    storage.save_sent(source="linkedin-email", external_id="902", chat_id="123", message_id=2)
+    storage.save_sent(source="linkedin-email", external_id="903", chat_id="123", message_id=3)
+    storage.update_status(source="linkedin-email", external_id="901", chat_id="123", status=STATUS_PREPARING)
+    storage.update_status(source="linkedin-email", external_id="902", chat_id="123", status=STATUS_PREPARING)
+    storage.update_status(source="linkedin-email", external_id="903", chat_id="123", status=STATUS_PREPARED)
+    storage.save_preparation(
+        source="linkedin-email",
+        external_id="901",
+        status=STATUS_PREPARING,
+        resume_name=None,
+        language=None,
+        error_message=None,
+    )
+
+    recovered = storage.recover_abandoned_preparing(worker_alive=False, timeout_seconds=600)
+    assert sorted(recovered) == [("linkedin-email", "901"), ("linkedin-email", "902")]
+    assert storage.get_delivery("linkedin-email", "901").status == STATUS_PREPARE_REQUESTED  # type: ignore[union-attr]
+    assert storage.get_delivery("linkedin-email", "902").status == STATUS_PREPARE_REQUESTED  # type: ignore[union-attr]
+    assert storage.get_delivery("linkedin-email", "903").status == STATUS_PREPARED  # type: ignore[union-attr]
+    prep = storage.get_preparation("linkedin-email", "901")
+    assert prep is not None
+    assert prep.status == STATUS_PREPARE_REQUESTED
+    history = {(row.source, row.external_id): row.current_status for row in storage.list_application_history(limit=10)}
+    assert history[("linkedin-email", "901")] == STATUS_PREPARE_REQUESTED
+    assert history[("linkedin-email", "902")] == STATUS_PREPARE_REQUESTED
+
+
+def test_recover_abandoned_preparing_respects_timeout_when_worker_alive(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobs.db"
+    storage = TelegramDeliveryStorage(db_path=db_path)
+    storage.save_sent(source="linkedin-email", external_id="911", chat_id="123", message_id=1)
+    storage.save_sent(source="linkedin-email", external_id="912", chat_id="123", message_id=2)
+    storage.update_status(source="linkedin-email", external_id="911", chat_id="123", status=STATUS_PREPARING)
+    storage.update_status(source="linkedin-email", external_id="912", chat_id="123", status=STATUS_PREPARING)
+    storage.save_preparation(
+        source="linkedin-email",
+        external_id="911",
+        status=STATUS_PREPARING,
+        resume_name=None,
+        language=None,
+        error_message=None,
+    )
+    storage.save_preparation(
+        source="linkedin-email",
+        external_id="912",
+        status=STATUS_PREPARING,
+        resume_name=None,
+        language=None,
+        error_message=None,
+    )
+    old_ts = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+    fresh_ts = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "update application_preparations set prepared_at = ? where source = ? and external_id = ?",
+            (old_ts, "linkedin-email", "911"),
+        )
+        conn.execute(
+            "update application_preparations set prepared_at = ? where source = ? and external_id = ?",
+            (fresh_ts, "linkedin-email", "912"),
+        )
+        conn.commit()
+
+    recovered = storage.recover_abandoned_preparing(worker_alive=True, timeout_seconds=600)
+    assert recovered == [("linkedin-email", "911")]
+    assert storage.get_delivery("linkedin-email", "911").status == STATUS_PREPARE_REQUESTED  # type: ignore[union-attr]
+    assert storage.get_delivery("linkedin-email", "912").status == STATUS_PREPARING  # type: ignore[union-attr]

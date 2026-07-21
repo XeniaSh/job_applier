@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     candidate_grammatical_gender: str = "neutral"
     pipeline_interval_seconds: int = 300
     telegram_poll_interval_seconds: int = 2
+    preparing_recovery_timeout_seconds: int = 600
     greenhouse_boards: Annotated[list[str], NoDecode] = []
 
     @field_validator("greenhouse_boards", mode="before")

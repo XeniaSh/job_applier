@@ -102,6 +102,21 @@ def format_preparation_failed_html(*, title: str, company: str | None) -> str:
     return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
 
 
+def format_preparation_interrupted_html(*, title: str, company: str | None, auto_retry: bool) -> str:
+    lines = [
+        "⚠️ Preparation was interrupted.",
+        "Retrying automatically..." if auto_retry else 'Tap "Prepare application" to retry.',
+        "",
+        _escape(title),
+    ]
+    if company:
+        lines.append(_escape(company))
+    rendered = "\n".join(lines).strip()
+    if len(rendered) <= MAX_MESSAGE_LEN:
+        return rendered
+    return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
+
+
 def format_archived_vacancy_html(*, applied: bool, title: str, company: str | None) -> str:
     header = "✅ Applied" if applied else "❌ Skipped"
     lines = [header, "", _escape(title)]

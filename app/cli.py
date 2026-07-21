@@ -69,7 +69,11 @@ from app.telegram.client import (
     parse_callback_data,
     validate_linkedin_job_url,
 )
-from app.telegram.formatter import format_archived_vacancy_html, format_preparation_failed_html
+from app.telegram.formatter import (
+    format_archived_vacancy_html,
+    format_preparation_failed_html,
+    format_preparation_interrupted_html,
+)
 from app.telegram.models import (
     ApplicationHistoryRecord,
     TelegramDeliveryRecord,
@@ -712,6 +716,11 @@ def run_pipeline(
         runtime_collectors.append(RuntimeCollector(name="greenhouse", collect_fn=greenhouse_collector.collect))
     collectors: list[Collector] = runtime_collectors
     telegram_client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    _recover_and_requeue_abandoned_preparations(
+        settings=settings,
+        storage=deliveries,
+        telegram_client=telegram_client,
+    )
     callback_resume_cache = ResumeCacheService(
         resumes_dir=settings.resumes_dir,
         storage=deliveries,
@@ -3075,6 +3084,96 @@ def _component_log(component: str) -> Callable[[str], None]:
     return lambda message: _run_log(message, component=component)
 
 
+def _recover_and_requeue_abandoned_preparations(
+    *,
+    settings: Settings,
+    storage: TelegramDeliveryStorage,
+    telegram_client: TelegramClient,
+) -> list[tuple[str, str]]:
+    recover_preparing = getattr(storage, "recover_abandoned_preparing", None)
+    if not callable(recover_preparing):
+        return []
+    recovered = recover_preparing(
+        worker_alive=False,
+        timeout_seconds=settings.preparing_recovery_timeout_seconds,
+    )
+    for source, external_id in recovered:
+        _run_log(f"Recovered abandoned preparation {source}:{external_id}", component="main")
+        _reconcile_recovered_preparation_message(
+            storage=storage,
+            client=telegram_client,
+            chat_id=str(settings.telegram_chat_id),
+            source=source,
+            external_id=external_id,
+            auto_retry=True,
+        )
+        _enqueue_prepare_priority(storage=storage, source=source, external_id=external_id)
+        _run_log(f"Requeued recovered preparation {source}:{external_id}", component="main")
+    return recovered
+
+
+def _reconcile_recovered_preparation_message(
+    *,
+    storage: TelegramDeliveryStorage,
+    client: TelegramClient,
+    chat_id: str,
+    source: str,
+    external_id: str,
+    auto_retry: bool,
+) -> None:
+    get_message_ref = getattr(storage, "get_message_ref", None)
+    if not callable(get_message_ref):
+        return
+    message_ref = get_message_ref(source=source, external_id=external_id, chat_id=chat_id)
+    if message_ref is None:
+        return
+    title = "Vacancy"
+    company: str | None = None
+    url: str | None = None
+    get_history = getattr(storage, "get_history_title_company_url", None)
+    if callable(get_history):
+        hist_title, hist_company, hist_url = get_history(source, external_id)
+        if hist_title:
+            title = hist_title
+        company = hist_company
+        url = hist_url
+    get_preparation = getattr(storage, "get_preparation", None)
+    if callable(get_preparation):
+        prep = get_preparation(source, external_id)
+        if prep is not None:
+            prep_title = getattr(prep, "vacancy_title", None)
+            prep_company = getattr(prep, "vacancy_company", None)
+            prep_url = getattr(prep, "vacancy_url", None)
+            if isinstance(prep_title, str) and prep_title.strip():
+                title = prep_title.strip()
+            if isinstance(prep_company, str) and prep_company.strip():
+                company = prep_company.strip()
+            if isinstance(prep_url, str) and prep_url.strip():
+                url = prep_url.strip()
+    buttons = None
+    if auto_retry and url:
+        try:
+            buttons = build_loading_buttons(url)
+        except ValueError:
+            buttons = None
+    elif not auto_retry and url:
+        try:
+            buttons = build_prepare_failed_buttons(source=source, external_id=external_id, url=url)
+        except ValueError:
+            buttons = None
+    text = format_preparation_interrupted_html(title=title, company=company, auto_retry=auto_retry)
+    try:
+        client.edit_message_text(
+            chat_id=message_ref[0],
+            message_id=message_ref[1],
+            text=text,
+            buttons=buttons,
+        )
+    except (TelegramRequestError, TelegramMessageNotModifiedError, ValueError) as exc:
+        details = _format_telegram_error(exc, secrets=[])
+        _run_log(f"Failed to reconcile recovered preparation card {source}:{external_id}: {details}", component="main")
+
+
 def _enqueue_prepare_priority(*, storage: TelegramDeliveryStorage, source: str, external_id: str) -> None:
     get_state = getattr(storage, "get_state", None)
     set_state = getattr(storage, "set_state", None)
@@ -3146,11 +3245,6 @@ def _prepare_worker_loop(
                 priority_vacancy_keys=priority_keys,
                 stop_requested=stop_event.is_set,
             )
-            if priority_keys and verbose:
-                _run_log(
-                    f"Prepare queue continue pending={max(0, result.queue_items - len(priority_keys))}",
-                    component="worker",
-                )
             if result.generated_packages == 0 and result.errors_count == 0:
                 wakeup_event.wait(timeout=0.5)
                 wakeup_event.clear()
@@ -3161,15 +3255,26 @@ def _prepare_worker_loop(
     if verbose:
         _run_log("Worker shutdown requested", component="worker")
         try:
-            pending = worker_storage.list_by_status(
-                chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
-                status=STATUS_PREPARE_REQUESTED,
-                limit=1,
-            )
-            if pending:
-                _run_log("Queue not drained pending>=1", component="worker")
+            pending_count = 0
+            count_by_status = getattr(worker_storage, "count_by_status", None)
+            if callable(count_by_status):
+                pending_count = int(
+                    count_by_status(
+                        chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
+                        status=STATUS_PREPARE_REQUESTED,
+                    )
+                )
             else:
+                pending = worker_storage.list_by_status(
+                    chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
+                    status=STATUS_PREPARE_REQUESTED,
+                    limit=1000,
+                )
+                pending_count = len(pending)
+            if pending_count == 0:
                 _run_log("Queue drained", component="worker")
+            else:
+                _run_log(f"Pending preparations preserved count={pending_count}", component="worker")
         except Exception as exc:  # noqa: BLE001
             _run_log(f"Queue drain check failed: {exc}", component="worker")
         _run_log("Worker exiting", component="worker")
