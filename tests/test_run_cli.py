@@ -1,5 +1,7 @@
 from pathlib import Path
+import inspect
 import re
+import threading
 
 from typer.testing import CliRunner
 
@@ -489,3 +491,79 @@ def test_run_log_uses_shared_timestamp_formatter(monkeypatch, capsys) -> None:
     cli_module._run_log("Prepare start linkedin-email:1")
     captured = capsys.readouterr()
     assert captured.out.strip() == "[07:12:08.142] Prepare start linkedin-email:1"
+
+
+def test_run_uses_prepare_worker_thread_and_no_process_spawn_path(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    _bootstrap_common(monkeypatch)
+    monkeypatch.setattr(cli_module, "LinkedInEmailCollector", lambda **kwargs: type("L", (), {"SOURCE": "linkedin-email", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})())
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
+    monkeypatch.setattr(cli_module, "_poll_telegram_actions_once", lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    observed: dict[str, str] = {}
+
+    def fake_prepare_worker_loop(**kwargs) -> None:
+        observed["thread_name"] = threading.current_thread().name
+        stop_event = kwargs["stop_event"]
+        if hasattr(stop_event, "set"):
+            stop_event.set()
+
+    monkeypatch.setattr(cli_module, "_prepare_worker_loop", fake_prepare_worker_loop)
+
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 0
+    assert observed.get("thread_name") == "prepare-worker"
+
+    run_source = inspect.getsource(cli_module.run_pipeline)
+    worker_source = inspect.getsource(cli_module._prepare_worker_loop)
+    forbidden_markers = (
+        "subprocess",
+        "multiprocessing",
+        "ProcessPoolExecutor",
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+        "os.spawn",
+        "os.exec",
+    )
+    for marker in forbidden_markers:
+        assert marker not in run_source
+        assert marker not in worker_source
+
+
+def test_run_restarts_cleanly_after_keyboard_interrupt(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    _bootstrap_common(monkeypatch)
+    _run_single_cycle(monkeypatch)
+    monkeypatch.setattr(cli_module, "LinkedInEmailCollector", lambda **kwargs: type("L", (), {"SOURCE": "linkedin-email", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
+    monkeypatch.setattr(cli_module, "SeenJobsStorage", lambda: type("S", (), {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None})())
+    monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
+
+    first = CliRunner().invoke(cli_module.app, ["run"])
+    second = CliRunner().invoke(cli_module.app, ["run"])
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert "already running" not in first.output.lower()
+    assert "already running" not in second.output.lower()
+
+
+def test_lock_prevents_concurrent_external_run_and_allows_retry_after_release(tmp_path: Path) -> None:
+    lock_path = tmp_path / "data" / "job_applier.lock"
+    first = cli_module._JobApplierLock(lock_path)
+    second = cli_module._JobApplierLock(lock_path)
+    assert first.acquire() is True
+    assert second.acquire() is False
+    first.release()
+    assert second.acquire() is True
+    second.release()
+
+
+def test_lock_recovers_from_stale_pid_file(tmp_path: Path) -> None:
+    lock_path = tmp_path / "data" / "job_applier.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("999999", encoding="utf-8")
+    lock = cli_module._JobApplierLock(lock_path)
+    assert lock.acquire() is True
+    lock.release()

@@ -730,43 +730,19 @@ def run_pipeline(
     offset = int(offset_raw) if offset_raw and offset_raw.isdigit() else None
     prepare_stop_event = threading.Event()
     prepare_wakeup_event = threading.Event()
-
-    def _prepare_worker() -> None:
-        worker_storage = TelegramDeliveryStorage()
-        worker_resume_cache = ResumeCacheService(
-            resumes_dir=settings.resumes_dir,
-            storage=worker_storage,
-            telegram_client=telegram_client,
-        )
-        while not prepare_stop_event.is_set():
-            try:
-                priority_keys = _drain_prepare_priorities(storage=worker_storage)
-                if priority_keys and verbose:
-                    for source, external_id in priority_keys:
-                        _run_log(f"Prepare priority requested {source}:{external_id}")
-                result = _prepare_requested_applications(
-                    settings=settings,
-                    service=preparation_service,
-                    storage=worker_storage,
-                    telegram_client=telegram_client,
-                    limit=20,
-                    dry_run=False,
-                    print_dry_run_items=False,
-                    resume_cache_service=worker_resume_cache,
-                    timing_logger=_run_log if verbose else None,
-                    priority_vacancy_keys=priority_keys,
-                )
-                if priority_keys and verbose:
-                    _run_log(f"Prepare queue continue pending={max(0, result.queue_items - len(priority_keys))}")
-                if result.generated_packages == 0 and result.errors_count == 0:
-                    prepare_wakeup_event.wait(timeout=0.5)
-                    prepare_wakeup_event.clear()
-            except Exception as exc:  # noqa: BLE001
-                _run_log(f"Prepare worker error: {exc}")
-                prepare_wakeup_event.wait(timeout=0.5)
-                prepare_wakeup_event.clear()
-
-    prepare_thread = threading.Thread(target=_prepare_worker, name="prepare-worker", daemon=True)
+    prepare_thread = threading.Thread(
+        target=_prepare_worker_loop,
+        kwargs={
+            "settings": settings,
+            "service": preparation_service,
+            "telegram_client": telegram_client,
+            "stop_event": prepare_stop_event,
+            "wakeup_event": prepare_wakeup_event,
+            "verbose": verbose,
+        },
+        name="prepare-worker",
+        daemon=True,
+    )
     prepare_thread.start()
 
     typer.echo("Job Applier started.")
@@ -2982,12 +2958,16 @@ class _JobApplierLock:
 
     def acquire(self) -> bool:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self._fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(self._fd, str(os.getpid()).encode("utf-8"))
+        if self._try_acquire_new_lock():
             return True
-        except FileExistsError:
+        stale_pid = self._read_stored_pid()
+        if stale_pid is None or self._pid_is_running(stale_pid):
             return False
+        try:
+            self._path.unlink(missing_ok=True)
+        except OSError:
+            return False
+        return self._try_acquire_new_lock()
 
     def release(self) -> None:
         if self._fd is not None:
@@ -3000,6 +2980,32 @@ class _JobApplierLock:
             self._path.unlink(missing_ok=True)
         except OSError:
             _ = None
+
+    def _try_acquire_new_lock(self) -> bool:
+        try:
+            self._fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(self._fd, str(os.getpid()).encode("utf-8"))
+            return True
+        except FileExistsError:
+            return False
+
+    def _read_stored_pid(self) -> int | None:
+        try:
+            raw = self._path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not raw.isdigit():
+            return None
+        return int(raw)
+
+    def _pid_is_running(self, pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
 
 
 def _run_log(message: str) -> None:
@@ -3044,6 +3050,50 @@ def _drain_prepare_priorities(*, storage: TelegramDeliveryStorage) -> list[tuple
             pairs.append((source, external_id))
     set_state("prepare_priority_queue", "")
     return pairs
+
+
+def _prepare_worker_loop(
+    *,
+    settings: Settings,
+    service: PreparationService,
+    telegram_client: TelegramClient,
+    stop_event: threading.Event,
+    wakeup_event: threading.Event,
+    verbose: bool,
+) -> None:
+    worker_storage = TelegramDeliveryStorage()
+    worker_resume_cache = ResumeCacheService(
+        resumes_dir=settings.resumes_dir,
+        storage=worker_storage,
+        telegram_client=telegram_client,
+    )
+    while not stop_event.is_set():
+        try:
+            priority_keys = _drain_prepare_priorities(storage=worker_storage)
+            if priority_keys and verbose:
+                for source, external_id in priority_keys:
+                    _run_log(f"Prepare priority requested {source}:{external_id}")
+            result = _prepare_requested_applications(
+                settings=settings,
+                service=service,
+                storage=worker_storage,
+                telegram_client=telegram_client,
+                limit=20,
+                dry_run=False,
+                print_dry_run_items=False,
+                resume_cache_service=worker_resume_cache,
+                timing_logger=_run_log if verbose else None,
+                priority_vacancy_keys=priority_keys,
+            )
+            if priority_keys and verbose:
+                _run_log(f"Prepare queue continue pending={max(0, result.queue_items - len(priority_keys))}")
+            if result.generated_packages == 0 and result.errors_count == 0:
+                wakeup_event.wait(timeout=0.5)
+                wakeup_event.clear()
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Prepare worker error: {exc}")
+            wakeup_event.wait(timeout=0.5)
+            wakeup_event.clear()
 
 
 def _poll_telegram_actions_once(
