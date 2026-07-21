@@ -746,6 +746,8 @@ def run_pipeline(
         name="prepare-worker",
         daemon=True,
     )
+    if verbose:
+        _run_log(f"Worker thread daemon={prepare_thread.daemon}", component="main")
     prepare_thread.start()
 
     _run_log("Job Applier started.", component="main")
@@ -919,6 +921,7 @@ def run_pipeline(
     except KeyboardInterrupt:
         _run_log("Shutdown requested (KeyboardInterrupt)", component="main")
     finally:
+        _run_log("Shutdown finally block entered", component="main")
         _run_log("Stopping Telegram poller", component="main")
         _run_log("Poller exiting", component="poller")
         _run_log("Signaling prepare worker", component="main")
@@ -929,10 +932,15 @@ def run_pipeline(
             _run_log(f"Failed signaling prepare worker: {exc}", component="main")
         _run_log("Waiting for worker thread", component="main")
         try:
+            _run_log("Before worker.join()", component="main")
             prepare_thread.join()
+            _run_log("After worker.join()", component="main")
             _run_log("Worker joined", component="main")
         except Exception as exc:  # noqa: BLE001
             _run_log(f"Worker join failed: {exc}", component="main")
+        except BaseException as exc:  # noqa: BLE001
+            _run_log(f"BaseException during worker join: {type(exc).__name__}: {exc}", component="main")
+            raise
         _run_log("Releasing singleton lock", component="main")
         try:
             lock.release()
@@ -941,6 +949,7 @@ def run_pipeline(
             _run_log(f"Singleton lock release failed: {exc}", component="main")
         _run_log("Poller exited", component="poller")
         _run_log("Job Applier stopped.", component="main")
+        _run_log("Process exiting run pipeline", component="main")
 
 
 @app.command("poll-telegram-actions")
@@ -3143,11 +3152,7 @@ def _prepare_worker_loop(
                     component="worker",
                 )
             if result.generated_packages == 0 and result.errors_count == 0:
-                if verbose:
-                    _run_log("Worker waiting", component="worker")
                 wakeup_event.wait(timeout=0.5)
-                if verbose:
-                    _run_log("Worker woke up", component="worker")
                 wakeup_event.clear()
         except Exception as exc:  # noqa: BLE001
             _run_log(f"Prepare worker error: {exc}", component="worker")
@@ -3266,19 +3271,34 @@ def _prepare_requested_applications(
             break
         if timing_logger is not None:
             timing_logger(f"Worker preparing {source}:{external_id}")
-        one = _prepare_one_application(
-            source=source,
-            external_id=external_id,
-            settings=settings,
-            service=service,
-            storage=storage,
-            telegram_client=telegram_client,
-            dry_run=dry_run,
-            print_dry_run_items=print_dry_run_items,
-            timing_logger=timing_logger,
-        )
-        if timing_logger is not None:
-            timing_logger(f"Worker preparation finished {source}:{external_id}")
+        one = _PrepareOneResult()
+        try:
+            if timing_logger is not None:
+                timing_logger(f"Worker enter prepare {source}:{external_id}")
+            one = _prepare_one_application(
+                source=source,
+                external_id=external_id,
+                settings=settings,
+                service=service,
+                storage=storage,
+                telegram_client=telegram_client,
+                dry_run=dry_run,
+                print_dry_run_items=print_dry_run_items,
+                timing_logger=timing_logger,
+            )
+            if timing_logger is not None:
+                timing_logger(f"Worker leave prepare {source}:{external_id}")
+        except Exception as exc:  # noqa: BLE001
+            if timing_logger is not None:
+                timing_logger(f"Worker prepare exception {source}:{external_id} {type(exc).__name__}: {exc}")
+            raise
+        except BaseException as exc:  # noqa: BLE001
+            if timing_logger is not None:
+                timing_logger(f"Worker prepare base-exception {source}:{external_id} {type(exc).__name__}: {exc}")
+            raise
+        finally:
+            if timing_logger is not None:
+                timing_logger(f"Worker prepare finally {source}:{external_id}")
         generated_packages += one.generated_packages
         prepared_successfully += one.prepared_successfully
         telegram_sent += one.telegram_sent

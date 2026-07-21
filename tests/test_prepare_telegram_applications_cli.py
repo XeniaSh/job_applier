@@ -870,6 +870,5 @@ def test_prepare_stops_after_current_item_when_shutdown_requested(monkeypatch) -
 
     assert generation_order == ["1"]
     assert result.prepared_successfully == 1
-    assert "Worker preparation finished linkedin-email:1" in events
     assert "Shutdown pending after preparation" in events
     assert "Exiting after current task" in events
