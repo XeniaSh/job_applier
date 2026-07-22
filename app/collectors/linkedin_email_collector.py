@@ -247,7 +247,7 @@ class LinkedInEmailCollector(VacancyCollector):
                     company=vacancy.company,
                     location=vacancy.location,
                     employment=None,
-                    description=vacancy.to_analysis_text(),
+                    description=vacancy.description_for_normalized(),
                     url=vacancy.url,
                     published_at=vacancy.received_at.isoformat() if vacancy.received_at else None,
                     snippet=vacancy.snippet,
@@ -255,6 +255,7 @@ class LinkedInEmailCollector(VacancyCollector):
                     alert_query=vacancy.alert_query,
                     snippet_source=vacancy.snippet_source,
                     raw_text_preview=self._last_visible_preview_by_external_id.get(vacancy.external_id),
+                    content_completeness=vacancy.content_completeness.value,
                 )
             )
         return normalized

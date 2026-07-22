@@ -7,6 +7,23 @@ from app.telegram.models import TelegramVacancyCard
 MAX_MESSAGE_LEN = 3500
 
 
+def card_display_sections(evaluation) -> tuple[list[str], list[str]]:
+    """Split evaluation into Telegram warnings vs informational metadata."""
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for signal in getattr(evaluation, "warning_signals", []) or []:
+        evidence = " ".join(str(signal.get("evidence", "")).split())
+        if not evidence:
+            continue
+        key = evidence.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        warnings.append(evidence)
+    info_items = list(getattr(evaluation, "info_items", []) or [])
+    return warnings, info_items
+
+
 def format_telegram_card_html(card: TelegramVacancyCard) -> str:
     decision = _escape(card.decision)
     title = _escape(card.title)
@@ -23,8 +40,15 @@ def format_telegram_card_html(card: TelegramVacancyCard) -> str:
 
     for gap in _clean_limited(card.gaps, limit=2):
         lines.append(f"— {_escape(gap)}")
-    for nuance in _clean_limited(card.nuances, limit=3):
-        lines.append(f"⚠️ {_escape(nuance)}")
+
+    warnings = _clean_limited(card.warnings or _legacy_warning_nuances(card.nuances), limit=3)
+    info_items = _clean_limited(card.info_items, limit=5)
+    for warning in warnings:
+        lines.append(f"⚠️ {_escape(warning)}")
+    if warnings and info_items:
+        lines.append("")
+    for info in info_items:
+        lines.append(_format_info_item(info))
 
     if lines[-1] != "":
         lines.append("")
@@ -34,6 +58,28 @@ def format_telegram_card_html(card: TelegramVacancyCard) -> str:
     if len(rendered) <= MAX_MESSAGE_LEN:
         return rendered
     return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
+
+
+def _legacy_warning_nuances(nuances: list[str]) -> list[str]:
+    """Fallback when older callers only populate nuances."""
+    result: list[str] = []
+    for nuance in nuances:
+        lowered = nuance.lower()
+        if any(token in lowered for token in ("hybrid", "on-site", "onsite", "work mode:", "salary:")):
+            continue
+        result.append(nuance)
+    return result
+
+
+def _format_info_item(item: str) -> str:
+    if ":" not in item:
+        return _escape(item)
+    label, value = item.split(":", 1)
+    label = label.strip()
+    value = value.strip()
+    if not label or not value:
+        return _escape(item)
+    return f"{_escape(label)}:\n{_escape(value)}"
 
 
 def format_prepared_application_html(

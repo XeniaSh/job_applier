@@ -144,7 +144,7 @@ def test_gaps_are_sorted_by_weight_descending() -> None:
     assert result.gaps == ["spring boot", "kafka", "postgresql"]
 
 
-def test_minimal_content_cannot_be_strong_match() -> None:
+def test_minimal_java_title_can_be_strong_match() -> None:
     analyzer = VacancyAnalyzer(
         llm_client=FakeLLMClient(),
         skills_loader=lambda: CandidateSkillsProfile(
@@ -161,10 +161,9 @@ def test_minimal_content_cannot_be_strong_match() -> None:
 
     result = analyzer.analyze("Title: Java Backend Engineer", content_completeness="MINIMAL")
 
-    assert result.decision in {Decision.POTENTIAL_MATCH, Decision.IGNORE}
-    assert result.match_percentage is None
-    assert result.evidence_sufficient is False
+    assert result.decision == Decision.STRONG_MATCH
     assert "описание вакансии неполное" in " ".join(result.nuances)
+    assert "Explicit Java stack is already present in the trusted title." in result.decision_reason
 
 
 def test_incomplete_content_does_not_create_false_missing_skill_gaps() -> None:
@@ -201,7 +200,7 @@ def test_incomplete_content_does_not_create_false_missing_skill_gaps() -> None:
     assert result.gaps == []
 
 
-def test_partial_with_two_skills_cannot_be_strong_and_score_hidden() -> None:
+def test_partial_with_two_skills_and_java_title_is_strong() -> None:
     class TwoSkillsClient(FakeLLMClient):
         def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
             return VacancyExtraction(
@@ -232,10 +231,9 @@ def test_partial_with_two_skills_cannot_be_strong_and_score_hidden() -> None:
     )
 
     result = analyzer.analyze("Title: Java Backend Engineer", content_completeness="PARTIAL")
-    assert result.decision == Decision.POTENTIAL_MATCH
-    assert result.match_percentage is None
+    assert result.decision == Decision.STRONG_MATCH
     assert result.explicit_skill_count == 2
-    assert result.evidence_sufficient is False
+    assert result.evidence_sufficient is True
 
 
 def test_partial_with_four_skills_may_be_strong() -> None:
@@ -572,7 +570,7 @@ def test_partial_jvm_explicit_title_uses_existing_jvm_handling() -> None:
         prompt_loader=lambda: "PROMPT_CONTENT",
     )
     result = analyzer.analyze("Title: Senior Java Engineer", content_completeness="PARTIAL")
-    assert result.decision in {Decision.STRONG_MATCH, Decision.POTENTIAL_MATCH}
+    assert result.decision == Decision.STRONG_MATCH
     assert "нет полного описания и стека" not in " ".join(result.nuances)
 
 

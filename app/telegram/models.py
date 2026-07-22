@@ -22,6 +22,8 @@ class TelegramVacancyCard:
     match_percentage: float | None
     gaps: list[str] = field(default_factory=list)
     nuances: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    info_items: list[str] = field(default_factory=list)
     recommended_resume: str = "java-backend"
     content_completeness: str = "PARTIAL"
 

@@ -54,9 +54,17 @@ class VacancyAnalyzer:
         recommended_resume = _recommend_resume(extraction.role_type)
 
         completeness = content_completeness.upper().strip()
-        title_text = _extract_title_from_vacancy_text(vacancy) or extraction.role_type
+        title_from_text = _extract_title_from_vacancy_text(vacancy)
+        title_text = title_from_text or extraction.role_type
         alert_query = _extract_alert_query(vacancy)
-        incomplete_title_class = _classify_incomplete_title(title=title_text, alert_query=alert_query)
+        incomplete_title_class = _classify_incomplete_title(
+            title=title_from_text or title_text,
+            alert_query=alert_query,
+        )
+        # Only trust explicit Title: line for seniority upgrades on incomplete cards.
+        title_allows_strong = (
+            incomplete_title_class == "jvm_explicit_backend" and title_from_text is not None
+        )
         has_explicit_jvm_evidence = _has_explicit_jvm_evidence(extraction, title_text=title_text)
         location_nuance, location_cap = _build_location_nuance(
             location_values=comparison.location_restrictions,
@@ -68,6 +76,11 @@ class VacancyAnalyzer:
 
         lead_nuance, lead_signal = _build_lead_warning(vacancy_text=vacancy)
         is_incomplete = completeness in {"PARTIAL", "MINIMAL"}
+        employment_remaining, info_items = _extract_info_items(
+            employment_conditions=comparison.employment_conditions,
+            vacancy_text=vacancy,
+            uncertainties=comparison.uncertainties,
+        )
 
         if is_incomplete:
             incomplete_description_nuance = "Описание вакансии неполное — требуется открыть LinkedIn"
@@ -91,14 +104,22 @@ class VacancyAnalyzer:
                 limit=3,
             )
             gaps = []
-            evidence_sufficient = completeness == "PARTIAL" and explicit_skill_count >= 3
+            evidence_sufficient = completeness == "PARTIAL" and (
+                explicit_skill_count >= 3 or title_allows_strong
+            )
 
             if completeness == "MINIMAL":
-                decision = _cap_decision(decision, Decision.POTENTIAL_MATCH)
-                match_percentage = None
-                evidence_sufficient = False
+                if title_allows_strong and decision != Decision.IGNORE:
+                    decision = Decision.STRONG_MATCH
+                    evidence_sufficient = True
+                else:
+                    decision = _cap_decision(decision, Decision.POTENTIAL_MATCH)
+                    match_percentage = None
+                    evidence_sufficient = False
             elif completeness == "PARTIAL":
-                if explicit_skill_count < 3:
+                if title_allows_strong and decision != Decision.IGNORE:
+                    decision = Decision.STRONG_MATCH
+                elif explicit_skill_count < 3:
                     decision = _cap_decision(decision, Decision.POTENTIAL_MATCH)
                     match_percentage = None
                 elif decision == Decision.STRONG_MATCH and not _is_partial_strong_allowed(
@@ -121,13 +142,15 @@ class VacancyAnalyzer:
         else:
             nuances = _clean_and_limit(
                 [
-                    *comparison.employment_conditions,
+                    *employment_remaining,
                     *( [location_nuance] if location_nuance else []),
                     *comparison.uncertainties,
                     *( [lead_nuance] if lead_nuance else []),
                 ],
                 limit=3,
             )
+            # Remove work-mode / salary lines that were already classified as info.
+            nuances = [item for item in nuances if not _is_info_metadata_text(item)]
         decision_reason = _build_decision_reason(
             decision=decision,
             extraction=extraction,
@@ -137,6 +160,14 @@ class VacancyAnalyzer:
             explicit_skill_count=explicit_skill_count,
             title_text=title_text,
         )
+        if (
+            is_incomplete
+            and incomplete_title_class == "jvm_explicit_backend"
+            and decision == Decision.STRONG_MATCH
+        ):
+            decision_reason = (
+                "Explicit Java stack is already present in the trusted title."
+            )
         warning_signals = _build_warning_signals(
             nuances=nuances,
             lead_signal=lead_signal,
@@ -150,6 +181,7 @@ class VacancyAnalyzer:
             matched_points=_clean_and_limit(comparison.matched_mandatory, limit=5),
             gaps=gaps,
             nuances=nuances,
+            info_items=_dedupe_preserve_case(info_items, limit=5),
             match_percentage=match_percentage,
             matched_score=matched_score,
             total_possible_score=total_possible_score,
@@ -265,6 +297,23 @@ def _clean_and_limit(values: list[str], limit: int) -> list[str]:
     return cleaned
 
 
+def _dedupe_preserve_case(values: list[str], limit: int) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        normalized = " ".join(item.strip().split())
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(normalized)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
 def _select_gaps_for_output(
     missing_mandatory: list[str],
     mandatory_missing_weights: dict[str, int],
@@ -316,8 +365,11 @@ def _recommend_cover_template(role_type: str, summary: str) -> RecommendedCoverT
 
 def _is_partial_strong_allowed(vacancy_text: str, extraction: VacancyExtraction) -> bool:
     text = vacancy_text.lower()
-    has_language_core = any(token in text for token in ("java", "kotlin", "jvm"))
-    has_backend_context = any(token in text for token in ("backend", "back end", "spring"))
+    has_language_core = any(token in text for token in ("java", "kotlin", "jvm", "spring"))
+    has_backend_context = any(
+        token in text
+        for token in ("backend", "back end", "back-end", "spring", "api", "engineer", "developer")
+    )
     if not (has_language_core and has_backend_context):
         return False
 
@@ -418,6 +470,8 @@ def _build_warning_signals(
         text = " ".join(nuance.strip().split())
         if not text:
             continue
+        if _is_info_metadata_text(text):
+            continue
         lowered = text.lower()
         if "роль уровня lead" in lowered:
             code = "lead_level"
@@ -431,16 +485,123 @@ def _build_warning_signals(
             code = "incomplete_description"
             source = "email_summary"
             evidence = text
-        else:
+        elif _is_warning_worthy_text(text):
             code = "nuance"
             source = "heuristic"
             evidence = text
+        else:
+            continue
         key = (code, source, evidence)
         if key in seen:
             continue
         seen.add(key)
         signals.append({"code": code, "source": source, "evidence": evidence})
     return signals
+
+
+def _extract_info_items(
+    *,
+    employment_conditions: list[str],
+    vacancy_text: str,
+    uncertainties: list[str],
+) -> tuple[list[str], list[str]]:
+    remaining: list[str] = []
+    info_items: list[str] = []
+    seen_info: set[str] = set()
+
+    def add_info(label: str, value: str) -> None:
+        item = f"{label}: {value}"
+        key = item.lower()
+        if key in seen_info:
+            return
+        seen_info.add(key)
+        info_items.append(item)
+
+    for raw in employment_conditions:
+        text = " ".join(raw.strip().split())
+        if not text:
+            continue
+        lowered = text.lower()
+        work_mode = _detect_work_mode(lowered)
+        if work_mode == "hybrid":
+            add_info("Work mode", "Hybrid")
+            continue
+        if work_mode == "on-site":
+            add_info("Constraints", "On-site")
+            continue
+        if work_mode == "remote":
+            add_info("Work mode", "Remote")
+            continue
+        salary = _detect_salary(text)
+        if salary is not None:
+            add_info("Salary", salary)
+            continue
+        remaining.append(text)
+
+    combined = " ".join([vacancy_text, *uncertainties]).lower()
+    if not any(item.lower().startswith("work mode:") for item in info_items):
+        mode = _detect_work_mode(combined)
+        if mode == "hybrid":
+            add_info("Work mode", "Hybrid")
+        elif mode == "on-site":
+            add_info("Constraints", "On-site")
+        elif mode == "remote":
+            add_info("Work mode", "Remote")
+    if not any(item.lower().startswith("salary:") for item in info_items):
+        salary = _detect_salary(vacancy_text)
+        if salary is not None:
+            add_info("Salary", salary)
+
+    return remaining, info_items
+
+
+def _detect_work_mode(text: str) -> str | None:
+    if "hybrid" in text:
+        return "hybrid"
+    if any(token in text for token in ("on-site", "onsite", "on site", "in-office", "in office")):
+        return "on-site"
+    if any(token in text for token in ("remote", "удален")):
+        return "remote"
+    return None
+
+
+def _detect_salary(text: str) -> str | None:
+    lowered = text.lower()
+    if "salary" in lowered or "compensation" in lowered or "₱" in text or "php " in lowered:
+        cleaned = " ".join(text.strip().split())
+        if cleaned.lower().startswith("salary:"):
+            return cleaned.split(":", 1)[1].strip() or cleaned
+        return cleaned
+    return None
+
+
+def _is_info_metadata_text(text: str) -> bool:
+    lowered = text.lower()
+    if lowered.startswith("work mode:") or lowered.startswith("constraints:") or lowered.startswith("salary:"):
+        return True
+    return _detect_work_mode(lowered) is not None and not _is_warning_worthy_text(text)
+
+
+def _is_warning_worthy_text(text: str) -> bool:
+    lowered = text.lower()
+    warning_markers = (
+        "sponsorship",
+        "visa",
+        "relocation",
+        "relocate",
+        "lead",
+        "архитектур",
+        "управлен",
+        "contract",
+        "контракт",
+        "филиппин",
+        "philippines",
+        "неполное",
+        "нет полного описания",
+        "unusual",
+        "must reside",
+    )
+    return any(marker in lowered for marker in warning_markers)
 
 
 def _build_location_nuance(

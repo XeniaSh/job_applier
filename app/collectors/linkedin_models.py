@@ -16,6 +16,9 @@ class ParserSource(str, Enum):
     FALLBACK_URL = "FALLBACK_URL"
 
 
+_DESCRIPTION_UNAVAILABLE = "<not available in LinkedIn email>"
+
+
 @dataclass(frozen=True)
 class LinkedInEmailVacancy:
     external_id: str
@@ -38,11 +41,14 @@ class LinkedInEmailVacancy:
             lines.append(f"Company: {self.company}")
         if self.location:
             lines.append(f"Location: {self.location}")
-        if self.snippet:
-            lines.append("Snippet:")
-            lines.append(self.snippet)
+        lines.append("Description:")
+        description = " ".join((self.snippet or "").split())
+        lines.append(description if description else _DESCRIPTION_UNAVAILABLE)
         if self.alert_query:
             lines.append(f"Alert query: {self.alert_query}")
         lines.append(f"Source URL: {self.url}")
         lines.append(f"Content completeness: {self.content_completeness.value}")
         return "\n".join(lines)
+
+    def description_for_normalized(self) -> str:
+        return " ".join((self.snippet or "").split())

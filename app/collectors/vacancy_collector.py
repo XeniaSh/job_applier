@@ -22,6 +22,7 @@ class NormalizedVacancy:
     alert_query: str | None = None
     snippet_source: str | None = None
     raw_text_preview: str | None = None
+    content_completeness: str | None = None
 
     def to_analysis_text(self) -> str:
         lines = [f"Title: {self.title}"]
@@ -34,8 +35,13 @@ class NormalizedVacancy:
         if self.published_at:
             lines.append(f"Published at: {self.published_at}")
         lines.append("Description:")
-        lines.append(self.description.strip())
+        description = self.description.strip()
+        lines.append(description if description else "<not available in LinkedIn email>")
+        if self.alert_query:
+            lines.append(f"Alert query: {self.alert_query}")
         lines.append(f"Source URL: {self.url}")
+        if self.content_completeness:
+            lines.append(f"Content completeness: {self.content_completeness}")
         return "\n".join(lines).strip()
 
     def dedupe_key(self) -> tuple[str, str, str] | str:

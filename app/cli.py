@@ -70,6 +70,7 @@ from app.telegram.client import (
     validate_linkedin_job_url,
 )
 from app.telegram.formatter import (
+    card_display_sections,
     format_archived_vacancy_html,
     format_preparation_failed_html,
     format_preparation_interrupted_html,
@@ -531,6 +532,9 @@ def send_linkedin_telegram(
             continue
 
         try:
+            from app.telegram.formatter import format_telegram_card_html
+
+            warnings, info_items = card_display_sections(item.evaluation)
             card = TelegramVacancyCard(
                 source=map_source_to_code("linkedin-email"),
                 external_id=item.external_id,
@@ -542,11 +546,11 @@ def send_linkedin_telegram(
                 match_percentage=item.evaluation.match_percentage,
                 gaps=item.evaluation.gaps,
                 nuances=item.evaluation.nuances,
+                warnings=warnings,
+                info_items=info_items,
                 recommended_resume=item.evaluation.recommended_resume.value,
                 content_completeness=item.content_completeness,
             )
-            from app.telegram.formatter import format_telegram_card_html
-
             formatted_card = format_telegram_card_html(card)
         except ValueError as exc:
             report.send_errors += 1
@@ -1622,6 +1626,7 @@ def _deliver_pipeline_items(
         if already_delivered:
             item.telegram_already_delivered = True
             continue
+        warnings, info_items = card_display_sections(item.analysis_result)
         card = TelegramVacancyCard(
             source=map_source_to_code(item.source),
             external_id=item.vacancy.external_id,
@@ -1633,8 +1638,10 @@ def _deliver_pipeline_items(
             match_percentage=item.analysis_result.match_percentage,
             gaps=item.analysis_result.gaps,
             nuances=item.analysis_result.nuances,
+            warnings=warnings,
+            info_items=info_items,
             recommended_resume=item.analysis_result.recommended_resume.value,
-            content_completeness="FULL",
+            content_completeness=getattr(item.vacancy, "content_completeness", None) or "FULL",
         )
         try:
             message_ref = telegram_client.send_vacancy_card(card)
@@ -1798,7 +1805,7 @@ def _collect_source_items(collector: VacancyCollector) -> tuple[int, list[Normal
                 company=item.company,
                 location=item.location,
                 employment=None,
-                description=item.to_analysis_text(),
+                description=item.description_for_normalized() if hasattr(item, "description_for_normalized") else (getattr(item, "snippet", None) or ""),
                 url=item.url,
                 published_at=item.received_at.isoformat() if item.received_at else None,
                 snippet=getattr(item, "snippet", None),
@@ -1806,6 +1813,8 @@ def _collect_source_items(collector: VacancyCollector) -> tuple[int, list[Normal
                 alert_query=getattr(item, "alert_query", None),
                 snippet_source=getattr(item, "snippet_source", None),
                 raw_text_preview=raw_preview_getter(item.external_id) if callable(raw_preview_getter) else None,
+                content_completeness=getattr(getattr(item, "content_completeness", None), "value", None)
+                or getattr(item, "content_completeness", None),
             )
             for item in items
         ]
@@ -1881,8 +1890,11 @@ def _analyze_collected_vacancies(
                 analysis_text=analysis_text,
             )
         )
+        completeness = (vacancy.content_completeness or "FULL").upper().strip()
+        if completeness not in {"FULL", "PARTIAL", "MINIMAL"}:
+            completeness = "FULL"
         try:
-            evaluation = analyzer.analyze(analysis_text, content_completeness="FULL")
+            evaluation = analyzer.analyze(analysis_text, content_completeness=completeness)
         except Exception as exc:  # noqa: BLE001
             report.errors += 1
             source_counters.errors += 1
@@ -1937,10 +1949,12 @@ def _analyze_collected_vacancies(
                 company=vacancy.company,
                 location=vacancy.location,
                 url=vacancy.url,
-                content_completeness="FULL",
+                content_completeness=completeness,
                 evaluation=evaluation,
                 decision_reason=evaluation.decision_reason,
                 source=vacancy.source,
+                analysis_text=analysis_text,
+                snippet=vacancy.snippet,
             )
         )
 
@@ -4046,6 +4060,7 @@ def _send_processed_to_telegram_detailed(
             if verbose:
                 verbose_events.append(f"ALREADY_DELIVERED {item.title}")
             continue
+        warnings, info_items = card_display_sections(item.evaluation)
         card = TelegramVacancyCard(
             source=map_source_to_code(item.source),
             external_id=item.external_id,
@@ -4057,6 +4072,8 @@ def _send_processed_to_telegram_detailed(
             match_percentage=item.evaluation.match_percentage,
             gaps=item.evaluation.gaps,
             nuances=item.evaluation.nuances,
+            warnings=warnings,
+            info_items=info_items,
             recommended_resume=item.evaluation.recommended_resume.value,
             content_completeness=item.content_completeness,
         )

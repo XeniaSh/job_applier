@@ -98,6 +98,7 @@ class VacancyEvaluation(BaseModel):
     matched_points: list[str] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
     nuances: list[str] = Field(default_factory=list)
+    info_items: list[str] = Field(default_factory=list)
     match_percentage: float | None = None
     matched_score: float = 0.0
     total_possible_score: float = 0.0
