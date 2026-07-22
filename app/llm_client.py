@@ -45,11 +45,24 @@ class LLMClient:
             pool=10.0,
         )
         self._provided_client = http_client
+        self._owned_client: httpx.Client | None = None
+        self.last_timing_events: list[dict[str, Any]] = []
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def close(self) -> None:
+        if self._owned_client is not None:
+            self._owned_client.close()
+            self._owned_client = None
 
     def extract_vacancy(
         self,
         prompt: str,
         vacancy: str,
+        *,
+        operation: str = "analysis",
     ) -> VacancyExtraction:
         last_error: Exception | None = None
 
@@ -58,6 +71,7 @@ class LLMClient:
                 raw_content = self._request_content(
                     prompt=prompt,
                     vacancy=vacancy,
+                    operation=operation,
                 )
                 payload = json.loads(raw_content)
                 return VacancyExtraction.model_validate(payload)
@@ -88,6 +102,7 @@ class LLMClient:
         recommended_resume: str,
         preferred_language: str = "en",
         grammatical_gender: str = "neutral",
+        operation: str = "cover_letter",
     ) -> CoverLetterResult:
         last_error: Exception | None = None
         user_payload = json.dumps(
@@ -107,6 +122,7 @@ class LLMClient:
                     vacancy=user_payload,
                     temperature=0.2,
                     max_tokens=500,
+                    operation=operation,
                 )
                 payload = json.loads(raw_content)
                 result = CoverLetterResult.model_validate(payload)
@@ -146,6 +162,7 @@ class LLMClient:
         *,
         temperature: float = 0.0,
         max_tokens: int = 1200,
+        operation: str = "llm",
     ) -> str:
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -172,7 +189,10 @@ class LLMClient:
         }
 
         endpoint = f"{self._api_url}/chat/completions"
+        logger.info("START %s", operation)
         request_started_at = perf_counter()
+        response: httpx.Response | None = None
+        error_label = ""
 
         try:
             response = self._send_request(
@@ -183,51 +203,70 @@ class LLMClient:
             response.raise_for_status()
 
         except httpx.TimeoutException as exc:
+            error_label = "timeout"
             raise LLMRequestError(
                 "LLM API request timed out."
             ) from exc
 
         except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
+            error_label = f"http_{exc.response.status_code}"
             raise LLMRequestError(
-                f"LLM API returned HTTP {status_code}."
+                f"LLM API returned HTTP {exc.response.status_code}."
             ) from exc
 
         except httpx.HTTPError as exc:
+            error_label = "http_error"
             raise LLMRequestError(
                 "LLM API request failed."
             ) from exc
 
         finally:
-            duration_seconds = perf_counter() - request_started_at
+            elapsed_ms = int((perf_counter() - request_started_at) * 1000)
+            usage = _usage_from_response(response) if response is not None else {}
+            event = {
+                "operation": operation,
+                "model": self._model,
+                "elapsed_ms": elapsed_ms,
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+                "error": error_label or None,
+            }
+            self.last_timing_events.append(event)
             logger.info(
-                "LLM request took %.1fs",
-                duration_seconds,
+                "END %s +%dms model=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s%s",
+                operation,
+                elapsed_ms,
+                self._model,
+                usage.get("prompt_tokens", "n/a"),
+                usage.get("completion_tokens", "n/a"),
+                usage.get("total_tokens", "n/a"),
+                f" error={error_label}" if error_label else "",
             )
 
+        assert response is not None
         return self._extract_text_content(response)
 
     def _send_request(
         self,
         endpoint: str,
-        headers: dict[str, str],
+        headers: dict[str, Any],
         payload: dict[str, Any],
     ) -> httpx.Response:
-        if self._provided_client is not None:
-            return self._provided_client.post(
-                endpoint,
-                headers=headers,
-                json=payload,
-                timeout=self._timeout,
-            )
+        client = self._get_http_client()
+        return client.post(
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=self._timeout,
+        )
 
-        with httpx.Client() as client:
-            return client.post(
-                endpoint,
-                headers=headers,
-                json=payload,
-                timeout=self._timeout,
-            )
+    def _get_http_client(self) -> httpx.Client:
+        if self._provided_client is not None:
+            return self._provided_client
+        if self._owned_client is None:
+            self._owned_client = httpx.Client(timeout=self._timeout)
+        return self._owned_client
 
     @staticmethod
     def _extract_text_content(response: httpx.Response) -> str:
@@ -260,6 +299,34 @@ class LLMClient:
         )
 
         return content.strip()
+
+
+def _usage_from_response(response: httpx.Response) -> dict[str, int | None]:
+    try:
+        data = response.json()
+    except ValueError:
+        return {}
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    return {
+        "prompt_tokens": _as_optional_int(usage.get("prompt_tokens")),
+        "completion_tokens": _as_optional_int(usage.get("completion_tokens")),
+        "total_tokens": _as_optional_int(usage.get("total_tokens")),
+    }
+
+
+def _as_optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
 
 
 _SOFT_STYLE_PHRASES = (

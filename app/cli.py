@@ -634,6 +634,7 @@ def prepare_telegram_applications(
         search_days=settings.linkedin_email_search_days,
         mark_as_read=False,
     )
+    storage = TelegramDeliveryStorage()
     service = PreparationService(
         analyzer=analyzer,
         llm_client=llm_client,
@@ -641,8 +642,8 @@ def prepare_telegram_applications(
         resumes_dir=settings.resumes_dir,
         preferred_language=settings.candidate_preferred_language,
         grammatical_gender=settings.candidate_grammatical_gender,
+        prepare_cache=storage,
     )
-    storage = TelegramDeliveryStorage()
     result = _prepare_requested_applications(
         settings=settings,
         service=service,
@@ -736,6 +737,7 @@ def run_pipeline(
         resumes_dir=settings.resumes_dir,
         preferred_language=settings.candidate_preferred_language,
         grammatical_gender=settings.candidate_grammatical_gender,
+        prepare_cache=deliveries,
     )
 
     interval = max(1, int(settings.pipeline_interval_seconds))
@@ -2771,7 +2773,8 @@ def _sync_application_history(items: list[LinkedInProcessedVacancy]) -> None:
 
 def _upsert_history_item(item: LinkedInProcessedVacancy) -> None:
     evaluation = item.evaluation
-    TelegramDeliveryStorage().upsert_application_history(
+    storage = TelegramDeliveryStorage()
+    storage.upsert_application_history(
         source=item.source,
         external_id=item.external_id,
         title=item.title,
@@ -2782,6 +2785,19 @@ def _upsert_history_item(item: LinkedInProcessedVacancy) -> None:
         decision_reason=(evaluation.decision_reason if evaluation else item.decision_reason),
         recommended_resume=evaluation.recommended_resume.value if evaluation else None,
     )
+    if item.evaluation is not None and item.analysis_text:
+        storage.save_prepare_cache(
+            source=item.source,
+            external_id=item.external_id,
+            evaluation_json=item.evaluation.model_dump_json(),
+            analysis_text=item.analysis_text,
+            title=item.title,
+            company=item.company,
+            location=item.location,
+            url=item.url,
+            content_completeness=item.content_completeness,
+            snippet=item.snippet,
+        )
 
 
 def _safe_percent(numerator: int, denominator: int) -> float:
@@ -3784,6 +3800,19 @@ def _prepare_one_application(
             timing_logger(
                 f"Prepare generated {source}:{external_id} +{int((time.monotonic() - generation_started_at) * 1000)}ms"
             )
+            breakdown = getattr(prepared, "timing_breakdown", None) or {}
+            if breakdown:
+                timing_logger(
+                    "Prepare timing breakdown "
+                    f"llm_calls={breakdown.get('llm_calls')} model={breakdown.get('model')} "
+                    f"analysis_cached={breakdown.get('analysis_cached')} "
+                    f"total={breakdown.get('total_ms')}ms"
+                )
+                for event in breakdown.get("llm_events") or []:
+                    timing_logger(
+                        f"Prepare LLM {event.get('operation')} +{event.get('elapsed_ms')}ms "
+                        f"tokens={event.get('total_tokens')}"
+                    )
     except (
         ApplicationPreparationError,
         LLMRequestError,

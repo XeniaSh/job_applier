@@ -658,6 +658,84 @@ class TelegramDeliveryStorage:
             conn.commit()
         return cursor.rowcount > 0
 
+    def save_prepare_cache(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        evaluation_json: str,
+        analysis_text: str,
+        title: str | None,
+        company: str | None,
+        location: str | None,
+        url: str | None,
+        content_completeness: str | None,
+        snippet: str | None = None,
+    ) -> None:
+        cached_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into vacancy_prepare_cache (
+                    source, external_id, evaluation_json, analysis_text,
+                    title, company, location, url, content_completeness, snippet, cached_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(source, external_id) do update set
+                    evaluation_json = excluded.evaluation_json,
+                    analysis_text = excluded.analysis_text,
+                    title = excluded.title,
+                    company = excluded.company,
+                    location = excluded.location,
+                    url = excluded.url,
+                    content_completeness = excluded.content_completeness,
+                    snippet = excluded.snippet,
+                    cached_at = excluded.cached_at
+                """,
+                (
+                    source,
+                    external_id,
+                    evaluation_json,
+                    analysis_text,
+                    title,
+                    company,
+                    location,
+                    url,
+                    content_completeness,
+                    snippet,
+                    cached_at,
+                ),
+            )
+            conn.commit()
+
+    def get_prepare_cache(self, source: str, external_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select
+                    source, external_id, evaluation_json, analysis_text,
+                    title, company, location, url, content_completeness, snippet, cached_at
+                from vacancy_prepare_cache
+                where source = ? and external_id = ?
+                """,
+                (source, external_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "source": str(row[0]),
+            "external_id": str(row[1]),
+            "evaluation_json": str(row[2]),
+            "analysis_text": str(row[3]),
+            "title": str(row[4]) if row[4] is not None else None,
+            "company": str(row[5]) if row[5] is not None else None,
+            "location": str(row[6]) if row[6] is not None else None,
+            "url": str(row[7]) if row[7] is not None else None,
+            "content_completeness": str(row[8]) if row[8] is not None else None,
+            "snippet": str(row[9]) if row[9] is not None else None,
+            "cached_at": str(row[10]),
+        }
+
     def list_resume_cache(self) -> list[TelegramResumeCacheRecord]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -957,6 +1035,24 @@ class TelegramDeliveryStorage:
                 """
             )
             self._ensure_history_columns(conn)
+            conn.execute(
+                """
+                create table if not exists vacancy_prepare_cache (
+                    source text not null,
+                    external_id text not null,
+                    evaluation_json text not null,
+                    analysis_text text not null,
+                    title text,
+                    company text,
+                    location text,
+                    url text,
+                    content_completeness text,
+                    snippet text,
+                    cached_at text not null,
+                    primary key (source, external_id)
+                )
+                """
+            )
             conn.commit()
 
     def _ensure_preparation_columns(self, conn: sqlite3.Connection) -> None:

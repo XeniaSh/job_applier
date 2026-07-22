@@ -63,8 +63,12 @@ class _FakeEmailClient:
 
 
 class _FakeAnalyzer:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def analyze(self, vacancy: str, content_completeness: str = "FULL") -> VacancyEvaluation:
         _ = vacancy, content_completeness
+        self.calls += 1
         return _evaluation()
 
 
@@ -73,14 +77,47 @@ class _FakeLLM:
         self.language = language
         self.text = text
         self.last_candidate_profile: str | None = None
+        self.last_timing_events: list[dict] = []
+        self.model = "test-model"
+        self.cover_calls = 0
 
     def create_cover_letter(self, **kwargs) -> CoverLetterResult:
+        self.cover_calls += 1
         self.last_candidate_profile = kwargs["candidate_profile"]
+        self.last_timing_events.append(
+            {
+                "operation": kwargs.get("operation", "cover_letter"),
+                "model": self.model,
+                "elapsed_ms": 12,
+                "prompt_tokens": 5,
+                "completion_tokens": 7,
+                "total_tokens": 12,
+                "error": None,
+            }
+        )
         return CoverLetterResult(
             language=self.language,
             cover_letter=self.text,
             used_resume="java-backend",
         )
+
+
+class _FakePrepareCache:
+    def __init__(self, payload: dict | None = None) -> None:
+        self.payload = payload
+        self.saved: dict | None = None
+
+    def get_prepare_cache(self, source: str, external_id: str) -> dict | None:
+        _ = source, external_id
+        return self.payload
+
+    def save_prepare_cache(self, **kwargs) -> None:
+        self.saved = kwargs
+
+
+class _FailingEmailClient:
+    def fetch_linkedin_messages(self):
+        raise AssertionError("IMAP must not be called when prepare cache hits")
 
 
 def test_resolve_resume_path_safe(tmp_path: Path) -> None:
@@ -94,6 +131,61 @@ def test_resolve_resume_path_safe(tmp_path: Path) -> None:
     path2, warning2 = resolve_resume_path(resumes_dir, "../etc/passwd")
     assert path2 is None
     assert warning2 is not None
+
+
+def test_prepare_uses_cached_analysis_and_skips_imap(tmp_path: Path, monkeypatch, caplog) -> None:
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    evaluation = _evaluation()
+    cache = _FakePrepareCache(
+        {
+            "evaluation_json": evaluation.model_dump_json(),
+            "analysis_text": "Title: Java Backend Engineer\nContent completeness: PARTIAL",
+            "title": "Java Backend Engineer",
+            "company": "ACME",
+            "location": "Remote",
+            "url": "https://www.linkedin.com/jobs/view/123/",
+            "content_completeness": "PARTIAL",
+            "snippet": "Snippet",
+        }
+    )
+    analyzer = _FakeAnalyzer()
+    llm = _FakeLLM(language="en", text="I have around seven years of Java backend experience.")
+    service = PreparationService(
+        analyzer=analyzer,
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=cache,
+    )
+    with caplog.at_level("INFO"):
+        prepared = service.prepare("linkedin-email", "123")
+
+    assert analyzer.calls == 0
+    assert llm.cover_calls == 1
+    assert prepared.timing_breakdown["llm_calls"] == 1
+    assert prepared.timing_breakdown["analysis_cached"] is True
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "START resume_summary" in log_text
+    assert "END resume_summary +" in log_text
+    assert "START analysis" in log_text
+    assert "END analysis +" in log_text
+    assert "(cached)" in log_text
+    assert "START cover_letter" in log_text
+    assert "END cover_letter +" in log_text
+    assert "START application_answers" in log_text
+    assert "END application_answers +0ms" in log_text
+    assert "Prepare timing breakdown" in log_text
+    assert "llm_calls=1" in log_text
 
 
 def test_missing_resume_warning(tmp_path: Path, monkeypatch) -> None:

@@ -35,6 +35,8 @@ class LinkedInProcessedVacancy:
     skipped_by_prefilter: bool = False
     decision_reason: str | None = None
     source: str = "linkedin-email"
+    analysis_text: str | None = None
+    snippet: str | None = None
 
 
 @dataclass
@@ -226,6 +228,8 @@ class LinkedInEmailCollector(VacancyCollector):
                     content_completeness=vacancy.content_completeness.value,
                     evaluation=evaluation,
                     decision_reason=evaluation.decision_reason,
+                    analysis_text=vacancy.to_analysis_text(),
+                    snippet=vacancy.snippet,
                 )
             )
 

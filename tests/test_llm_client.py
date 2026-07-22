@@ -33,7 +33,10 @@ _VALID_EN_SUMMARY = (
 def _chat_response(content: str, status_code: int = 200) -> httpx.Response:
     return httpx.Response(
         status_code=status_code,
-        json={"choices": [{"message": {"content": content}}]},
+        json={
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33},
+        },
     )
 
 
@@ -126,6 +129,53 @@ def test_payload_contains_temperature_and_max_tokens() -> None:
 
 
 @respx.mock
+def test_named_llm_timing_logs_include_tokens(caplog: pytest.LogCaptureFixture) -> None:
+    respx.post("https://llm.local/chat/completions").mock(
+        return_value=_chat_response(_valid_json_payload())
+    )
+    client = LLMClient(api_url="https://llm.local", api_key="secret", model="test-model")
+    with caplog.at_level(logging.INFO):
+        client.extract_vacancy(prompt="PROMPT", vacancy="Title: Java Backend Engineer role text here")
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "START analysis" in log_text
+    assert "END analysis +" in log_text
+    assert "model=test-model" in log_text
+    assert "prompt_tokens=11" in log_text
+    assert "completion_tokens=22" in log_text
+    assert "total_tokens=33" in log_text
+    assert client.last_timing_events[-1]["operation"] == "analysis"
+    assert client.last_timing_events[-1]["total_tokens"] == 33
+
+
+@respx.mock
+def test_cover_letter_timing_uses_cover_letter_operation(caplog: pytest.LogCaptureFixture) -> None:
+    respx.post("https://llm.local/chat/completions").mock(
+        return_value=_chat_response(
+            json.dumps(
+                {
+                    "language": "en",
+                    "cover_letter": _VALID_EN_SUMMARY,
+                    "used_resume": "java-backend",
+                }
+            )
+        )
+    )
+    client = LLMClient(api_url="https://llm.local", api_key="secret", model="test-model")
+    with caplog.at_level(logging.INFO):
+        client.create_cover_letter(
+            prompt="PROMPT",
+            candidate_profile="Java Backend Engineer with around seven years of commercial backend experience.",
+            vacancy_text="Title: Java Backend Engineer\nResponsibilities: Build backend services for payments.",
+            analysis=_evaluation(),
+            recommended_resume="java-backend",
+        )
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "START cover_letter" in log_text
+    assert "END cover_letter +" in log_text
+    assert client.last_timing_events[-1]["operation"] == "cover_letter"
+
+
+@respx.mock
 def test_request_timing_logged_without_sensitive_data(caplog: pytest.LogCaptureFixture) -> None:
     route = respx.post("https://llm.local/chat/completions").mock(
         return_value=_chat_response(_valid_json_payload())
@@ -138,7 +188,8 @@ def test_request_timing_logged_without_sensitive_data(caplog: pytest.LogCaptureF
 
     assert route.called
     log_text = "\n".join(record.getMessage() for record in caplog.records)
-    assert "LLM request took " in log_text
+    assert "START analysis" in log_text
+    assert "END analysis +" in log_text
     assert "super-secret" not in log_text
     assert vacancy_text not in log_text
 

@@ -222,6 +222,57 @@ def test_resume_cache_crud(tmp_path: Path) -> None:
     assert storage.get_resume_cache("java-backend") is None
 
 
+def test_prepare_cache_save_and_get_roundtrip(tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    assert storage.get_prepare_cache("linkedin-email", "job-1") is None
+
+    storage.save_prepare_cache(
+        source="linkedin-email",
+        external_id="job-1",
+        evaluation_json='{"decision":"STRONG_MATCH"}',
+        analysis_text="Title: Java Backend\nCompany: Acme",
+        title="Java Backend",
+        company="Acme",
+        location="Remote",
+        url="https://www.linkedin.com/jobs/view/1/",
+        content_completeness="PARTIAL",
+        snippet="Build APIs",
+    )
+    cached = storage.get_prepare_cache("linkedin-email", "job-1")
+    assert cached is not None
+    assert cached["source"] == "linkedin-email"
+    assert cached["external_id"] == "job-1"
+    assert cached["evaluation_json"] == '{"decision":"STRONG_MATCH"}'
+    assert cached["analysis_text"] == "Title: Java Backend\nCompany: Acme"
+    assert cached["title"] == "Java Backend"
+    assert cached["company"] == "Acme"
+    assert cached["location"] == "Remote"
+    assert cached["url"] == "https://www.linkedin.com/jobs/view/1/"
+    assert cached["content_completeness"] == "PARTIAL"
+    assert cached["snippet"] == "Build APIs"
+    assert cached["cached_at"]
+
+    storage.save_prepare_cache(
+        source="linkedin-email",
+        external_id="job-1",
+        evaluation_json='{"decision":"POTENTIAL_MATCH"}',
+        analysis_text="Updated analysis",
+        title="Senior Java Backend",
+        company="Acme Corp",
+        location="Hybrid",
+        url="https://www.linkedin.com/jobs/view/1/?updated=1",
+        content_completeness="FULL",
+        snippet=None,
+    )
+    updated = storage.get_prepare_cache("linkedin-email", "job-1")
+    assert updated is not None
+    assert updated["evaluation_json"] == '{"decision":"POTENTIAL_MATCH"}'
+    assert updated["analysis_text"] == "Updated analysis"
+    assert updated["title"] == "Senior Java Backend"
+    assert updated["snippet"] is None
+    assert storage.get_prepare_cache("linkedin-email", "missing") is None
+
+
 def test_recover_abandoned_preparing_when_worker_not_alive(tmp_path: Path) -> None:
     storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
     storage.save_sent(source="linkedin-email", external_id="901", chat_id="123", message_id=1)
