@@ -269,6 +269,7 @@ _SOFT_STYLE_PHRASES = (
     "i would like to contribute",
     "i believe",
     "i am excited",
+    "my passion",
     "perfect fit",
     "dynamic team",
     "cutting-edge",
@@ -281,14 +282,28 @@ _FORBIDDEN_OVERSTATEMENT = (
     "strong alignment with your requirements",
     "excellent match",
 )
+_FORBIDDEN_PROMPT_LEAKS = (
+    "how my experience is relevant to this role",
+    "how my experience",
+    "concise relevance statement",
+    "final self-check",
+    "return json only",
+)
+_FORBIDDEN_TEMPLATE_STARTERS = (
+    "this opportunity aligns",
+    "this opportunity",
+    "this backend engineering opportunity",
+)
+_CANDIDATE_SENIORITY_CLAIM_RE = re.compile(
+    r"\b(?:i am|i'm|as)\s+(?:a\s+)?(?:senior|lead|principal|staff|architect)\b",
+    flags=re.IGNORECASE,
+)
 _FORBIDDEN_LEVEL_TERMS = (
-    "senior",
     "lead developer",
     "backend lead",
     "tech lead",
     "principal",
     "staff engineer",
-    "architect",
 )
 _FORBIDDEN_OWNERSHIP_TERMS = (
     "management experience",
@@ -340,10 +355,20 @@ def _validate_cover_letter(
     for phrase in _FORBIDDEN_OWNERSHIP_TERMS:
         if phrase in lower:
             raise CoverLetterValidationError(f"Forbidden ownership phrase detected: {phrase}")
+    for phrase in _FORBIDDEN_PROMPT_LEAKS:
+        if phrase in lower:
+            raise CoverLetterValidationError(f"Prompt/instruction fragment detected: {phrase}")
+    for starter in _FORBIDDEN_TEMPLATE_STARTERS:
+        if lower.startswith(starter) or f". {starter}" in lower:
+            raise CoverLetterValidationError(f"Template starter detected: {starter}")
+    if "backend backend" in lower:
+        raise CoverLetterValidationError("Duplicated 'backend backend' wording is not allowed.")
     if "6 years" in lower or "six years" in lower:
         raise CoverLetterValidationError("Experience must be around seven years, not six.")
     if "redis" in lower:
         raise CoverLetterValidationError("Redis mention is not allowed without explicit confirmation.")
+    if _CANDIDATE_SENIORITY_CLAIM_RE.search(letter):
+        raise CoverLetterValidationError("Candidate must not claim Senior/Lead/Principal/Staff/Architect title.")
     for term in _FORBIDDEN_LEVEL_TERMS:
         if re.search(rf"\b{re.escape(term)}\b", lower):
             raise CoverLetterValidationError(f"Forbidden seniority/title term detected: {term}")
@@ -370,6 +395,12 @@ def _validate_cover_letter(
         raise CoverLetterValidationError("English cover letter exceeds 80 words.")
     if language == "ru" and word_count > 90:
         raise CoverLetterValidationError("Russian cover letter exceeds 90 words.")
+
+    sentence_count = _count_complete_sentences(letter)
+    if language == "en" and not (3 <= sentence_count <= 5):
+        raise CoverLetterValidationError(
+            f"English summary must contain 3-5 complete sentences, got {sentence_count}."
+        )
 
     matched_areas = 0
     for patterns in _TECH_AREAS.values():
@@ -410,6 +441,11 @@ def _validate_cover_letter(
     _validate_technology_origin(letter=lower, candidate_profile=candidate_profile.lower(), vacancy_text=vacancy_text.lower())
     if result.used_resume not in _ALLOWED_RESUME_IDS:
         raise CoverLetterValidationError("Unsupported resume identifier in cover letter.")
+
+
+def _count_complete_sentences(text: str) -> int:
+    parts = [part.strip() for part in re.split(r"[.!?]+", text) if part.strip()]
+    return len(parts)
 
 
 def _select_cover_letter_language(*, vacancy_text: str, preferred_language: str) -> str:
@@ -485,32 +521,38 @@ def _validate_lead_title_handling(*, vacancy_text: str, letter: str) -> None:
 
 def _apply_soft_cover_letter_cleanup(text: str) -> tuple[str, int]:
     cleaned = text
-    replacements: tuple[tuple[str, str], ...] = (
-        (
-            r"\bi am open to discussing how my background fits your needs\.?",
-            "I would be glad to discuss the technical expectations in more detail.",
-        ),
-        (
-            r"\bthis role aligns with my skills\.?",
-            "This role is relevant to my backend experience.",
-        ),
-        (
-            r"\bi would like to contribute my expertise to your team\.?",
-            "I would be glad to discuss the role in more detail.",
-        ),
-        (r"\bi am excited to apply[^.]*\.?", ""),
-        (r"\bi am excited[^.]*\.?", ""),
-        (r"\baligns with my skills\b", "is relevant to my backend experience"),
-        (r"\bfits your needs\b", "is relevant to this role"),
-        (r"\bi would like to contribute\b", "I would be glad to discuss"),
-        (r"\bi believe\b", ""),
-        (r"\bperfect fit\b", "relevant fit"),
-        (r"\bdynamic team\b", "backend team"),
-        (r"\bcutting-?edge\b", "production"),
-        (r"\bleverage my skills\b", "apply my backend experience"),
-        (r"\butilize my experience\b", "apply my experience"),
-    )
     applied = 0
+
+    # Drop whole awkward/template sentences first to avoid leaving fragments.
+    sentence_drop_patterns: tuple[str, ...] = (
+        r"[^.?!]*\bhow my experience is relevant to this role\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bhow my experience\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bthis opportunity aligns\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bthis opportunity\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bthis backend engineering opportunity\b[^.?!]*[.?!]?",
+        r"[^.?!]*\baligns with my skills\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bfits your needs\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bi am open to discussing\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bi would like to contribute\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bi am excited to apply\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bi am excited\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bi believe\b[^.?!]*[.?!]?",
+        r"[^.?!]*\bmy passion\b[^.?!]*[.?!]?",
+    )
+    for pattern in sentence_drop_patterns:
+        updated, count = re.subn(pattern, " ", cleaned, flags=re.IGNORECASE)
+        if count > 0:
+            applied += count
+            cleaned = updated
+
+    replacements: tuple[tuple[str, str], ...] = (
+        (r"\bperfect fit\b", "relevant fit"),
+        (r"\bdynamic team\b", "engineering team"),
+        (r"\bcutting-?edge\b", "production"),
+        (r"\bleverage my skills\b", "apply my experience"),
+        (r"\butilize my experience\b", "apply my experience"),
+        (r"\bbackend\s+backend\b", "backend"),
+    )
     for pattern, replacement in replacements:
         updated, count = re.subn(pattern, replacement, cleaned, flags=re.IGNORECASE)
         if count > 0:
@@ -523,4 +565,6 @@ def _apply_soft_cover_letter_cleanup(text: str) -> tuple[str, int]:
             cleaned = updated
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = re.sub(r"\s+([.,!?;:])", r"\1", cleaned)
+    cleaned = re.sub(r"\.{2,}", ".", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;")
     return cleaned, applied
