@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 
 ACCEPT_KEYWORDS = ("java", "kotlin", "jvm", "backend", "spring")
+ABOVE_SENIORITY_MARKERS = ("staff", "principal", "distinguished", "fellow")
 REJECT_KEYWORDS = (
     "frontend",
     "front-end",
@@ -41,6 +42,16 @@ def should_accept_title(title: str) -> bool:
 
 def evaluate_title(title: str) -> TitleFilterDecision:
     normalized = _normalize_title(title)
+    seniority_hits = _matched_whole_words(normalized, ABOVE_SENIORITY_MARKERS)
+    if seniority_hits:
+        return TitleFilterDecision(
+            accepted=False,
+            reason="Above target seniority",
+            normalized_title=normalized,
+            positive_rules=[],
+            negative_rules=seniority_hits,
+            decision="REJECT",
+        )
     positive_rules = [keyword for keyword in ("java", "jvm", "spring", "spring boot", "kotlin") if keyword in normalized]
     if positive_rules:
         return TitleFilterDecision(
@@ -140,6 +151,14 @@ def evaluate_title(title: str) -> TitleFilterDecision:
         negative_rules=negative_rules,
         decision="PASS",
     )
+
+
+def _matched_whole_words(normalized_title: str, markers: tuple[str, ...]) -> list[str]:
+    hits: list[str] = []
+    for marker in markers:
+        if re.search(rf"\b{re.escape(marker)}\b", normalized_title):
+            hits.append(marker)
+    return hits
 
 
 def _normalize_title(title: str) -> str:

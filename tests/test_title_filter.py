@@ -32,3 +32,26 @@ def test_title_filter_allows_generic_and_java_analyst_titles() -> None:
     java_analyst = evaluate_title("Software Engineering Analyst (Java)")
     assert java_analyst.accepted is True
     assert "java" in java_analyst.positive_rules
+
+
+def test_title_filter_rejects_above_target_seniority_roles() -> None:
+    cases = (
+        "Staff Software Developer",
+        "Principal Engineer",
+        "Distinguished Engineer",
+        "Fellow Engineer",
+        "Staff Java Backend Engineer",
+    )
+    for title in cases:
+        decision = evaluate_title(title)
+        assert decision.accepted is False, title
+        assert decision.reason == "Above target seniority", title
+        assert decision.decision == "REJECT", title
+        assert decision.negative_rules, title
+
+
+def test_title_filter_accepts_senior_java_developer() -> None:
+    decision = evaluate_title("Senior Java Developer")
+    assert decision.accepted is True
+    assert decision.reason == "Explicit Java/JVM signal in title"
+    assert "java" in decision.positive_rules
