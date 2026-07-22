@@ -6,6 +6,34 @@ from dataclasses import dataclass
 
 ACCEPT_KEYWORDS = ("java", "kotlin", "jvm", "backend", "spring")
 ABOVE_SENIORITY_MARKERS = ("staff", "principal", "distinguished", "fellow")
+EDUCATION_ROLE_MARKERS = (
+    "teacher",
+    "trainer",
+    "instructor",
+    "lecturer",
+    "professor",
+    "tutor",
+    "учитель",
+    "преподаватель",
+    "тренер",
+    "инструктор",
+    "лектор",
+    "профессор",
+)
+AI_ONLY_MARKERS = (
+    "ai engineer",
+    "ai developer",
+    "ai researcher",
+    "ai specialist",
+    "ai scientist",
+    "machine learning engineer",
+    "ml engineer",
+    "llm engineer",
+    "prompt engineer",
+    "generative ai",
+    "genai engineer",
+    "gen ai",
+)
 REJECT_KEYWORDS = (
     "frontend",
     "front-end",
@@ -23,6 +51,10 @@ REJECT_KEYWORDS = (
     "mobile",
     "data scientist",
     "ml engineer",
+    "teacher",
+    "trainer",
+    "instructor",
+    "ai engineer",
 )
 
 
@@ -52,6 +84,18 @@ def evaluate_title(title: str) -> TitleFilterDecision:
             negative_rules=seniority_hits,
             decision="REJECT",
         )
+
+    education_hits = _matched_whole_words(normalized, EDUCATION_ROLE_MARKERS)
+    if education_hits:
+        return TitleFilterDecision(
+            accepted=False,
+            reason="Education/teaching role",
+            normalized_title=normalized,
+            positive_rules=[],
+            negative_rules=education_hits,
+            decision="REJECT",
+        )
+
     positive_rules = [keyword for keyword in ("java", "jvm", "spring", "spring boot", "kotlin") if keyword in normalized]
     if positive_rules:
         return TitleFilterDecision(
@@ -62,6 +106,20 @@ def evaluate_title(title: str) -> TitleFilterDecision:
             negative_rules=[],
             decision="PASS",
         )
+
+    ai_hits = [marker for marker in AI_ONLY_MARKERS if marker in normalized]
+    if not ai_hits and (" ai " in f" {normalized} " or normalized.startswith("ai ") or "ai/" in normalized):
+        ai_hits = ["ai"]
+    if ai_hits and not any(token in normalized for token in ("backend", "back-end", "java", "kotlin", "spring", "jvm")):
+        return TitleFilterDecision(
+            accepted=False,
+            reason="AI-only role",
+            normalized_title=normalized,
+            positive_rules=positive_rules,
+            negative_rules=ai_hits,
+            decision="REJECT",
+        )
+
     negative_rules: list[str] = []
     if any(keyword in normalized for keyword in ("python", "node", "node.js", "golang", "go ", ".net", "dotnet", "php", "ruby")):
         negative_rules.extend([k for k in ("python", "node", "node.js", "golang", ".net", "dotnet", "php", "ruby") if k in normalized])
@@ -156,7 +214,7 @@ def evaluate_title(title: str) -> TitleFilterDecision:
 def _matched_whole_words(normalized_title: str, markers: tuple[str, ...]) -> list[str]:
     hits: list[str] = []
     for marker in markers:
-        if re.search(rf"\b{re.escape(marker)}\b", normalized_title):
+        if re.search(rf"\b{re.escape(marker)}\b", normalized_title, flags=re.IGNORECASE):
             hits.append(marker)
     return hits
 

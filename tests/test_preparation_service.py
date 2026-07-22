@@ -174,9 +174,21 @@ def test_prepare_uses_cached_analysis_and_skips_imap(tmp_path: Path, monkeypatch
     assert llm.cover_calls == 1
     assert prepared.timing_breakdown["llm_calls"] == 1
     assert prepared.timing_breakdown["analysis_cached"] is True
+    phases = prepared.timing_breakdown["phases_ms"]
+    for phase_name in (
+        "resume_generation",
+        "application_answers",
+        "imap_fetch",
+        "analysis",
+        "cover_letter",
+        "validation",
+        "serialization",
+    ):
+        assert phase_name in phases, phase_name
+        assert isinstance(phases[phase_name], int), phase_name
     log_text = "\n".join(record.getMessage() for record in caplog.records)
-    assert "START resume_summary" in log_text
-    assert "END resume_summary +" in log_text
+    assert "START resume_generation" in log_text
+    assert "END resume_generation +" in log_text
     assert "START analysis" in log_text
     assert "END analysis +" in log_text
     assert "(cached)" in log_text
@@ -184,8 +196,15 @@ def test_prepare_uses_cached_analysis_and_skips_imap(tmp_path: Path, monkeypatch
     assert "END cover_letter +" in log_text
     assert "START application_answers" in log_text
     assert "END application_answers +0ms" in log_text
+    assert "START validation" in log_text
+    assert "END validation +" in log_text
+    assert "START serialization" in log_text
+    assert "END serialization +" in log_text
     assert "Prepare timing breakdown" in log_text
     assert "llm_calls=1" in log_text
+    assert "resume_generation=" in log_text
+    assert "validation=" in log_text
+    assert "serialization=" in log_text
 
 
 def test_missing_resume_warning(tmp_path: Path, monkeypatch) -> None:

@@ -3818,6 +3818,19 @@ def _prepare_one_application(
                 f"Prepare generated {source}:{external_id} +{int((time.monotonic() - generation_started_at) * 1000)}ms"
             )
             breakdown = getattr(prepared, "timing_breakdown", None) or {}
+            phases = breakdown.get("phases_ms") or {}
+            for phase_name in (
+                "resume_generation",
+                "application_answers",
+                "imap_fetch",
+                "analysis",
+                "cover_letter",
+                "validation",
+                "serialization",
+            ):
+                timing_logger(
+                    f"Prepare phase {phase_name} {source}:{external_id} +{int(phases.get(phase_name, 0))}ms"
+                )
             if breakdown:
                 timing_logger(
                     "Prepare timing breakdown "
@@ -3847,6 +3860,7 @@ def _prepare_one_application(
                 external_id=external_id,
                 chat_id=settings.telegram_chat_id,
             )
+            db_started_at = time.monotonic()
             storage.update_status(
                 source=source,
                 external_id=external_id,
@@ -3871,6 +3885,11 @@ def _prepare_one_application(
                 status=STATUS_PREPARATION_FAILED,
                 timestamp_field=None,
             )
+            if timing_logger is not None:
+                timing_logger(
+                    f"Prepare phase database {source}:{external_id} "
+                    f"+{int((time.monotonic() - db_started_at) * 1000)}ms"
+                )
             if message_ref is not None:
                 try:
                     title, company, url = _resolve_card_context(
@@ -3880,12 +3899,18 @@ def _prepare_one_application(
                         external_id=external_id,
                     )
                     if url:
+                        telegram_started_at = time.monotonic()
                         telegram_client.edit_message_text(  # type: ignore[union-attr]
                             chat_id=message_ref[0],
                             message_id=message_ref[1],
                             text=format_preparation_failed_html(title=title, company=company),
                             buttons=build_prepare_failed_buttons(source=source, external_id=external_id, url=url),
                         )
+                        if timing_logger is not None:
+                            timing_logger(
+                                f"Prepare phase telegram_update {source}:{external_id} "
+                                f"+{int((time.monotonic() - telegram_started_at) * 1000)}ms"
+                            )
                 except (TelegramRequestError, TelegramMessageNotModifiedError, ValueError):
                     logger.warning("Primary vacancy message update failed for preparation error: %s:%s", source, external_id)
         elif print_dry_run_items:
@@ -3905,6 +3930,7 @@ def _prepare_one_application(
         chat_id=settings.telegram_chat_id,
     )
     if message_ref is None:
+        db_started_at = time.monotonic()
         storage.update_status(
             source=source,
             external_id=external_id,
@@ -3929,10 +3955,15 @@ def _prepare_one_application(
             status=STATUS_PREPARATION_FAILED,
             timestamp_field=None,
         )
+        if timing_logger is not None:
+            timing_logger(
+                f"Prepare phase database {source}:{external_id} "
+                f"+{int((time.monotonic() - db_started_at) * 1000)}ms"
+            )
         return _PrepareOneResult(generated_packages=generated_packages, errors_count=1)
 
     try:
-        edit_started_at = time.monotonic()
+        telegram_started_at = time.monotonic()
         telegram_client.edit_message_text(  # type: ignore[union-attr]
             chat_id=message_ref[0],
             message_id=message_ref[1],
@@ -3949,11 +3980,18 @@ def _prepare_one_application(
         )
         if timing_logger is not None:
             timing_logger(
-                f"Prepare editMessageText {source}:{external_id} +{int((time.monotonic() - edit_started_at) * 1000)}ms"
+                f"Prepare phase telegram_update {source}:{external_id} "
+                f"+{int((time.monotonic() - telegram_started_at) * 1000)}ms"
+            )
+            timing_logger(
+                f"Prepare editMessageText {source}:{external_id} +{int((time.monotonic() - telegram_started_at) * 1000)}ms"
             )
     except TelegramMessageNotModifiedError:
+        if timing_logger is not None:
+            timing_logger(f"Prepare phase telegram_update {source}:{external_id} +0ms")
         _ = None
     except (TelegramRequestError, ValueError) as exc:
+        db_started_at = time.monotonic()
         storage.update_status(
             source=source,
             external_id=external_id,
@@ -3978,8 +4016,14 @@ def _prepare_one_application(
             status=STATUS_PREPARATION_FAILED,
             timestamp_field=None,
         )
+        if timing_logger is not None:
+            timing_logger(
+                f"Prepare phase database {source}:{external_id} "
+                f"+{int((time.monotonic() - db_started_at) * 1000)}ms"
+            )
         return _PrepareOneResult(generated_packages=generated_packages, errors_count=1)
 
+    db_started_at = time.monotonic()
     storage.update_status(
         source=source,
         external_id=external_id,
@@ -4005,6 +4049,10 @@ def _prepare_one_application(
         timestamp_field="prepared_at",
     )
     if timing_logger is not None:
+        timing_logger(
+            f"Prepare phase database {source}:{external_id} "
+            f"+{int((time.monotonic() - db_started_at) * 1000)}ms"
+        )
         timing_logger(
             f"Prepare done {source}:{external_id} total={int((time.monotonic() - item_started_at) * 1000)}ms"
         )

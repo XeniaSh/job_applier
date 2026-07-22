@@ -100,11 +100,28 @@ def test_java_and_spring_titles_are_strong_without_description() -> None:
         "Java Backend Engineer",
         "Spring Boot Developer",
         "Java API Developer",
+        "Java Software Engineer",
     )
     for title in cases:
-        result = analyzer.analyze(f"Title: {title}", content_completeness="PARTIAL")
+        result = analyzer.analyze(
+            f"Title: {title}\nDescription:\n<not available in LinkedIn email>",
+            content_completeness="PARTIAL",
+        )
         assert result.decision == Decision.STRONG_MATCH, title
         assert "Explicit Java stack is already present in the trusted title." in result.decision_reason
+
+
+def test_java_teacher_is_ignored_even_without_description() -> None:
+    analyzer = VacancyAnalyzer(
+        llm_client=_TitleEchoClient(mandatory=[]),
+        skills_loader=_profile,
+        prompt_loader=lambda: "PROMPT",
+    )
+    result = analyzer.analyze(
+        "Title: Java Teacher\nDescription:\n<not available in LinkedIn email>",
+        content_completeness="PARTIAL",
+    )
+    assert result.decision == Decision.IGNORE
 
 
 def test_generic_backend_title_stays_potential() -> None:

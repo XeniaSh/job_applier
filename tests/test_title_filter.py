@@ -55,3 +55,40 @@ def test_title_filter_accepts_senior_java_developer() -> None:
     assert decision.accepted is True
     assert decision.reason == "Explicit Java/JVM signal in title"
     assert "java" in decision.positive_rules
+
+
+def test_title_filter_rejects_education_and_teaching_roles() -> None:
+    cases = (
+        "Java Teacher",
+        "Java Trainer",
+        "Backend Instructor",
+        "Computer Science Lecturer",
+        "Professor of Software Engineering",
+        "Преподаватель Java",
+        "Инструктор по программированию",
+    )
+    for title in cases:
+        decision = evaluate_title(title)
+        assert decision.accepted is False, title
+        assert decision.reason == "Education/teaching role", title
+        assert decision.decision == "REJECT", title
+
+
+def test_title_filter_rejects_ai_only_roles() -> None:
+    cases = (
+        "AI Engineer",
+        "Prompt Engineer",
+        "Machine Learning Engineer",
+        "LLM Engineer",
+        "Generative AI Specialist",
+    )
+    for title in cases:
+        decision = evaluate_title(title)
+        assert decision.accepted is False, title
+        assert decision.reason == "AI-only role", title
+
+
+def test_title_filter_keeps_java_backend_with_ai_context() -> None:
+    decision = evaluate_title("Java Backend Engineer - AI Platform")
+    assert decision.accepted is True
+    assert "java" in decision.positive_rules

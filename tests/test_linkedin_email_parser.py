@@ -189,6 +189,95 @@ def test_footer_does_not_extend_last_card_text() -> None:
     assert "install linkedin widgets" not in card.visible_text_preview.lower()
 
 
+def test_merged_linkedin_title_splits_company_and_location() -> None:
+    html_payload = """
+    <html><body>
+      <a href="https://www.linkedin.com/jobs/view/5555555555/">
+        Backend Lead (Java/Kotlin) Salmon Group Ltd · Yerevan (Remote)
+      </a>
+      <a href="https://www.linkedin.com/jobs/view/5555555556/">
+        <img alt="Wirestock" src="https://media.licdn.com/logo.png" />
+        Java Backend Engineer Wirestock · Yerevan, Armenia
+      </a>
+      <a href="https://www.linkedin.com/jobs/view/5555555557/">
+        Senior Java Developer Polixis · Tbilisi (Hybrid)
+      </a>
+      <a href="https://www.linkedin.com/jobs/view/5555555558/">
+        Java Software Engineer EPAM · Yerevan (Remote)
+      </a>
+    </body></html>
+    """
+    vacancies = parse_linkedin_email(_raw_message_from_html(html_payload))
+    by_id = {item.external_id: item for item in vacancies}
+
+    salmon = by_id["5555555555"]
+    assert salmon.title == "Backend Lead (Java/Kotlin)"
+    assert salmon.company == "Salmon Group Ltd"
+    assert salmon.location == "Yerevan (Remote)"
+
+    wirestock = by_id["5555555556"]
+    assert wirestock.title == "Java Backend Engineer"
+    assert wirestock.company == "Wirestock"
+    assert wirestock.location == "Yerevan, Armenia"
+
+    polixis = by_id["5555555557"]
+    assert polixis.title == "Senior Java Developer"
+    assert polixis.company == "Polixis"
+    assert polixis.location == "Tbilisi (Hybrid)"
+
+    epam = by_id["5555555558"]
+    assert epam.title == "Java Software Engineer"
+    assert epam.company == "EPAM"
+    assert epam.location == "Yerevan (Remote)"
+
+
+def test_linkedin_ui_markers_stripped_from_title() -> None:
+    html_payload = """
+    <html><body>
+      <a href="https://www.linkedin.com/jobs/view/6666666661/">
+        Senior Java Backend Engineer Easy Apply Promoted
+      </a>
+      <div>ACME Corp · Berlin (Remote)</div>
+      <a href="https://www.linkedin.com/jobs/view/6666666662/">
+        Kotlin Developer Featured Actively Recruiting Hiring multiple candidates
+      </a>
+      <div>Nimbus · Remote - Europe</div>
+    </body></html>
+    """
+    vacancies = parse_linkedin_email(_raw_message_from_html(html_payload))
+    by_id = {item.external_id: item for item in vacancies}
+
+    first = by_id["6666666661"]
+    assert first.title == "Senior Java Backend Engineer"
+    assert "easy apply" not in first.title.lower()
+    assert "promoted" not in first.title.lower()
+    assert first.company == "ACME Corp"
+    assert first.location == "Berlin (Remote)"
+
+    second = by_id["6666666662"]
+    assert second.title == "Kotlin Developer"
+    assert "featured" not in second.title.lower()
+    assert "actively recruiting" not in second.title.lower()
+    assert "hiring multiple" not in second.title.lower()
+
+
+def test_location_recovered_from_merged_title_when_field_empty() -> None:
+    html_payload = """
+    <html><body>
+      <a href="https://www.linkedin.com/jobs/view/7777777771/">
+        Backend Lead (Java/Kotlin) Salmon Group Ltd · Yerevan (Remote) Easy Apply
+      </a>
+    </body></html>
+    """
+    vacancies = parse_linkedin_email(_raw_message_from_html(html_payload))
+    assert len(vacancies) == 1
+    item = vacancies[0]
+    assert item.title == "Backend Lead (Java/Kotlin)"
+    assert item.company == "Salmon Group Ltd"
+    assert item.location == "Yerevan (Remote)"
+    assert item.location is not None and item.location.strip() != ""
+
+
 def test_subject_from_vacancy_a_is_not_injected_into_vacancy_b_analysis_text() -> None:
     message = EmailMessage()
     message["From"] = "jobs-noreply@linkedin.com"

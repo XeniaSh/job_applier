@@ -725,6 +725,18 @@ def _classify_incomplete_title(*, title: str, alert_query: str | None) -> str:
         "data scientist",
         "ml",
         "machine learning",
+        "teacher",
+        "trainer",
+        "instructor",
+        "lecturer",
+        "professor",
+        "tutor",
+        "учитель",
+        "преподаватель",
+        "тренер",
+        "инструктор",
+        "лектор",
+        "профессор",
     )
     jvm_explicit_markers = ("java", "kotlin", "jvm", "spring")
     if any(marker in text for marker in hard_negative_markers):

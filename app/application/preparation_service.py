@@ -18,6 +18,16 @@ from app.vacancy_analyzer import VacancyAnalyzer
 
 logger = logging.getLogger(__name__)
 
+PREPARE_PHASE_ORDER = (
+    "resume_generation",
+    "application_answers",
+    "imap_fetch",
+    "analysis",
+    "cover_letter",
+    "validation",
+    "serialization",
+)
+
 
 @dataclass(frozen=True)
 class PreparedApplication:
@@ -86,17 +96,15 @@ class PreparationService:
             raise ApplicationPreparationError(f"Unsupported source for preparation: {source}")
 
         prepare_started = perf_counter()
-        phase_ms: dict[str, int] = {}
+        phase_ms: dict[str, int] = {name: 0 for name in PREPARE_PHASE_ORDER}
         llm_events_before = len(getattr(self._llm_client, "last_timing_events", []))
 
-        # Vacancy-independent profile (resume-derived) — cached on the service instance.
-        logger.info("START resume_summary")
+        logger.info("START resume_generation")
         profile_started = perf_counter()
         profile = self._get_profile_context()
-        phase_ms["resume_summary"] = int((perf_counter() - profile_started) * 1000)
-        logger.info("END resume_summary +%dms", phase_ms["resume_summary"])
+        phase_ms["resume_generation"] = int((perf_counter() - profile_started) * 1000)
+        logger.info("END resume_generation +%dms", phase_ms["resume_generation"])
 
-        # Application answers are not generated in this pipeline.
         logger.info("START application_answers")
         phase_ms["application_answers"] = 0
         logger.info("END application_answers +0ms (skipped)")
@@ -107,9 +115,13 @@ class PreparationService:
         vacancy_meta: _VacancyMeta
         analysis_cached = False
 
-        logger.info("START analysis")
-        analysis_started = perf_counter()
         if cached is not None:
+            logger.info("START imap_fetch")
+            phase_ms["imap_fetch"] = 0
+            logger.info("END imap_fetch +0ms (skipped, cache hit)")
+
+            logger.info("START analysis")
+            analysis_started = perf_counter()
             analysis = VacancyEvaluation.model_validate_json(cached["evaluation_json"])
             analysis_text = str(cached["analysis_text"])
             vacancy_meta = _VacancyMeta(
@@ -124,11 +136,18 @@ class PreparationService:
             phase_ms["analysis"] = int((perf_counter() - analysis_started) * 1000)
             logger.info("END analysis +%dms (cached)", phase_ms["analysis"])
         else:
+            logger.info("START imap_fetch")
+            imap_started = perf_counter()
             vacancy = self._find_linkedin_vacancy(external_id)
+            phase_ms["imap_fetch"] = int((perf_counter() - imap_started) * 1000)
+            logger.info("END imap_fetch +%dms", phase_ms["imap_fetch"])
             if vacancy is None:
                 raise ApplicationPreparationError(
                     "Не удалось найти данные вакансии в последних LinkedIn-письмах."
                 )
+
+            logger.info("START analysis")
+            analysis_started = perf_counter()
             analysis_text = vacancy.to_analysis_text()
             analysis = self._analyzer.analyze(
                 analysis_text,
@@ -141,13 +160,6 @@ class PreparationService:
                 url=vacancy.url,
                 content_completeness=vacancy.content_completeness.value,
                 snippet=vacancy.snippet,
-            )
-            self._store_prepare_cache(
-                source=source,
-                external_id=external_id,
-                analysis=analysis,
-                analysis_text=analysis_text,
-                meta=vacancy_meta,
             )
             phase_ms["analysis"] = int((perf_counter() - analysis_started) * 1000)
             logger.info("END analysis +%dms", phase_ms["analysis"])
@@ -165,6 +177,25 @@ class PreparationService:
         )
         phase_ms["cover_letter"] = int((perf_counter() - cover_started) * 1000)
         logger.info("END cover_letter +%dms", phase_ms["cover_letter"])
+
+        logger.info("START validation")
+        validation_started = perf_counter()
+        _validate_prepared_cover_letter(cover_result)
+        phase_ms["validation"] = int((perf_counter() - validation_started) * 1000)
+        logger.info("END validation +%dms", phase_ms["validation"])
+
+        logger.info("START serialization")
+        serialization_started = perf_counter()
+        if not analysis_cached:
+            self._store_prepare_cache(
+                source=source,
+                external_id=external_id,
+                analysis=analysis,
+                analysis_text=analysis_text,
+                meta=vacancy_meta,
+            )
+        phase_ms["serialization"] = int((perf_counter() - serialization_started) * 1000)
+        logger.info("END serialization +%dms", phase_ms["serialization"])
 
         warnings: list[str] = []
         if vacancy_meta.content_completeness in {"PARTIAL", "MINIMAL"}:
@@ -186,14 +217,18 @@ class PreparationService:
         }
         logger.info(
             "Prepare timing breakdown llm_calls=%d model=%s analysis_cached=%s "
-            "resume_summary=%dms analysis=%dms cover_letter=%dms application_answers=%dms total=%dms",
+            "resume_generation=%dms application_answers=%dms imap_fetch=%dms analysis=%dms "
+            "cover_letter=%dms validation=%dms serialization=%dms total=%dms",
             timing_breakdown["llm_calls"],
             model,
             analysis_cached,
-            phase_ms.get("resume_summary", 0),
+            phase_ms.get("resume_generation", 0),
+            phase_ms.get("application_answers", 0),
+            phase_ms.get("imap_fetch", 0),
             phase_ms.get("analysis", 0),
             phase_ms.get("cover_letter", 0),
-            phase_ms.get("application_answers", 0),
+            phase_ms.get("validation", 0),
+            phase_ms.get("serialization", 0),
             total_ms,
         )
         for event in llm_events:
@@ -325,6 +360,14 @@ def resolve_resume_path(resumes_dir: Path, resume_name: str) -> tuple[Path | Non
     if candidate.exists() and candidate.is_file():
         return candidate, None
     return None, f"Resume file missing: {resumes_dir.as_posix()}/{safe_name}.pdf"
+
+
+def _validate_prepared_cover_letter(cover_result: CoverLetterResult) -> None:
+    text = (cover_result.cover_letter or "").strip()
+    if not text:
+        raise ApplicationPreparationError("Cover letter validation failed: empty text")
+    if not (cover_result.language or "").strip():
+        raise ApplicationPreparationError("Cover letter validation failed: missing language")
 
 
 def _collect_warning_nuances(nuances: list[str]) -> list[str]:

@@ -1065,3 +1065,108 @@ def test_late_enqueue_after_successful_prepare_is_rejected_at_producer(monkeypat
         print_dry_run_items=False,
     )
     assert order == ["4039760488"]
+
+
+def test_prepare_timing_logs_include_every_preparation_phase(monkeypatch) -> None:
+    _set_env(monkeypatch)
+    settings = cli_module.Settings()
+    logs: list[str] = []
+
+    class Service:
+        def prepare(self, source, external_id):
+            _ = source
+            prepared = _prepared(external_id, "resumes/java-backend.pdf")
+            return PreparedApplication(
+                source=prepared.source,
+                external_id=prepared.external_id,
+                title=prepared.title,
+                company=prepared.company,
+                location=prepared.location,
+                url=prepared.url,
+                decision=prepared.decision,
+                match_percentage=prepared.match_percentage,
+                recommended_resume=prepared.recommended_resume,
+                resume_path=prepared.resume_path,
+                cover_letter=prepared.cover_letter,
+                language=prepared.language,
+                warnings=prepared.warnings,
+                timing_breakdown={
+                    "llm_calls": 1,
+                    "model": "test-model",
+                    "analysis_cached": True,
+                    "phases_ms": {
+                        "resume_generation": 1,
+                        "application_answers": 0,
+                        "imap_fetch": 0,
+                        "analysis": 2,
+                        "cover_letter": 3,
+                        "validation": 1,
+                        "serialization": 1,
+                    },
+                    "llm_events": [{"operation": "cover_letter", "elapsed_ms": 3, "total_tokens": 10}],
+                    "total_ms": 8,
+                },
+            )
+
+    class Storage:
+        def __init__(self):
+            self.status = {("linkedin-email", "42"): "PREPARE_REQUESTED"}
+
+        def list_by_status(self, *, chat_id, status, limit):
+            _ = chat_id, status, limit
+            return [("linkedin-email", "42")]
+
+        def get_delivery(self, source, external_id):
+            value = self.status.get((source, external_id))
+            if value is None:
+                return None
+            return type("D", (), {"status": value})()
+
+        def claim_for_preparation(self, *, source, external_id, chat_id):
+            _ = chat_id
+            key = (source, external_id)
+            if self.status.get(key) != "PREPARE_REQUESTED":
+                return False
+            self.status[key] = "PREPARING"
+            return True
+
+        def get_message_ref(self, *, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return ("123", 99)
+
+        def update_status(self, *, source, external_id, chat_id, status):
+            _ = chat_id
+            self.status[(source, external_id)] = status
+
+        def save_preparation(self, **kwargs):
+            _ = kwargs
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    class Client:
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+    result = cli_module._prepare_requested_applications(
+        settings=settings,
+        service=Service(),
+        storage=Storage(),  # type: ignore[arg-type]
+        telegram_client=Client(),  # type: ignore[arg-type]
+        limit=1,
+        dry_run=False,
+        print_dry_run_items=False,
+        timing_logger=logs.append,
+    )
+    assert result.prepared_successfully == 1
+    joined = "\n".join(logs)
+    for phase_name in (
+        "resume_generation",
+        "application_answers",
+        "cover_letter",
+        "validation",
+        "serialization",
+        "database",
+        "telegram_update",
+    ):
+        assert f"Prepare phase {phase_name} linkedin-email:42" in joined, phase_name

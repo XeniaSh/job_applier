@@ -40,7 +40,43 @@ NOISE_TEXT = {
     "actively recruiting",
     "easy apply",
     "job alert",
+    "promoted",
+    "featured",
+    "hiring multiple candidates",
+    "be an early applicant",
 }
+# Phrases stripped from titles/companies even when glued to other text.
+LINKEDIN_UI_MARKER_RE = re.compile(
+    r"(?i)\b(?:"
+    r"easy\s+apply|"
+    r"promoted|"
+    r"featured|"
+    r"actively\s+recruiting|"
+    r"hiring\s+multiple\s+candidates|"
+    r"be\s+an\s+early\s+applicant|"
+    r"view\s+job|"
+    r"see\s+more\s+jobs|"
+    r"apply\s+now"
+    r")\b"
+)
+TRAILING_COMPANY_LEGAL_RE = re.compile(
+    r"^(?P<title>.+?)\s+"
+    r"(?P<company>"
+    r"[A-Z0-9][\w&.\'-]*(?:\s+(?:[A-Z0-9][\w&.\'-]*|and|&|of|the|de|da|di))*"
+    r"\s+(?:Ltd\.?|LLC|Inc\.?|GmbH|AG|S\.?A\.?|B\.?V\.?|PLC|Corp\.?|Corporation|Group|Co\.?)"
+    r")\s*$"
+)
+TRAILING_COMPANY_AFTER_ROLE_RE = re.compile(
+    r"^(?P<title>.+?\b(?:Engineer|Developer|Lead|Architect|Programmer|Specialist|"
+    r"Manager|Analyst|Scientist|Designer|Consultant|Intern)"
+    r"(?:\s*\([^)]*\))?)\s+"
+    r"(?P<company>[A-Z][\w&.\'-]*(?:\s+[A-Z][\w&.\'-]*){0,4})\s*$"
+)
+LOCATION_LIKE_RE = re.compile(
+    r"(?i)\b(?:remote|hybrid|on[\s-]?site|worldwide|europe|emea|americas|"
+    r"yerevan|berlin|london|paris|amsterdam|moscow|tbilisi|baku|warsaw|"
+    r"germany|armenia|netherlands|poland|georgia|azerbaijan|uk|usa|uae)\b"
+)
 PROMOTIONAL_MARKERS = (
     "stand out and let hirers know",
     "try premium",
@@ -152,10 +188,11 @@ class _StructuredCardParser(HTMLParser):
         self._node_index += 1
         if tag == "a" and self._current_anchor_id is not None:
             text = _clean_text(" ".join(self._current_anchor_text))
+            text = _strip_linkedin_ui_markers(text)
             if text and text.lower() not in NOISE_TEXT:
                 card = self.cards_by_id[self._current_anchor_id]
                 if not card.title or card.title.lower().startswith("linkedin vacancy "):
-                    card.title = text
+                    _assign_anchor_text_to_card(card, text)
                 card.card_end = self._node_index
             self._current_anchor_id = None
             self._current_anchor_text = []
@@ -207,9 +244,11 @@ def parse_linkedin_email_with_diagnostics(
         parser.close()
         for card_index, job_id in enumerate(parser.ordered_ids, start=1):
             card = parser.cards_by_id[job_id]
-            title = card.title or f"LinkedIn vacancy {job_id}"
-            company = _clean_optional(card.company)
-            location = _clean_optional(card.location)
+            title, company, location = _finalize_card_fields(
+                title=card.title or f"LinkedIn vacancy {job_id}",
+                company=card.company,
+                location=card.location,
+            )
             snippet = _clean_optional(card.snippet)
             snippet_source = card.snippet_source
             promotional_snippet = card.promotional_snippet_detected
@@ -263,6 +302,13 @@ def parse_linkedin_email_with_diagnostics(
         if external_id is None or external_id in by_id:
             continue
         title = _clean_text(link_text) or f"LinkedIn vacancy {external_id}"
+        company_hint = _extract_company_hint(plain_content)
+        location_hint = _extract_location_hint(plain_content)
+        title, company_hint, location_hint = _finalize_card_fields(
+            title=title,
+            company=company_hint,
+            location=location_hint,
+        )
         snippet = _extract_snippet(plain_content, external_id)
         snippet_source = _classify_snippet_source(snippet)
         if snippet_source == "promo":
@@ -271,16 +317,16 @@ def parse_linkedin_email_with_diagnostics(
         vacancy = LinkedInEmailVacancy(
             external_id=external_id,
             title=title,
-            company=_extract_company_hint(plain_content),
-            location=_extract_location_hint(plain_content),
+            company=company_hint,
+            location=location_hint,
             url=_normalize_job_url(url, external_id),
             snippet=snippet,
             email_message_id=raw_message.message_id,
             received_at=raw_message.received_at,
             content_completeness=_detect_content_completeness(
                 title=title,
-                company=None,
-                location=None,
+                company=company_hint,
+                location=location_hint,
                 snippet=snippet,
             ),
             email_subject_context=email_subject_context,
@@ -495,7 +541,11 @@ def _apply_text_to_card(card: _Card, text: str) -> None:
             card.snippet_source = "promo"
         return
 
-    company, location = _split_company_location(text)
+    cleaned = _strip_linkedin_ui_markers(text)
+    if not cleaned or _is_noise_text(cleaned):
+        return
+
+    company, location = _split_company_location(cleaned)
     if company:
         if not card.company:
             card.company = company
@@ -508,20 +558,144 @@ def _apply_text_to_card(card: _Card, text: str) -> None:
         card.location = location
         return
 
-    if not card.snippet and len(text.split()) >= 4:
-        card.snippet = text
-        card.snippet_source = _classify_nonpromo_snippet_source(text)
+    if not card.snippet and len(cleaned.split()) >= 4:
+        card.snippet = cleaned
+        card.snippet_source = _classify_nonpromo_snippet_source(cleaned)
+
+
+def _assign_anchor_text_to_card(card: _Card, text: str) -> None:
+    """Assign job-link text, splitting merged title/company/location when needed."""
+    title, company, location = _unmerge_title_company_location(
+        title=text,
+        company=card.company,
+        location=card.location,
+    )
+    card.title = title
+    if company and not card.company:
+        card.company = company
+    if location and not card.location:
+        card.location = location
+
+
+def _finalize_card_fields(
+    *,
+    title: str,
+    company: str | None,
+    location: str | None,
+) -> tuple[str, str | None, str | None]:
+    cleaned_title = _strip_linkedin_ui_markers(title) or title
+    cleaned_company = _clean_optional(_strip_linkedin_ui_markers(company) if company else None)
+    cleaned_location = _clean_optional(_strip_linkedin_ui_markers(location) if location else None)
+    return _unmerge_title_company_location(
+        title=cleaned_title,
+        company=cleaned_company,
+        location=cleaned_location,
+    )
+
+
+def _unmerge_title_company_location(
+    *,
+    title: str,
+    company: str | None,
+    location: str | None,
+) -> tuple[str, str | None, str | None]:
+    working_title = _strip_linkedin_ui_markers(_clean_text(title))
+    working_company = _clean_optional(company)
+    working_location = _clean_optional(location)
+    if not working_title:
+        return title, working_company, working_location
+
+    if SEPARATOR_RE.search(working_title):
+        parts = [part.strip() for part in SEPARATOR_RE.split(working_title) if part.strip()]
+        if len(parts) >= 2:
+            left = parts[0]
+            right = parts[-1]
+            if len(parts) >= 3 and not working_company:
+                working_company = parts[1]
+            if not working_location:
+                working_location = right
+            elif working_location.lower() != right.lower() and LOCATION_LIKE_RE.search(right):
+                # Prefer explicit location recovered from the merged title.
+                working_location = right
+            working_title = left
+
+    working_title, extracted_company = _split_title_and_company(working_title, working_company)
+    if extracted_company and not working_company:
+        working_company = extracted_company
+
+    # Last-chance location recovery when company·location leaked into title without separator.
+    if not working_location:
+        recovered = _recover_location_from_text(working_title)
+        if recovered is not None:
+            working_title, working_location = recovered
+
+    working_title = _strip_linkedin_ui_markers(working_title)
+    return (
+        working_title or title,
+        _clean_optional(working_company),
+        _clean_optional(working_location),
+    )
+
+
+def _split_title_and_company(title: str, known_company: str | None) -> tuple[str, str | None]:
+    if known_company:
+        company = known_company.strip()
+        if company and title.lower().endswith(company.lower()):
+            trimmed = title[: -len(company)].strip(" -–—|·•")
+            if trimmed:
+                return trimmed, company
+
+    legal_match = TRAILING_COMPANY_LEGAL_RE.match(title)
+    if legal_match:
+        return legal_match.group("title").strip(), legal_match.group("company").strip()
+
+    role_match = TRAILING_COMPANY_AFTER_ROLE_RE.match(title)
+    if role_match:
+        candidate = role_match.group("company").strip()
+        if candidate and not LOCATION_LIKE_RE.search(candidate) and candidate.lower() not in NOISE_TEXT:
+            return role_match.group("title").strip(), candidate
+
+    return title, known_company
+
+
+def _recover_location_from_text(title: str) -> tuple[str, str] | None:
+    """Recover trailing location fragments like '… Yerevan (Remote)' without a middle-dot."""
+    match = re.search(
+        r"^(?P<title>.+?)\s+"
+        r"(?P<location>"
+        r"(?:[A-Z][\w.-]*(?:\s+[A-Z][\w.-]*){0,2})"
+        r"(?:\s*\((?:Remote|Hybrid|On[\s-]?site|Office)[^)]*\))?"
+        r")\s*$",
+        title,
+    )
+    if not match:
+        return None
+    location = match.group("location").strip()
+    if not LOCATION_LIKE_RE.search(location):
+        return None
+    cleaned_title = match.group("title").strip()
+    if not cleaned_title or cleaned_title.lower() == location.lower():
+        return None
+    return cleaned_title, location
+
+
+def _strip_linkedin_ui_markers(value: str | None) -> str:
+    if not value:
+        return ""
+    cleaned = LINKEDIN_UI_MARKER_RE.sub(" ", value)
+    return _clean_text(cleaned)
 
 
 def _split_company_location(text: str) -> tuple[str | None, str | None]:
-    parts = [part.strip() for part in SEPARATOR_RE.split(text) if part.strip()]
+    cleaned = _strip_linkedin_ui_markers(text)
+    parts = [part.strip() for part in SEPARATOR_RE.split(cleaned) if part.strip()]
     if len(parts) >= 2:
         return parts[0], parts[1]
     return (None, None)
 
 
 def _is_noise_text(value: str) -> bool:
-    normalized = _clean_text(value).lower()
+    normalized = _strip_linkedin_ui_markers(_clean_text(value)).lower()
     if not normalized:
         return True
     if normalized in NOISE_TEXT:
