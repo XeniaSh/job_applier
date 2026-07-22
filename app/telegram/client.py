@@ -317,12 +317,16 @@ def build_action_buttons(source: str, external_id: str, url: str) -> list[list[T
     compact_source = map_source_to_code(source)
     skip_data = _callback_data("skip", compact_source, external_id)
     prepare_data = _callback_data("prepare", compact_source, external_id)
+    applied_data = _callback_data("applied", compact_source, external_id)
     return [
         [
-            TelegramInlineButton(text="Prepare application", callback_data=prepare_data),
-            TelegramInlineButton(text="Skip", callback_data=skip_data),
+            TelegramInlineButton(text="Prepare", callback_data=prepare_data),
+            TelegramInlineButton(text="Applied", callback_data=applied_data),
         ],
-        [TelegramInlineButton(text="Open vacancy", url=validated_url)],
+        [
+            TelegramInlineButton(text="Skip", callback_data=skip_data),
+            TelegramInlineButton(text="Open vacancy", url=validated_url),
+        ],
     ]
 
 

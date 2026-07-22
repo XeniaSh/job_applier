@@ -2382,6 +2382,9 @@ def _process_callback_update(
                 chat_id=configured_chat_id,
             )
         elif action == "prepare":
+            if current_status in {STATUS_APPLIED, STATUS_SKIPPED}:
+                answer_once("Вакансия уже закрыта")
+                return
             if current_status in {STATUS_PREPARE_REQUESTED, STATUS_PREPARING}:
                 answer_once("Уже в обработке")
                 if message_id > 0 and url:

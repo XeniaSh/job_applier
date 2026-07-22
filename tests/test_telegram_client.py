@@ -80,7 +80,9 @@ def test_send_message_payload(monkeypatch) -> None:
     assert payload["parse_mode"] == "HTML"
     assert payload["chat_id"] == "123"
     assert payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "prepare:li:4439013108"
-    assert payload["reply_markup"]["inline_keyboard"][0][1]["callback_data"] == "skip:li:4439013108"
+    assert payload["reply_markup"]["inline_keyboard"][0][1]["callback_data"] == "applied:li:4439013108"
+    assert payload["reply_markup"]["inline_keyboard"][1][0]["callback_data"] == "skip:li:4439013108"
+    assert payload["reply_markup"]["inline_keyboard"][1][1]["url"] == "https://www.linkedin.com/jobs/view/4439013108/"
 
 
 def test_url_validation_and_callback_limit() -> None:
@@ -90,7 +92,12 @@ def test_url_validation_and_callback_limit() -> None:
 
     buttons = build_action_buttons("linkedin-email", "4439013108", "https://www.linkedin.com/jobs/view/4439013108/")
     assert len(buttons) == 2
-    assert buttons[1][0].text == "Open vacancy"
+    assert [button.text for button in buttons[0]] == ["Prepare", "Applied"]
+    assert buttons[0][0].callback_data == "prepare:li:4439013108"
+    assert buttons[0][1].callback_data == "applied:li:4439013108"
+    assert buttons[1][0].text == "Skip"
+    assert buttons[1][0].callback_data == "skip:li:4439013108"
+    assert buttons[1][1].text == "Open vacancy"
     assert map_source_to_code("linkedin-email") == "li"
     assert map_source_to_code("greenhouse") == "gh"
     assert map_code_to_source("li") == "linkedin-email"

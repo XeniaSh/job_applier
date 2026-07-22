@@ -1587,3 +1587,294 @@ def test_prepare_message_not_modified_is_harmless() -> None:
     )
     assert calls["updated"] == 1
     assert calls["answers"] == 1
+
+
+def test_applied_before_prepare_updates_card_in_place() -> None:
+    calls = {"status": [], "answers": [], "edits": []}
+
+    class Storage:
+        def __init__(self) -> None:
+            self.status = "SENT"
+
+        def get_delivery(self, source, external_id):
+            _ = source, external_id
+            return type("D", (), {"status": self.status})()
+
+        def update_delivery_and_history(self, **kwargs):
+            calls["status"].append(kwargs)
+            self.status = kwargs["delivery_status"]
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Java Backend", "ACME", "https://www.linkedin.com/jobs/view/100/")
+
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return None
+
+        def clear_preparation_aux_message_ids(self, **kwargs):
+            _ = kwargs
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            calls["answers"].append((callback_query_id, text))
+
+        def edit_message_text(self, **kwargs):
+            calls["edits"].append(kwargs)
+
+        def delete_message(self, **kwargs):
+            _ = kwargs
+
+    storage = Storage()
+    update = {
+        "callback_query": {
+            "id": "cb-applied-before",
+            "data": "applied:li:100",
+            "message": {
+                "chat": {"id": "123"},
+                "message_id": 50,
+                "reply_markup": {
+                    "inline_keyboard": [[{"text": "open", "url": "https://www.linkedin.com/jobs/view/100/"}]]
+                },
+            },
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=Client(),
+        storage=storage,
+        configured_chat_id="123",
+    )
+    assert storage.status == "APPLIED"
+    assert calls["status"][0]["delivery_status"] == "APPLIED"
+    assert calls["status"][0]["timestamp_field"] == "applied_at"
+    assert calls["answers"] == [("cb-applied-before", "Отклик отмечен как отправленный")]
+    assert len(calls["edits"]) == 1
+    assert "✅ Applied" in calls["edits"][0]["text"]
+    assert calls["edits"][0]["buttons"][0][0].text == "🔗 Open vacancy"
+
+
+def test_applied_after_prepare_updates_prepared_card() -> None:
+    calls = {"status": [], "answers": [], "edits": []}
+
+    class Storage:
+        def get_delivery(self, source, external_id):
+            _ = source, external_id
+            return type("D", (), {"status": "PREPARED"})()
+
+        def update_delivery_and_history(self, **kwargs):
+            calls["status"].append(kwargs)
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Java Backend", "ACME", "https://www.linkedin.com/jobs/view/101/")
+
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type("P", (), {"resume_message_id": None, "cover_letter_message_id": None})()
+
+        def clear_preparation_aux_message_ids(self, **kwargs):
+            _ = kwargs
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            calls["answers"].append((callback_query_id, text))
+
+        def edit_message_text(self, **kwargs):
+            calls["edits"].append(kwargs)
+
+        def delete_message(self, **kwargs):
+            _ = kwargs
+
+    cli_module._process_callback_update(
+        update={
+            "callback_query": {
+                "id": "cb-applied-after-prepare",
+                "data": "applied:li:101",
+                "message": {
+                    "chat": {"id": "123"},
+                    "message_id": 51,
+                    "reply_markup": {
+                        "inline_keyboard": [[{"text": "open", "url": "https://www.linkedin.com/jobs/view/101/"}]]
+                    },
+                },
+            }
+        },
+        client=Client(),
+        storage=Storage(),
+        configured_chat_id="123",
+    )
+    assert calls["status"][0]["delivery_status"] == "APPLIED"
+    assert calls["answers"] == [("cb-applied-after-prepare", "Отклик отмечен как отправленный")]
+    assert "✅ Applied" in calls["edits"][0]["text"]
+
+
+def test_applied_after_copy_still_marks_applied() -> None:
+    calls = {"status": [], "answers": [], "edits": []}
+
+    class Storage:
+        def get_delivery(self, source, external_id):
+            _ = source, external_id
+            return type("D", (), {"status": "PREPARED"})()
+
+        def update_delivery_and_history(self, **kwargs):
+            calls["status"].append(kwargs)
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Java Backend", "ACME", "https://www.linkedin.com/jobs/view/102/")
+
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type(
+                "P",
+                (),
+                {
+                    "status": "PREPARED",
+                    "cover_letter": "Letter",
+                    "cover_letter_message_id": 777,
+                    "resume_message_id": None,
+                },
+            )()
+
+        def clear_preparation_aux_message_ids(self, **kwargs):
+            _ = kwargs
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            calls["answers"].append((callback_query_id, text))
+
+        def edit_message_text(self, **kwargs):
+            calls["edits"].append(kwargs)
+
+        def delete_message(self, **kwargs):
+            _ = kwargs
+
+    cli_module._process_callback_update(
+        update={
+            "callback_query": {
+                "id": "cb-applied-after-copy",
+                "data": "applied:li:102",
+                "message": {
+                    "chat": {"id": "123"},
+                    "message_id": 52,
+                    "reply_markup": {
+                        "inline_keyboard": [[{"text": "open", "url": "https://www.linkedin.com/jobs/view/102/"}]]
+                    },
+                },
+            }
+        },
+        client=Client(),
+        storage=Storage(),
+        configured_chat_id="123",
+    )
+    assert calls["status"][0]["delivery_status"] == "APPLIED"
+    assert calls["answers"] == [("cb-applied-after-copy", "Отклик отмечен как отправленный")]
+    assert len(calls["edits"]) == 1
+
+
+def test_repeated_applied_presses_are_idempotent() -> None:
+    calls = {"status": [], "answers": [], "edits": []}
+
+    class Storage:
+        def __init__(self) -> None:
+            self.status = "SENT"
+
+        def get_delivery(self, source, external_id):
+            _ = source, external_id
+            return type("D", (), {"status": self.status})()
+
+        def update_delivery_and_history(self, **kwargs):
+            calls["status"].append(kwargs)
+            self.status = kwargs["delivery_status"]
+
+        def get_history_title_company_url(self, source, external_id):
+            _ = source, external_id
+            return ("Java Backend", "ACME", "https://www.linkedin.com/jobs/view/103/")
+
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return None
+
+        def clear_preparation_aux_message_ids(self, **kwargs):
+            _ = kwargs
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            calls["answers"].append((callback_query_id, text))
+
+        def edit_message_text(self, **kwargs):
+            calls["edits"].append(kwargs)
+
+        def delete_message(self, **kwargs):
+            _ = kwargs
+
+    storage = Storage()
+    client = Client()
+    update = {
+        "callback_query": {
+            "id": "cb-applied-1",
+            "data": "applied:li:103",
+            "message": {
+                "chat": {"id": "123"},
+                "message_id": 53,
+                "reply_markup": {
+                    "inline_keyboard": [[{"text": "open", "url": "https://www.linkedin.com/jobs/view/103/"}]]
+                },
+            },
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=client,
+        storage=storage,
+        configured_chat_id="123",
+    )
+    update["callback_query"]["id"] = "cb-applied-2"
+    cli_module._process_callback_update(
+        update=update,
+        client=client,
+        storage=storage,
+        configured_chat_id="123",
+    )
+    assert len(calls["status"]) == 1
+    assert len(calls["edits"]) == 1
+    assert calls["answers"] == [
+        ("cb-applied-1", "Отклик отмечен как отправленный"),
+        ("cb-applied-2", "Отклик уже отмечен"),
+    ]
+
+
+def test_applied_status_persists_across_storage_restart(tmp_path) -> None:
+    db_path = tmp_path / "jobs.db"
+    storage = TelegramDeliveryStorage(db_path=db_path)
+    storage.save_sent(source="linkedin-email", external_id="104", chat_id="123", message_id=54)
+    storage.upsert_application_history(
+        source="linkedin-email",
+        external_id="104",
+        title="Java Backend",
+        company="ACME",
+        location="Remote",
+        url="https://www.linkedin.com/jobs/view/104/",
+        decision="POTENTIAL_MATCH",
+        decision_reason=None,
+        recommended_resume="java-backend",
+    )
+    storage.update_delivery_and_history(
+        source="linkedin-email",
+        external_id="104",
+        chat_id="123",
+        delivery_status="APPLIED",
+        history_status="APPLIED",
+        timestamp_field="applied_at",
+    )
+
+    restarted = TelegramDeliveryStorage(db_path=db_path)
+    delivery = restarted.get_delivery("linkedin-email", "104")
+    assert delivery is not None
+    assert delivery.status == "APPLIED"
+    history = restarted.list_application_history(limit=10)
+    applied_rows = [row for row in history if row.external_id == "104"]
+    assert applied_rows
+    assert applied_rows[0].current_status == "APPLIED"
+    assert applied_rows[0].applied_at is not None
