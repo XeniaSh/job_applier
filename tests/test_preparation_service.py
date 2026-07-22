@@ -156,6 +156,7 @@ def test_prepare_uses_cached_analysis_and_skips_imap(tmp_path: Path, monkeypatch
             "url": "https://www.linkedin.com/jobs/view/123/",
             "content_completeness": "PARTIAL",
             "snippet": "Snippet",
+            "vacancy_json": '{"title":"Java Backend Engineer","analysis_text":"Title: Java Backend Engineer"}',
         }
     )
     analyzer = _FakeAnalyzer()
@@ -174,6 +175,8 @@ def test_prepare_uses_cached_analysis_and_skips_imap(tmp_path: Path, monkeypatch
     assert llm.cover_calls == 1
     assert prepared.timing_breakdown["llm_calls"] == 1
     assert prepared.timing_breakdown["analysis_cached"] is True
+    assert prepared.timing_breakdown["imap_fallback"] is False
+    assert prepared.timing_breakdown["phases_ms"]["imap_fetch"] == 0
     phases = prepared.timing_breakdown["phases_ms"]
     for phase_name in (
         "resume_generation",
@@ -205,6 +208,73 @@ def test_prepare_uses_cached_analysis_and_skips_imap(tmp_path: Path, monkeypatch
     assert "resume_generation=" in log_text
     assert "validation=" in log_text
     assert "serialization=" in log_text
+
+
+def test_prepare_uses_vacancy_cache_without_evaluation_and_skips_imap(tmp_path: Path, monkeypatch) -> None:
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    cache = _FakePrepareCache(
+        {
+            "evaluation_json": None,
+            "analysis_text": "Title: Java Backend Engineer\nCompany: ACME\nLocation: Remote\nContent completeness: PARTIAL",
+            "title": "Java Backend Engineer",
+            "company": "ACME",
+            "location": "Remote",
+            "url": "https://www.linkedin.com/jobs/view/321/",
+            "content_completeness": "PARTIAL",
+            "snippet": None,
+            "vacancy_json": '{"title":"Java Backend Engineer","analysis_text":"Title: Java Backend Engineer"}',
+        }
+    )
+    analyzer = _FakeAnalyzer()
+    service = PreparationService(
+        analyzer=analyzer,
+        llm_client=_FakeLLM(language="en", text="I have around seven years of Java backend experience."),
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=cache,
+        allow_imap_fallback=False,
+    )
+    prepared = service.prepare("linkedin-email", "321")
+    assert analyzer.calls == 1
+    assert prepared.timing_breakdown["analysis_cached"] is False
+    assert prepared.timing_breakdown["imap_fallback"] is False
+    assert prepared.timing_breakdown["phases_ms"]["imap_fetch"] == 0
+    assert cache.saved is not None
+    assert cache.saved["evaluation_json"]
+
+
+def test_prepare_without_cache_raises_when_imap_fallback_disabled(tmp_path: Path, monkeypatch) -> None:
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="profile",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=_FakeLLM(language="en", text="letter"),
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=_FakePrepareCache(None),
+        allow_imap_fallback=False,
+    )
+    with pytest.raises(ApplicationPreparationError, match="Cached vacancy is missing"):
+        service.prepare("linkedin-email", "999")
 
 
 def test_missing_resume_warning(tmp_path: Path, monkeypatch) -> None:

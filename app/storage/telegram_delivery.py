@@ -663,7 +663,7 @@ class TelegramDeliveryStorage:
         *,
         source: str,
         external_id: str,
-        evaluation_json: str,
+        evaluation_json: str | None,
         analysis_text: str,
         title: str | None,
         company: str | None,
@@ -671,18 +671,33 @@ class TelegramDeliveryStorage:
         url: str | None,
         content_completeness: str | None,
         snippet: str | None = None,
+        alert_query: str | None = None,
+        email_subject_context: str | None = None,
+        email_message_id: str | None = None,
+        received_at: str | None = None,
+        snippet_source: str | None = None,
+        parser_source: str | None = None,
+        visible_text: str | None = None,
+        vacancy_json: str | None = None,
     ) -> None:
         cached_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
+            self._ensure_prepare_cache_columns(conn)
             conn.execute(
                 """
                 insert into vacancy_prepare_cache (
                     source, external_id, evaluation_json, analysis_text,
-                    title, company, location, url, content_completeness, snippet, cached_at
+                    title, company, location, url, content_completeness, snippet,
+                    alert_query, email_subject_context, email_message_id, received_at,
+                    snippet_source, parser_source, visible_text, vacancy_json, cached_at
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(source, external_id) do update set
-                    evaluation_json = excluded.evaluation_json,
+                    evaluation_json = case
+                        when excluded.evaluation_json is not null and length(excluded.evaluation_json) > 0
+                        then excluded.evaluation_json
+                        else vacancy_prepare_cache.evaluation_json
+                    end,
                     analysis_text = excluded.analysis_text,
                     title = excluded.title,
                     company = excluded.company,
@@ -690,12 +705,24 @@ class TelegramDeliveryStorage:
                     url = excluded.url,
                     content_completeness = excluded.content_completeness,
                     snippet = excluded.snippet,
+                    alert_query = excluded.alert_query,
+                    email_subject_context = excluded.email_subject_context,
+                    email_message_id = excluded.email_message_id,
+                    received_at = excluded.received_at,
+                    snippet_source = excluded.snippet_source,
+                    parser_source = excluded.parser_source,
+                    visible_text = excluded.visible_text,
+                    vacancy_json = case
+                        when excluded.vacancy_json is not null and length(excluded.vacancy_json) > 0
+                        then excluded.vacancy_json
+                        else vacancy_prepare_cache.vacancy_json
+                    end,
                     cached_at = excluded.cached_at
                 """,
                 (
                     source,
                     external_id,
-                    evaluation_json,
+                    evaluation_json or "",
                     analysis_text,
                     title,
                     company,
@@ -703,6 +730,14 @@ class TelegramDeliveryStorage:
                     url,
                     content_completeness,
                     snippet,
+                    alert_query,
+                    email_subject_context,
+                    email_message_id,
+                    received_at,
+                    snippet_source,
+                    parser_source,
+                    visible_text,
+                    vacancy_json,
                     cached_at,
                 ),
             )
@@ -710,11 +745,14 @@ class TelegramDeliveryStorage:
 
     def get_prepare_cache(self, source: str, external_id: str) -> dict | None:
         with self._connect() as conn:
+            self._ensure_prepare_cache_columns(conn)
             row = conn.execute(
                 """
                 select
                     source, external_id, evaluation_json, analysis_text,
-                    title, company, location, url, content_completeness, snippet, cached_at
+                    title, company, location, url, content_completeness, snippet, cached_at,
+                    alert_query, email_subject_context, email_message_id, received_at,
+                    snippet_source, parser_source, visible_text, vacancy_json
                 from vacancy_prepare_cache
                 where source = ? and external_id = ?
                 """,
@@ -722,10 +760,11 @@ class TelegramDeliveryStorage:
             ).fetchone()
         if row is None:
             return None
+        evaluation_json = row[2]
         return {
             "source": str(row[0]),
             "external_id": str(row[1]),
-            "evaluation_json": str(row[2]),
+            "evaluation_json": str(evaluation_json) if evaluation_json not in (None, "") else None,
             "analysis_text": str(row[3]),
             "title": str(row[4]) if row[4] is not None else None,
             "company": str(row[5]) if row[5] is not None else None,
@@ -734,6 +773,14 @@ class TelegramDeliveryStorage:
             "content_completeness": str(row[8]) if row[8] is not None else None,
             "snippet": str(row[9]) if row[9] is not None else None,
             "cached_at": str(row[10]),
+            "alert_query": str(row[11]) if row[11] is not None else None,
+            "email_subject_context": str(row[12]) if row[12] is not None else None,
+            "email_message_id": str(row[13]) if row[13] is not None else None,
+            "received_at": str(row[14]) if row[14] is not None else None,
+            "snippet_source": str(row[15]) if row[15] is not None else None,
+            "parser_source": str(row[16]) if row[16] is not None else None,
+            "visible_text": str(row[17]) if row[17] is not None else None,
+            "vacancy_json": str(row[18]) if row[18] is not None else None,
         }
 
     def list_resume_cache(self) -> list[TelegramResumeCacheRecord]:
@@ -1040,7 +1087,7 @@ class TelegramDeliveryStorage:
                 create table if not exists vacancy_prepare_cache (
                     source text not null,
                     external_id text not null,
-                    evaluation_json text not null,
+                    evaluation_json text,
                     analysis_text text not null,
                     title text,
                     company text,
@@ -1048,11 +1095,20 @@ class TelegramDeliveryStorage:
                     url text,
                     content_completeness text,
                     snippet text,
+                    alert_query text,
+                    email_subject_context text,
+                    email_message_id text,
+                    received_at text,
+                    snippet_source text,
+                    parser_source text,
+                    visible_text text,
+                    vacancy_json text,
                     cached_at text not null,
                     primary key (source, external_id)
                 )
                 """
             )
+            self._ensure_prepare_cache_columns(conn)
             conn.commit()
 
     def _ensure_preparation_columns(self, conn: sqlite3.Connection) -> None:
@@ -1076,6 +1132,26 @@ class TelegramDeliveryStorage:
         existing = {str(row[1]) for row in rows}
         if "decision_reason" not in existing:
             conn.execute("alter table application_history add column decision_reason text")
+
+    def _ensure_prepare_cache_columns(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("pragma table_info(vacancy_prepare_cache)").fetchall()
+        if not rows:
+            return
+        existing = {str(row[1]) for row in rows}
+        extra_columns = {
+            "alert_query": "text",
+            "email_subject_context": "text",
+            "email_message_id": "text",
+            "received_at": "text",
+            "snippet_source": "text",
+            "parser_source": "text",
+            "visible_text": "text",
+            "vacancy_json": "text",
+        }
+        for name, type_name in extra_columns.items():
+            if name in existing:
+                continue
+            conn.execute(f"alter table vacancy_prepare_cache add column {name} {type_name}")
 
 
 def _parse_iso_datetime(value: object) -> datetime | None:

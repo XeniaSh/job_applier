@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import json
 import time
 from dataclasses import dataclass, field
 
@@ -37,6 +38,14 @@ class LinkedInProcessedVacancy:
     source: str = "linkedin-email"
     analysis_text: str | None = None
     snippet: str | None = None
+    alert_query: str | None = None
+    email_subject_context: str | None = None
+    email_message_id: str | None = None
+    received_at: str | None = None
+    snippet_source: str | None = None
+    parser_source: str | None = None
+    visible_text: str | None = None
+    vacancy_json: str | None = None
 
 
 @dataclass
@@ -165,6 +174,7 @@ class LinkedInEmailCollector(VacancyCollector):
             report.new_vacancies += 1
 
             title_gate = evaluate_title(vacancy.title)
+            vacancy_snapshot = _vacancy_snapshot_fields(vacancy)
             if not title_gate.accepted:
                 report.prefiltered += 1
                 report.processed.append(
@@ -178,6 +188,7 @@ class LinkedInEmailCollector(VacancyCollector):
                         evaluation=None,
                         skipped_by_prefilter=True,
                         decision_reason=title_gate.reason,
+                        **vacancy_snapshot,
                     )
                 )
                 if mark_seen and not dry_run:
@@ -194,7 +205,8 @@ class LinkedInEmailCollector(VacancyCollector):
                         url=vacancy.url,
                         content_completeness=vacancy.content_completeness.value,
                         evaluation=None,
-                    decision_reason=None,
+                        decision_reason=None,
+                        **vacancy_snapshot,
                     )
                 )
                 continue
@@ -228,8 +240,7 @@ class LinkedInEmailCollector(VacancyCollector):
                     content_completeness=vacancy.content_completeness.value,
                     evaluation=evaluation,
                     decision_reason=evaluation.decision_reason,
-                    analysis_text=vacancy.to_analysis_text(),
-                    snippet=vacancy.snippet,
+                    **vacancy_snapshot,
                 )
             )
 
@@ -516,3 +527,19 @@ def _fallback_parser_diagnostics(
         cards_with_only_title=0,
         card_diagnostics=cards,
     )
+
+
+def _vacancy_snapshot_fields(vacancy: LinkedInEmailVacancy) -> dict:
+    payload = vacancy.to_cache_payload()
+    return {
+        "analysis_text": payload["analysis_text"],
+        "snippet": vacancy.snippet,
+        "alert_query": vacancy.alert_query,
+        "email_subject_context": vacancy.email_subject_context,
+        "email_message_id": vacancy.email_message_id,
+        "received_at": payload["received_at"],
+        "snippet_source": vacancy.snippet_source,
+        "parser_source": vacancy.parser_source.value,
+        "visible_text": vacancy.visible_text,
+        "vacancy_json": json.dumps(payload, ensure_ascii=False),
+    }

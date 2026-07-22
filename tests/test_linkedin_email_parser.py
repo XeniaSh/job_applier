@@ -278,6 +278,54 @@ def test_location_recovered_from_merged_title_when_field_empty() -> None:
     assert item.location is not None and item.location.strip() != ""
 
 
+def test_role_words_stay_in_title_not_moved_to_location() -> None:
+    cases = (
+        (
+            "8888888881",
+            "Backend Software Developer (Remote)",
+            "Backend Software Developer",
+            "Remote",
+        ),
+        (
+            "8888888882",
+            "Java Backend Developer (Remote)",
+            "Java Backend Developer",
+            "Remote",
+        ),
+        (
+            "8888888883",
+            "Backend Software Developer",
+            "Backend Software Developer",
+            None,
+        ),
+        (
+            "8888888884",
+            "Java Backend Developer",
+            "Java Backend Developer",
+            None,
+        ),
+        (
+            "8888888885",
+            "Senior Software Engineer · Remote",
+            "Senior Software Engineer",
+            "Remote",
+        ),
+    )
+    cards = "\n".join(
+        f'<a href="https://www.linkedin.com/jobs/view/{job_id}/">{title}</a>'
+        for job_id, title, _, _ in cases
+    )
+    vacancies = parse_linkedin_email(_raw_message_from_html(f"<html><body>{cards}</body></html>"))
+    by_id = {item.external_id: item for item in vacancies}
+    for job_id, _raw_title, expected_title, expected_location in cases:
+        item = by_id[job_id]
+        assert item.title == expected_title, job_id
+        assert item.location == expected_location, job_id
+        assert "Software" not in (item.location or "")
+        assert "Developer" not in (item.location or "")
+        assert "Backend" not in (item.location or "")
+
+
 def test_subject_from_vacancy_a_is_not_injected_into_vacancy_b_analysis_text() -> None:
     message = EmailMessage()
     message["From"] = "jobs-noreply@linkedin.com"

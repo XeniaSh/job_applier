@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
 import logging
 import re
 from time import perf_counter
@@ -59,7 +60,7 @@ class PrepareCacheStore(Protocol):
         *,
         source: str,
         external_id: str,
-        evaluation_json: str,
+        evaluation_json: str | None,
         analysis_text: str,
         title: str | None,
         company: str | None,
@@ -67,6 +68,14 @@ class PrepareCacheStore(Protocol):
         url: str | None,
         content_completeness: str | None,
         snippet: str | None = None,
+        alert_query: str | None = None,
+        email_subject_context: str | None = None,
+        email_message_id: str | None = None,
+        received_at: str | None = None,
+        snippet_source: str | None = None,
+        parser_source: str | None = None,
+        visible_text: str | None = None,
+        vacancy_json: str | None = None,
     ) -> None: ...
 
 
@@ -81,6 +90,7 @@ class PreparationService:
         preferred_language: str = "en",
         grammatical_gender: str = "neutral",
         prepare_cache: PrepareCacheStore | None = None,
+        allow_imap_fallback: bool = True,
     ) -> None:
         self._analyzer = analyzer
         self._llm_client = llm_client
@@ -89,6 +99,7 @@ class PreparationService:
         self._preferred_language = preferred_language
         self._grammatical_gender = grammatical_gender
         self._prepare_cache = prepare_cache
+        self._allow_imap_fallback = allow_imap_fallback
         self._profile_context: CandidateProfileContext | None = None
 
     def prepare(self, source: str, external_id: str) -> PreparedApplication:
@@ -114,36 +125,57 @@ class PreparationService:
         analysis_text: str
         vacancy_meta: _VacancyMeta
         analysis_cached = False
+        used_imap_fallback = False
 
-        if cached is not None:
+        if _cache_has_usable_vacancy(cached):
             logger.info("START imap_fetch")
             phase_ms["imap_fetch"] = 0
-            logger.info("END imap_fetch +0ms (skipped, cache hit)")
+            logger.info("END imap_fetch +0ms (skipped, vacancy cache hit)")
 
             logger.info("START analysis")
             analysis_started = perf_counter()
-            analysis = VacancyEvaluation.model_validate_json(cached["evaluation_json"])
+            vacancy_meta = _meta_from_cache(cached)
             analysis_text = str(cached["analysis_text"])
-            vacancy_meta = _VacancyMeta(
-                title=str(cached.get("title") or "Untitled"),
-                company=cached.get("company"),
-                location=cached.get("location"),
-                url=str(cached.get("url") or ""),
-                content_completeness=str(cached.get("content_completeness") or "PARTIAL"),
-                snippet=cached.get("snippet"),
-            )
-            analysis_cached = True
+            evaluation_json = cached.get("evaluation_json")
+            if evaluation_json:
+                try:
+                    analysis = VacancyEvaluation.model_validate_json(evaluation_json)
+                    analysis_cached = True
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Cached evaluation corrupted for %s:%s; re-analyzing from cached vacancy",
+                        source,
+                        external_id,
+                    )
+                    analysis = self._analyzer.analyze(
+                        analysis_text,
+                        content_completeness=vacancy_meta.content_completeness,
+                    )
+            else:
+                analysis = self._analyzer.analyze(
+                    analysis_text,
+                    content_completeness=vacancy_meta.content_completeness,
+                )
             phase_ms["analysis"] = int((perf_counter() - analysis_started) * 1000)
-            logger.info("END analysis +%dms (cached)", phase_ms["analysis"])
+            logger.info(
+                "END analysis +%dms%s",
+                phase_ms["analysis"],
+                " (cached)" if analysis_cached else " (from vacancy cache)",
+            )
         else:
+            if not self._allow_imap_fallback:
+                raise ApplicationPreparationError(
+                    "Cached vacancy is missing. Re-collect LinkedIn emails before preparing."
+                )
             logger.info("START imap_fetch")
             imap_started = perf_counter()
             vacancy = self._find_linkedin_vacancy(external_id)
             phase_ms["imap_fetch"] = int((perf_counter() - imap_started) * 1000)
             logger.info("END imap_fetch +%dms", phase_ms["imap_fetch"])
+            used_imap_fallback = True
             if vacancy is None:
                 raise ApplicationPreparationError(
-                    "Не удалось найти данные вакансии в последних LinkedIn-письмах."
+                    "Не удалось найти данные вакансии в кэше и в последних LinkedIn-письмах."
                 )
 
             logger.info("START analysis")
@@ -160,6 +192,14 @@ class PreparationService:
                 url=vacancy.url,
                 content_completeness=vacancy.content_completeness.value,
                 snippet=vacancy.snippet,
+                alert_query=vacancy.alert_query,
+                email_subject_context=vacancy.email_subject_context,
+                email_message_id=vacancy.email_message_id,
+                received_at=vacancy.received_at.isoformat() if vacancy.received_at else None,
+                snippet_source=vacancy.snippet_source,
+                parser_source=vacancy.parser_source.value,
+                visible_text=vacancy.visible_text,
+                vacancy_json=json.dumps(vacancy.to_cache_payload(), ensure_ascii=False),
             )
             phase_ms["analysis"] = int((perf_counter() - analysis_started) * 1000)
             logger.info("END analysis +%dms", phase_ms["analysis"])
@@ -186,7 +226,7 @@ class PreparationService:
 
         logger.info("START serialization")
         serialization_started = perf_counter()
-        if not analysis_cached:
+        if not analysis_cached or used_imap_fallback:
             self._store_prepare_cache(
                 source=source,
                 external_id=external_id,
@@ -211,17 +251,19 @@ class PreparationService:
             "llm_calls": len(llm_events),
             "model": model,
             "analysis_cached": analysis_cached,
+            "imap_fallback": used_imap_fallback,
             "phases_ms": phase_ms,
             "llm_events": llm_events,
             "total_ms": total_ms,
         }
         logger.info(
-            "Prepare timing breakdown llm_calls=%d model=%s analysis_cached=%s "
+            "Prepare timing breakdown llm_calls=%d model=%s analysis_cached=%s imap_fallback=%s "
             "resume_generation=%dms application_answers=%dms imap_fetch=%dms analysis=%dms "
             "cover_letter=%dms validation=%dms serialization=%dms total=%dms",
             timing_breakdown["llm_calls"],
             model,
             analysis_cached,
+            used_imap_fallback,
             phase_ms.get("resume_generation", 0),
             phase_ms.get("application_answers", 0),
             phase_ms.get("imap_fetch", 0),
@@ -298,6 +340,14 @@ class PreparationService:
                 url=meta.url,
                 content_completeness=meta.content_completeness,
                 snippet=meta.snippet,
+                alert_query=meta.alert_query,
+                email_subject_context=meta.email_subject_context,
+                email_message_id=meta.email_message_id,
+                received_at=meta.received_at,
+                snippet_source=meta.snippet_source,
+                parser_source=meta.parser_source,
+                visible_text=meta.visible_text,
+                vacancy_json=meta.vacancy_json,
             )
         except Exception:  # noqa: BLE001
             logger.warning("Failed to write prepare cache for %s:%s", source, external_id)
@@ -343,6 +393,14 @@ class _VacancyMeta:
     url: str
     content_completeness: str
     snippet: str | None = None
+    alert_query: str | None = None
+    email_subject_context: str | None = None
+    email_message_id: str | None = None
+    received_at: str | None = None
+    snippet_source: str | None = None
+    parser_source: str | None = None
+    visible_text: str | None = None
+    vacancy_json: str | None = None
 
 
 def resolve_resume_path(resumes_dir: Path, resume_name: str) -> tuple[Path | None, str | None]:
@@ -360,6 +418,53 @@ def resolve_resume_path(resumes_dir: Path, resume_name: str) -> tuple[Path | Non
     if candidate.exists() and candidate.is_file():
         return candidate, None
     return None, f"Resume file missing: {resumes_dir.as_posix()}/{safe_name}.pdf"
+
+
+def _cache_has_usable_vacancy(cached: dict | None) -> bool:
+    if not cached:
+        return False
+    analysis_text = str(cached.get("analysis_text") or "").strip()
+    if analysis_text:
+        return True
+    vacancy_json = cached.get("vacancy_json")
+    return bool(vacancy_json and str(vacancy_json).strip())
+
+
+def _meta_from_cache(cached: dict) -> _VacancyMeta:
+    analysis_text = str(cached.get("analysis_text") or "").strip()
+    vacancy_json = cached.get("vacancy_json")
+    payload: dict[str, Any] = {}
+    if vacancy_json:
+        try:
+            loaded = json.loads(str(vacancy_json))
+            if isinstance(loaded, dict):
+                payload = loaded
+                if not analysis_text:
+                    analysis_text = str(payload.get("analysis_text") or "").strip()
+        except Exception:  # noqa: BLE001
+            payload = {}
+    if not analysis_text:
+        raise ApplicationPreparationError("Cached vacancy is missing analysis text.")
+    # Keep analysis_text on the cache dict for callers that already loaded it.
+    cached["analysis_text"] = analysis_text
+    return _VacancyMeta(
+        title=str(cached.get("title") or payload.get("title") or "Untitled"),
+        company=cached.get("company") if cached.get("company") is not None else payload.get("company"),
+        location=cached.get("location") if cached.get("location") is not None else payload.get("location"),
+        url=str(cached.get("url") or payload.get("url") or ""),
+        content_completeness=str(
+            cached.get("content_completeness") or payload.get("content_completeness") or "PARTIAL"
+        ),
+        snippet=cached.get("snippet") if cached.get("snippet") is not None else payload.get("snippet"),
+        alert_query=cached.get("alert_query") or payload.get("alert_query"),
+        email_subject_context=cached.get("email_subject_context") or payload.get("email_subject_context"),
+        email_message_id=cached.get("email_message_id") or payload.get("email_message_id"),
+        received_at=cached.get("received_at") or payload.get("received_at"),
+        snippet_source=cached.get("snippet_source") or payload.get("snippet_source"),
+        parser_source=cached.get("parser_source") or payload.get("parser_source"),
+        visible_text=cached.get("visible_text") or payload.get("visible_text"),
+        vacancy_json=str(vacancy_json) if vacancy_json else None,
+    )
 
 
 def _validate_prepared_cover_letter(cover_result: CoverLetterResult) -> None:

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 import hashlib
 import inspect
+import json
 import logging
 import os
 import re
@@ -1611,10 +1612,35 @@ def _deliver_pipeline_items(
                 company=item.vacancy.company,
                 location=item.vacancy.location,
                 url=item.vacancy.url,
-                content_completeness="FULL",
+                content_completeness=item.vacancy.content_completeness or "FULL",
                 evaluation=item.analysis_result,
                 decision_reason=item.analysis_result.decision_reason,
                 source=item.source,
+                analysis_text=item.vacancy.to_analysis_text(),
+                snippet=item.vacancy.snippet,
+                alert_query=item.vacancy.alert_query,
+                email_subject_context=item.vacancy.email_subject_context,
+                received_at=item.vacancy.published_at,
+                snippet_source=item.vacancy.snippet_source,
+                visible_text=item.vacancy.raw_text_preview,
+                vacancy_json=json.dumps(
+                    {
+                        "external_id": item.vacancy.external_id,
+                        "title": item.vacancy.title,
+                        "company": item.vacancy.company,
+                        "location": item.vacancy.location,
+                        "url": item.vacancy.url,
+                        "snippet": item.vacancy.snippet,
+                        "received_at": item.vacancy.published_at,
+                        "content_completeness": item.vacancy.content_completeness,
+                        "email_subject_context": item.vacancy.email_subject_context,
+                        "alert_query": item.vacancy.alert_query,
+                        "snippet_source": item.vacancy.snippet_source,
+                        "visible_text": item.vacancy.raw_text_preview,
+                        "analysis_text": item.vacancy.to_analysis_text(),
+                    },
+                    ensure_ascii=False,
+                ),
             )
         )
 
@@ -2802,19 +2828,41 @@ def _upsert_history_item(item: LinkedInProcessedVacancy) -> None:
         decision_reason=(evaluation.decision_reason if evaluation else item.decision_reason),
         recommended_resume=evaluation.recommended_resume.value if evaluation else None,
     )
-    if item.evaluation is not None and item.analysis_text:
-        storage.save_prepare_cache(
+    analysis_text = item.analysis_text
+    if not analysis_text and item.vacancy_json:
+        analysis_text = _analysis_text_from_vacancy_json(item.vacancy_json)
+    save_prepare_cache = getattr(storage, "save_prepare_cache", None)
+    if analysis_text and callable(save_prepare_cache):
+        save_prepare_cache(
             source=item.source,
             external_id=item.external_id,
-            evaluation_json=item.evaluation.model_dump_json(),
-            analysis_text=item.analysis_text,
+            evaluation_json=item.evaluation.model_dump_json() if item.evaluation is not None else None,
+            analysis_text=analysis_text,
             title=item.title,
             company=item.company,
             location=item.location,
             url=item.url,
             content_completeness=item.content_completeness,
             snippet=item.snippet,
+            alert_query=item.alert_query,
+            email_subject_context=item.email_subject_context,
+            email_message_id=item.email_message_id,
+            received_at=item.received_at,
+            snippet_source=item.snippet_source,
+            parser_source=item.parser_source,
+            visible_text=item.visible_text,
+            vacancy_json=item.vacancy_json,
         )
+
+def _analysis_text_from_vacancy_json(vacancy_json: str) -> str | None:
+    try:
+        payload = json.loads(vacancy_json)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    text = payload.get("analysis_text")
+    return str(text) if text else None
 
 
 def _safe_percent(numerator: int, denominator: int) -> float:

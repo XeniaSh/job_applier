@@ -237,6 +237,14 @@ def test_prepare_cache_save_and_get_roundtrip(tmp_path: Path) -> None:
         url="https://www.linkedin.com/jobs/view/1/",
         content_completeness="PARTIAL",
         snippet="Build APIs",
+        alert_query="Java Backend",
+        email_subject_context="Java Backend posted in the past 24 hours",
+        email_message_id="<m1>",
+        received_at="2026-07-22T10:00:00+00:00",
+        snippet_source="body",
+        parser_source="STRUCTURED_CARD",
+        visible_text="Java Backend\nAcme · Remote",
+        vacancy_json='{"title":"Java Backend","analysis_text":"Title: Java Backend"}',
     )
     cached = storage.get_prepare_cache("linkedin-email", "job-1")
     assert cached is not None
@@ -250,6 +258,9 @@ def test_prepare_cache_save_and_get_roundtrip(tmp_path: Path) -> None:
     assert cached["url"] == "https://www.linkedin.com/jobs/view/1/"
     assert cached["content_completeness"] == "PARTIAL"
     assert cached["snippet"] == "Build APIs"
+    assert cached["alert_query"] == "Java Backend"
+    assert cached["visible_text"] == "Java Backend\nAcme · Remote"
+    assert cached["vacancy_json"]
     assert cached["cached_at"]
 
     storage.save_prepare_cache(
@@ -271,6 +282,51 @@ def test_prepare_cache_save_and_get_roundtrip(tmp_path: Path) -> None:
     assert updated["title"] == "Senior Java Backend"
     assert updated["snippet"] is None
     assert storage.get_prepare_cache("linkedin-email", "missing") is None
+
+
+def test_prepare_cache_migrates_legacy_schema_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        create table vacancy_prepare_cache (
+            source text not null,
+            external_id text not null,
+            evaluation_json text not null,
+            analysis_text text not null,
+            title text,
+            company text,
+            location text,
+            url text,
+            content_completeness text,
+            snippet text,
+            cached_at text not null,
+            primary key (source, external_id)
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    storage = TelegramDeliveryStorage(db_path=db_path)
+    storage.save_prepare_cache(
+        source="linkedin-email",
+        external_id="legacy-1",
+        evaluation_json=None,
+        analysis_text="Title: Java Backend Developer",
+        title="Java Backend Developer",
+        company="ACME",
+        location="Remote",
+        url="https://www.linkedin.com/jobs/view/legacy-1/",
+        content_completeness="PARTIAL",
+        vacancy_json='{"title":"Java Backend Developer"}',
+        visible_text="Java Backend Developer · Remote",
+    )
+    cached = storage.get_prepare_cache("linkedin-email", "legacy-1")
+    assert cached is not None
+    assert cached["evaluation_json"] is None
+    assert cached["vacancy_json"]
+    assert cached["visible_text"] == "Java Backend Developer · Remote"
 
 
 def test_recover_abandoned_preparing_when_worker_not_alive(tmp_path: Path) -> None:

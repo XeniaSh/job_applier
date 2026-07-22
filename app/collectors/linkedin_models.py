@@ -34,6 +34,7 @@ class LinkedInEmailVacancy:
     alert_query: str | None = None
     snippet_source: str = "missing"
     parser_source: ParserSource = ParserSource.FALLBACK_URL
+    visible_text: str | None = None
 
     def to_analysis_text(self) -> str:
         lines = [f"Title: {self.title}"]
@@ -52,3 +53,22 @@ class LinkedInEmailVacancy:
 
     def description_for_normalized(self) -> str:
         return " ".join((self.snippet or "").split())
+
+    def to_cache_payload(self) -> dict:
+        return {
+            "external_id": self.external_id,
+            "title": self.title,
+            "company": self.company,
+            "location": self.location,
+            "url": self.url,
+            "snippet": self.snippet,
+            "email_message_id": self.email_message_id,
+            "received_at": self.received_at.isoformat() if self.received_at else None,
+            "content_completeness": self.content_completeness.value,
+            "email_subject_context": self.email_subject_context,
+            "alert_query": self.alert_query,
+            "snippet_source": self.snippet_source,
+            "parser_source": self.parser_source.value,
+            "visible_text": self.visible_text,
+            "analysis_text": self.to_analysis_text(),
+        }

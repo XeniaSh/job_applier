@@ -77,6 +77,53 @@ LOCATION_LIKE_RE = re.compile(
     r"yerevan|berlin|london|paris|amsterdam|moscow|tbilisi|baku|warsaw|"
     r"germany|armenia|netherlands|poland|georgia|azerbaijan|uk|usa|uae)\b"
 )
+WORK_MODE_SUFFIX_RE = re.compile(
+    r"(?i)\s*\((?:Remote|Hybrid|On[\s-]?site|Office)[^)]*\)\s*$"
+)
+ROLE_LOCATION_BLOCKLIST = frozenset(
+    {
+        "software",
+        "developer",
+        "engineer",
+        "engineering",
+        "backend",
+        "frontend",
+        "front",
+        "end",
+        "fullstack",
+        "full",
+        "stack",
+        "lead",
+        "architect",
+        "manager",
+        "analyst",
+        "scientist",
+        "designer",
+        "programmer",
+        "specialist",
+        "consultant",
+        "intern",
+        "senior",
+        "junior",
+        "staff",
+        "principal",
+        "platform",
+        "api",
+        "java",
+        "kotlin",
+        "spring",
+        "jvm",
+        "python",
+        "devops",
+        "qa",
+        "mobile",
+        "ios",
+        "android",
+        "data",
+        "ml",
+        "ai",
+    }
+)
 PROMOTIONAL_MARKERS = (
     "stand out and let hirers know",
     "try premium",
@@ -274,6 +321,7 @@ def parse_linkedin_email_with_diagnostics(
                     alert_query=alert_query,
                     snippet_source=snippet_source,
                     parser_source=ParserSource.STRUCTURED_CARD,
+                    visible_text=visible_text_preview or None,
                 )
             )
             card_diagnostics.append(
@@ -612,11 +660,12 @@ def _unmerge_title_company_location(
             right = parts[-1]
             if len(parts) >= 3 and not working_company:
                 working_company = parts[1]
-            if not working_location:
-                working_location = right
-            elif working_location.lower() != right.lower() and LOCATION_LIKE_RE.search(right):
-                # Prefer explicit location recovered from the merged title.
-                working_location = right
+            if _looks_like_location(right):
+                if not working_location:
+                    working_location = right
+                elif working_location.lower() != right.lower():
+                    # Prefer explicit location recovered from the merged title.
+                    working_location = right
             working_title = left
 
     working_title, extracted_company = _split_title_and_company(working_title, working_company)
@@ -628,6 +677,12 @@ def _unmerge_title_company_location(
         recovered = _recover_location_from_text(working_title)
         if recovered is not None:
             working_title, working_location = recovered
+
+    # Move trailing work-mode markers like "(Remote)" into location without cutting role words.
+    if not working_location:
+        mode_split = _extract_trailing_work_mode(working_title)
+        if mode_split is not None:
+            working_title, working_location = mode_split
 
     working_title = _strip_linkedin_ui_markers(working_title)
     return (
@@ -652,10 +707,33 @@ def _split_title_and_company(title: str, known_company: str | None) -> tuple[str
     role_match = TRAILING_COMPANY_AFTER_ROLE_RE.match(title)
     if role_match:
         candidate = role_match.group("company").strip()
-        if candidate and not LOCATION_LIKE_RE.search(candidate) and candidate.lower() not in NOISE_TEXT:
+        if (
+            candidate
+            and not _looks_like_location(candidate)
+            and not _contains_role_token(candidate)
+            and candidate.lower() not in NOISE_TEXT
+        ):
             return role_match.group("title").strip(), candidate
 
     return title, known_company
+
+
+def _contains_role_token(text: str) -> bool:
+    tokens = re.findall(r"[A-Za-zА-Яа-яЁё]+", text.lower())
+    return any(token in ROLE_LOCATION_BLOCKLIST for token in tokens)
+
+
+def _looks_like_location(text: str) -> bool:
+    """True only for genuine place/work-mode text, never for job-role fragments."""
+    cleaned = _clean_text(text)
+    if not cleaned:
+        return False
+    place_core = WORK_MODE_SUFFIX_RE.sub("", cleaned).strip(" ,;-·•")
+    if not place_core:
+        return bool(LOCATION_LIKE_RE.search(cleaned))
+    if _contains_role_token(place_core):
+        return False
+    return bool(LOCATION_LIKE_RE.search(place_core))
 
 
 def _recover_location_from_text(title: str) -> tuple[str, str] | None:
@@ -671,12 +749,28 @@ def _recover_location_from_text(title: str) -> tuple[str, str] | None:
     if not match:
         return None
     location = match.group("location").strip()
-    if not LOCATION_LIKE_RE.search(location):
+    if not _looks_like_location(location):
         return None
     cleaned_title = match.group("title").strip()
     if not cleaned_title or cleaned_title.lower() == location.lower():
         return None
+    # Do not leave a truncated role word as the title (e.g. "Backend" / "Java").
+    if len(cleaned_title.split()) <= 1 and _contains_role_token(title):
+        return None
     return cleaned_title, location
+
+
+def _extract_trailing_work_mode(title: str) -> tuple[str, str] | None:
+    match = WORK_MODE_SUFFIX_RE.search(title)
+    if not match:
+        return None
+    cleaned_title = WORK_MODE_SUFFIX_RE.sub("", title).strip()
+    if not cleaned_title:
+        return None
+    inner = match.group(0).strip().strip("()")
+    if not inner:
+        return None
+    return cleaned_title, inner
 
 
 def _strip_linkedin_ui_markers(value: str | None) -> str:
