@@ -363,3 +363,92 @@ def test_candidate_profile_md_used_as_source_of_truth(tmp_path: Path, monkeypatc
     assert fake_llm.last_candidate_profile is not None
     assert "around seven years" in fake_llm.last_candidate_profile
     assert "strong_skills:" not in fake_llm.last_candidate_profile
+
+
+def test_prepare_appends_relocation_block_for_new_zealand(tmp_path: Path, monkeypatch, caplog) -> None:
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    evaluation = _evaluation()
+    base_letter = "I have around seven years of Java backend experience."
+    cache = _FakePrepareCache(
+        {
+            "evaluation_json": evaluation.model_dump_json(),
+            "analysis_text": "Title: Java Backend Engineer\nLocation: Auckland, New Zealand",
+            "title": "Java Backend Engineer",
+            "company": "ACME",
+            "location": "Auckland, New Zealand",
+            "url": "https://www.linkedin.com/jobs/view/nz1/",
+            "content_completeness": "PARTIAL",
+            "snippet": "Snippet",
+            "vacancy_json": '{"title":"Java Backend Engineer"}',
+        }
+    )
+    llm = _FakeLLM(language="en", text=base_letter)
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=cache,
+    )
+    with caplog.at_level("INFO"):
+        prepared = service.prepare("linkedin-email", "nz1")
+
+    assert prepared.cover_letter.startswith(base_letter)
+    assert "Although I currently live outside New Zealand" in prepared.cover_letter
+    assert "I can travel to New Zealand for in-person interviews" in prepared.cover_letter
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Cover letter profile: relocation (New Zealand)" in log_text
+
+
+def test_prepare_keeps_default_cover_letter_for_australia(tmp_path: Path, monkeypatch, caplog) -> None:
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    evaluation = _evaluation()
+    base_letter = "I have around seven years of Java backend experience."
+    cache = _FakePrepareCache(
+        {
+            "evaluation_json": evaluation.model_dump_json(),
+            "analysis_text": "Title: Java Backend Engineer\nLocation: Sydney, Australia",
+            "title": "Java Backend Engineer",
+            "company": "ACME",
+            "location": "Sydney, Australia",
+            "url": "https://www.linkedin.com/jobs/view/au1/",
+            "content_completeness": "PARTIAL",
+            "snippet": "Snippet",
+            "vacancy_json": '{"title":"Java Backend Engineer"}',
+        }
+    )
+    llm = _FakeLLM(language="en", text=base_letter)
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=cache,
+    )
+    with caplog.at_level("INFO"):
+        prepared = service.prepare("linkedin-email", "au1")
+
+    assert prepared.cover_letter == base_letter
+    assert "New Zealand" not in prepared.cover_letter
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Cover letter profile: default" in log_text

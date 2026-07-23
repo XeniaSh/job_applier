@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from app.collectors.email_imap_client import EmailIMAPClient
 from app.collectors.linkedin_email_parser import parse_linkedin_email
 from app.collectors.linkedin_models import LinkedInEmailVacancy
+from app.cover_letter_profiles import apply_cover_letter_profile, resolve_cover_letter_profile
 from app.llm_client import LLMClient
 from app.models import CoverLetterResult, VacancyEvaluation
 from app.profile_loader import CandidateProfileContext, load_candidate_profile_context
@@ -214,6 +215,7 @@ class PreparationService:
             analysis=analysis,
             recommended_resume=recommended_resume,
             profile=profile,
+            location=vacancy_meta.location,
         )
         phase_ms["cover_letter"] = int((perf_counter() - cover_started) * 1000)
         logger.info("END cover_letter +%dms", phase_ms["cover_letter"])
@@ -371,9 +373,15 @@ class PreparationService:
         analysis: VacancyEvaluation,
         recommended_resume: str,
         profile: CandidateProfileContext,
+        location: str | None = None,
     ) -> CoverLetterResult:
+        letter_profile = resolve_cover_letter_profile(
+            location=location,
+            vacancy_text=analysis_text,
+        )
+        logger.info("Cover letter profile: %s", letter_profile.label)
         prompt = load_cover_letter_prompt()
-        return self._llm_client.create_cover_letter(
+        result = self._llm_client.create_cover_letter(
             prompt=prompt,
             candidate_profile=profile.text,
             vacancy_text=analysis_text,
@@ -383,6 +391,8 @@ class PreparationService:
             grammatical_gender=profile.grammatical_gender,
             operation="cover_letter",
         )
+        result.cover_letter = apply_cover_letter_profile(result.cover_letter, letter_profile)
+        return result
 
 
 @dataclass(frozen=True)

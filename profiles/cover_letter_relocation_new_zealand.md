@@ -1,0 +1,1 @@
+Although I currently live outside New Zealand, I am actively seeking relocation opportunities. I hold a valid New Zealand visitor visa until mid-December and can travel to New Zealand for in-person interviews or meetings if helpful. I am committed to relocating for the right long-term opportunity.
