@@ -1,4 +1,5 @@
 from collections.abc import Callable
+import logging
 from typing import Protocol
 
 from app.models import (
@@ -10,6 +11,19 @@ from app.models import (
 )
 from app.requirement_matcher import compare_requirements
 from app.skills_profile_loader import CandidateSkillsProfile
+from app.title_rules import (
+    RULE_EXPLICIT_JVM_BACKEND,
+    RULE_JAVA_ANDROID_DOWNGRADE,
+    RULE_JAVA_QA_DOWNGRADE,
+    RULE_LLM_FALLBACK,
+    TitleMatchClassification,
+    classify_title_match,
+    incomplete_description_info,
+    jvm_title_hits,
+    log_classification_rule,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class LLMAnalyzerClient(Protocol):
@@ -29,9 +43,50 @@ class VacancyAnalyzer:
         self._prompt_loader = prompt_loader
 
     def analyze(self, vacancy: str, content_completeness: str = "FULL") -> VacancyEvaluation:
+        completeness = content_completeness.upper().strip()
+        title_from_text = _extract_title_from_vacancy_text(vacancy)
+
+        # Deterministic title rules before LLM for incomplete LinkedIn cards.
+        # Match strength is independent of content_completeness: missing description
+        # must not demote an explicit JVM backend title.
+        title_class = classify_title_match(title_from_text) if title_from_text else None
+        if title_class is not None and title_class.is_deterministic and completeness in {"PARTIAL", "MINIMAL"}:
+            log_classification_rule(
+                title=title_from_text or "",
+                classification=title_class,
+                content_completeness=completeness,
+            )
+            return _build_deterministic_evaluation(
+                classification=title_class,
+                content_completeness=completeness,
+                title=title_from_text or "",
+            )
+        if title_from_text:
+            log_classification_rule(
+                title=title_from_text,
+                classification=TitleMatchClassification(
+                    match_strength=None,
+                    rule=(
+                        title_class.rule
+                        if title_class is not None and title_class.is_deterministic
+                        else RULE_LLM_FALLBACK
+                    ),
+                    reason=(
+                        title_class.reason
+                        if title_class is not None and title_class.is_deterministic
+                        else "No deterministic title rule matched."
+                    ),
+                    llm_skipped=False,
+                    jvm_hits=title_class.jvm_hits if title_class else (),
+                    role_hits=title_class.role_hits if title_class else (),
+                    negative_hits=title_class.negative_hits if title_class else (),
+                ),
+                content_completeness=completeness,
+            )
+
         skills = self._skills_loader()
         prompt = self._prompt_loader()
-        title_text = _extract_title_from_vacancy_text(vacancy) or ""
+        title_text = title_from_text or ""
         extraction = self._llm_client.extract_vacancy(prompt=prompt, vacancy=vacancy)
         comparison = compare_requirements(
             extraction=extraction,
@@ -53,8 +108,6 @@ class VacancyAnalyzer:
         evidence_sufficient = True
         recommended_resume = _recommend_resume(extraction.role_type)
 
-        completeness = content_completeness.upper().strip()
-        title_from_text = _extract_title_from_vacancy_text(vacancy)
         title_text = title_from_text or extraction.role_type
         alert_query = _extract_alert_query(vacancy)
         incomplete_title_class = _classify_incomplete_title(
@@ -90,19 +143,21 @@ class VacancyAnalyzer:
                 incomplete_title_class == "generic_backend"
                 and not has_explicit_jvm_evidence
             )
-            if generic_missing_stack:
-                incomplete_nuance = combined_incomplete_nuance
-            else:
-                incomplete_nuance = incomplete_description_nuance
+            description_info = incomplete_description_info(completeness)
+            if description_info and description_info not in info_items:
+                info_items = [description_info, *info_items]
+            # Keep RU nuance for legacy consumers, but incomplete description is Info not Warning.
             nuances = _clean_and_limit(
                 [
-                    incomplete_nuance,
                     *([stack_missing_nuance] if generic_missing_stack else []),
                     *( [location_nuance] if location_nuance else []),
                     *( [lead_nuance] if lead_nuance else []),
                 ],
                 limit=3,
             )
+            if generic_missing_stack and incomplete_description_nuance not in nuances:
+                # stack-missing cases still surface incompleteness as a soft nuance for history
+                nuances = _clean_and_limit([combined_incomplete_nuance, *nuances], limit=3)
             gaps = []
             evidence_sufficient = completeness == "PARTIAL" and (
                 explicit_skill_count >= 3 or title_allows_strong
@@ -137,6 +192,9 @@ class VacancyAnalyzer:
                 recommended_resume = RecommendedResume.JAVA_BACKEND
             if incomplete_title_class == "hard_negative":
                 decision = Decision.IGNORE
+            if incomplete_title_class in {"java_qa", "java_android"}:
+                decision = Decision.POTENTIAL_MATCH
+                match_percentage = None
             if lead_nuance and not _candidate_targets_lead_roles(skills):
                 decision = _cap_decision(decision, Decision.POTENTIAL_MATCH)
         else:
@@ -165,9 +223,21 @@ class VacancyAnalyzer:
             and incomplete_title_class == "jvm_explicit_backend"
             and decision == Decision.STRONG_MATCH
         ):
-            decision_reason = (
-                "Explicit Java stack is already present in the trusted title."
-            )
+            decision_reason = "Explicit Java + backend signals in title"
+        if is_incomplete and incomplete_title_class == "generic_backend" and decision == Decision.POTENTIAL_MATCH:
+            decision_reason = "Backend role detected, but the technology stack is unknown"
+
+        # On FULL cards, title rules still win over LLM scoring for clear cases.
+        if title_class is not None and title_class.is_deterministic and title_class.match_strength is not None:
+            decision = title_class.match_strength
+            decision_reason = title_class.reason
+            if decision == Decision.STRONG_MATCH:
+                decision_reason = "Explicit Java + backend signals in title"
+            if decision == Decision.POTENTIAL_MATCH and completeness in {"PARTIAL", "MINIMAL"}:
+                desc = incomplete_description_info(completeness)
+                if desc and desc not in info_items:
+                    info_items = [desc, *info_items]
+
         warning_signals = _build_warning_signals(
             nuances=nuances,
             lead_signal=lead_signal,
@@ -191,6 +261,55 @@ class VacancyAnalyzer:
             recommended_cover_template=_recommend_cover_template(extraction.role_type, extraction.short_summary),
             warning_signals=warning_signals,
         )
+
+
+def _build_deterministic_evaluation(
+    *,
+    classification,
+    content_completeness: str,
+    title: str,
+) -> VacancyEvaluation:
+    decision = classification.match_strength
+    assert decision is not None
+    completeness = content_completeness.upper().strip()
+    info_items: list[str] = []
+    description_info = incomplete_description_info(completeness)
+    if description_info:
+        info_items.append(description_info)
+
+    reason = classification.reason
+    if decision == Decision.STRONG_MATCH and description_info:
+        reason = (
+            "Explicit Java and backend signals in title; "
+            "job description is unavailable in the LinkedIn email."
+        )
+    if decision == Decision.POTENTIAL_MATCH and classification.rule == RULE_LLM_FALLBACK:
+        reason = "Backend role detected, but the technology stack is unknown"
+
+    summary = {
+        Decision.STRONG_MATCH: f"Strong match from title: {title}",
+        Decision.POTENTIAL_MATCH: f"Potential match from title: {title}",
+        Decision.IGNORE: f"Ignored from title: {title}",
+    }[decision]
+
+    recommended = RecommendedResume.KOTLIN_BACKEND if "kotlin" in classification.jvm_hits else RecommendedResume.JAVA_BACKEND
+    return VacancyEvaluation(
+        decision=decision,
+        summary=summary,
+        decision_reason=reason if decision != Decision.STRONG_MATCH else "Explicit Java + backend signals in title",
+        matched_points=list(classification.jvm_hits[:5]),
+        gaps=[],
+        nuances=[],
+        info_items=info_items,
+        match_percentage=None,
+        matched_score=0.0,
+        total_possible_score=0.0,
+        explicit_skill_count=len(classification.jvm_hits),
+        evidence_sufficient=decision == Decision.STRONG_MATCH,
+        recommended_resume=recommended,
+        recommended_cover_template=RecommendedCoverTemplate.GENERIC,
+        warning_signals=[],
+    )
 
 
 def _build_decision_reason(
@@ -698,11 +817,24 @@ def _extract_alert_query(vacancy_text: str) -> str | None:
 
 def _has_explicit_jvm_evidence(extraction: VacancyExtraction, *, title_text: str = "") -> bool:
     all_skills = [*extraction.mandatory_skills, *extraction.optional_skills]
-    text = f"{title_text.lower()} {' '.join(all_skills).lower()}".strip()
-    return any(token in text for token in ("java", "kotlin", "jvm", "spring"))
+    combined = f"{title_text} {' '.join(all_skills)}".strip()
+    return bool(jvm_title_hits(combined.lower()))
 
 
 def _classify_incomplete_title(*, title: str, alert_query: str | None) -> str:
+    classified = classify_title_match(title)
+    if classified.rule == RULE_JAVA_QA_DOWNGRADE:
+        return "java_qa"
+    if classified.rule == RULE_JAVA_ANDROID_DOWNGRADE:
+        return "java_android"
+    if classified.rule in {
+        "INCOMPATIBLE_EDUCATION_ROLE",
+        "INCOMPATIBLE_NON_ENGINEERING_ROLE",
+    }:
+        return "hard_negative"
+    if classified.rule == RULE_EXPLICIT_JVM_BACKEND:
+        return "jvm_explicit_backend"
+
     text = title.lower()
     hard_negative_markers = (
         "frontend",
@@ -723,27 +855,9 @@ def _classify_incomplete_title(*, title: str, alert_query: str | None) -> str:
         "android",
         "data science",
         "data scientist",
-        "ml",
         "machine learning",
-        "teacher",
-        "trainer",
-        "instructor",
-        "lecturer",
-        "professor",
-        "tutor",
-        "учитель",
-        "преподаватель",
-        "тренер",
-        "инструктор",
-        "лектор",
-        "профессор",
     )
-    jvm_explicit_markers = ("java", "kotlin", "jvm", "spring")
     if any(marker in text for marker in hard_negative_markers):
-        if any(marker in text for marker in ("backend", "back-end", "back end")) and any(
-            marker in text for marker in jvm_explicit_markers
-        ):
-            return "jvm_explicit_backend"
         return "hard_negative"
 
     has_backend_marker = any(marker in text for marker in ("backend", "back-end", "back end"))
@@ -751,15 +865,11 @@ def _classify_incomplete_title(*, title: str, alert_query: str | None) -> str:
         ("software engineer" in text or "software developer" in text)
         and any(marker in text for marker in ("platform", "server-side", "distributed", "microservices", "infrastructure"))
     )
-    if any(marker in text for marker in jvm_explicit_markers) and (has_backend_marker or "engineer" in text or "developer" in text):
-        return "jvm_explicit_backend"
     if has_backend_marker or has_generic_backend_context:
         return "generic_backend"
 
     if alert_query:
-        weak_context = alert_query.lower()
-        if any(marker in weak_context for marker in jvm_explicit_markers) and any(
-            marker in text for marker in ("engineer", "developer", "platform")
-        ):
+        weak_jvm = jvm_title_hits(alert_query.lower())
+        if weak_jvm and any(marker in text for marker in ("engineer", "developer", "platform")):
             return "generic_backend"
     return "other"

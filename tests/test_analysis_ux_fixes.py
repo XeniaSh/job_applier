@@ -108,7 +108,7 @@ def test_java_and_spring_titles_are_strong_without_description() -> None:
             content_completeness="PARTIAL",
         )
         assert result.decision == Decision.STRONG_MATCH, title
-        assert "Explicit Java stack is already present in the trusted title." in result.decision_reason
+        assert "Explicit Java + backend signals in title" in result.decision_reason
 
 
 def test_java_teacher_is_ignored_even_without_description() -> None:
@@ -166,6 +166,7 @@ def test_telegram_card_separates_warnings_and_information() -> None:
     evaluation = VacancyEvaluation(
         decision=Decision.POTENTIAL_MATCH,
         summary="summary",
+        decision_reason="Backend role detected, but the technology stack is unknown",
         matched_points=[],
         gaps=[],
         nuances=["Requires relocation to PH"],
@@ -197,10 +198,14 @@ def test_telegram_card_separates_warnings_and_information() -> None:
         info_items=info_items,
         recommended_resume="java-backend",
         content_completeness="FULL",
+        decision_reason=evaluation.decision_reason,
     )
     rendered = format_telegram_card_html(card)
+    assert "<b>🟡 POTENTIAL</b>" in rendered
+    assert "<b>Why:</b>" in rendered
+    assert "Backend role detected, but the technology stack is unknown" in rendered
     assert "⚠️ Requires relocation to PH" in rendered
-    assert "Work mode:\nHybrid" in rendered
-    assert "Salary:\n₱2.3M–₱3.5M" in rendered
+    assert "Work mode: Hybrid" in rendered
+    assert "Salary: ₱2.3M–₱3.5M" in rendered
     assert "⚠️ Hybrid" not in rendered
     assert "⚠️ Work mode" not in rendered

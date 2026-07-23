@@ -551,6 +551,7 @@ def send_linkedin_telegram(
                 info_items=info_items,
                 recommended_resume=item.evaluation.recommended_resume.value,
                 content_completeness=item.content_completeness,
+                decision_reason=item.evaluation.decision_reason,
             )
             formatted_card = format_telegram_card_html(card)
         except ValueError as exc:
@@ -1668,6 +1669,7 @@ def _deliver_pipeline_items(
             info_items=info_items,
             recommended_resume=item.analysis_result.recommended_resume.value,
             content_completeness=getattr(item.vacancy, "content_completeness", None) or "FULL",
+            decision_reason=item.analysis_result.decision_reason,
         )
         try:
             message_ref = telegram_client.send_vacancy_card(card)
@@ -4172,6 +4174,7 @@ def _send_processed_to_telegram_detailed(
             info_items=info_items,
             recommended_resume=item.evaluation.recommended_resume.value,
             content_completeness=item.content_completeness,
+            decision_reason=item.evaluation.decision_reason,
         )
         try:
             message_ref = telegram_client.send_vacancy_card(card)

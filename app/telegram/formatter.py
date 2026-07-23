@@ -10,54 +10,116 @@ MAX_MESSAGE_LEN = 3500
 def card_display_sections(evaluation) -> tuple[list[str], list[str]]:
     """Split evaluation into Telegram warnings vs informational metadata."""
     warnings: list[str] = []
-    seen: set[str] = set()
+    info_items = list(getattr(evaluation, "info_items", []) or [])
+    seen_info = {" ".join(item.split()).lower() for item in info_items if item}
+    seen_warn: set[str] = set()
     for signal in getattr(evaluation, "warning_signals", []) or []:
         evidence = " ".join(str(signal.get("evidence", "")).split())
         if not evidence:
             continue
         key = evidence.lower()
-        if key in seen:
+        code = str(signal.get("code", ""))
+        if code == "incomplete_description" or _is_completeness_metadata(evidence):
+            if key not in seen_info:
+                info_items.append(
+                    "Job description is not available in the LinkedIn email"
+                    if "linkedin" in key or "неполн" in key or "incomplete" in key
+                    else evidence
+                )
+                seen_info.add(key)
             continue
-        seen.add(key)
+        if key in seen_warn:
+            continue
+        seen_warn.add(key)
         warnings.append(evidence)
-    info_items = list(getattr(evaluation, "info_items", []) or [])
     return warnings, info_items
 
 
 def format_telegram_card_html(card: TelegramVacancyCard) -> str:
-    decision = _escape(card.decision)
-    title = _escape(card.title)
-    lines = [f"<b>{decision} · {title}</b>"]
+    strength = _match_strength_label(card.decision)
+    lines = [f"<b>{_escape(strength)}</b>", "", _escape(card.title)]
 
     if card.company:
         lines.append(_escape(card.company))
     if card.location:
         lines.append(_escape(card.location))
 
-    lines.append("")
-    lines.append(f"Стек: {_format_percentage(card.match_percentage)}")
-    lines.append("")
+    why = _clean_limited([card.decision_reason or ""], limit=1)
+    if why:
+        lines.append("")
+        lines.append("<b>Why:</b>")
+        lines.append(_escape(why[0]))
 
-    for gap in _clean_limited(card.gaps, limit=2):
-        lines.append(f"— {_escape(gap)}")
+    info_items = _clean_limited(_normalize_info_items(card.info_items), limit=5)
+    if info_items:
+        lines.append("")
+        lines.append("<b>Info:</b>")
+        for info in info_items:
+            lines.append(_format_info_item(info))
 
     warnings = _clean_limited(card.warnings or _legacy_warning_nuances(card.nuances), limit=3)
-    info_items = _clean_limited(card.info_items, limit=5)
-    for warning in warnings:
-        lines.append(f"⚠️ {_escape(warning)}")
-    if warnings and info_items:
+    # Incomplete description belongs in Info, never as a match warning.
+    warnings = [item for item in warnings if not _is_completeness_metadata(item)]
+    if warnings:
         lines.append("")
-    for info in info_items:
-        lines.append(_format_info_item(info))
+        lines.append("<b>Warnings:</b>")
+        for warning in warnings:
+            lines.append(f"⚠️ {_escape(warning)}")
 
-    if lines[-1] != "":
+    gaps = _clean_limited(card.gaps, limit=2)
+    if gaps:
         lines.append("")
+        for gap in gaps:
+            lines.append(f"— {_escape(gap)}")
+
+    if card.match_percentage is not None:
+        lines.append("")
+        lines.append(f"Стек: {_format_percentage(card.match_percentage)}")
+
+    lines.append("")
     lines.append(f"Резюме: {_escape(card.recommended_resume)}")
 
     rendered = "\n".join(lines).strip()
     if len(rendered) <= MAX_MESSAGE_LEN:
         return rendered
     return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
+
+
+def _match_strength_label(decision: str) -> str:
+    normalized = (decision or "").strip().upper()
+    if normalized in {"STRONG_MATCH", "STRONG"}:
+        return "🟢 STRONG"
+    if normalized in {"POTENTIAL_MATCH", "POTENTIAL"}:
+        return "🟡 POTENTIAL"
+    if normalized in {"IGNORE"}:
+        return "⚪ IGNORE"
+    return decision
+
+
+def _normalize_info_items(items: list[str]) -> list[str]:
+    result: list[str] = []
+    for item in items:
+        text = " ".join(item.strip().split())
+        if not text:
+            continue
+        if text.lower().startswith("info:"):
+            text = text.split(":", 1)[1].strip()
+        result.append(text)
+    return result
+
+
+def _is_completeness_metadata(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in (
+            "неполн",
+            "incomplete",
+            "not available in the linkedin email",
+            "нет полного описания",
+            "job description is not available",
+        )
+    )
 
 
 def _legacy_warning_nuances(nuances: list[str]) -> list[str]:
@@ -72,13 +134,16 @@ def _legacy_warning_nuances(nuances: list[str]) -> list[str]:
 
 
 def _format_info_item(item: str) -> str:
-    if ":" not in item:
+    # Plain completeness notes stay on one line.
+    if ":" not in item or item.lower().startswith("job description"):
         return _escape(item)
     label, value = item.split(":", 1)
     label = label.strip()
     value = value.strip()
     if not label or not value:
         return _escape(item)
+    if label.lower() in {"work mode", "constraints", "salary"}:
+        return f"{_escape(label)}: {_escape(value)}"
     return f"{_escape(label)}:\n{_escape(value)}"
 
 

@@ -3,37 +3,21 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.title_rules import (
+    ABOVE_SENIORITY_MARKERS,
+    AI_ONLY_MARKERS,
+    RULE_INCOMPATIBLE_EDUCATION,
+    RULE_INCOMPATIBLE_NON_ENGINEERING,
+    classify_title_match,
+    jvm_title_hits,
+    log_classification_rule,
+    matched_phrase,
+    matched_whole_words,
+    normalize_title,
+)
+
 
 ACCEPT_KEYWORDS = ("java", "kotlin", "jvm", "backend", "spring")
-ABOVE_SENIORITY_MARKERS = ("staff", "principal", "distinguished", "fellow")
-EDUCATION_ROLE_MARKERS = (
-    "teacher",
-    "trainer",
-    "instructor",
-    "lecturer",
-    "professor",
-    "tutor",
-    "учитель",
-    "преподаватель",
-    "тренер",
-    "инструктор",
-    "лектор",
-    "профессор",
-)
-AI_ONLY_MARKERS = (
-    "ai engineer",
-    "ai developer",
-    "ai researcher",
-    "ai specialist",
-    "ai scientist",
-    "machine learning engineer",
-    "ml engineer",
-    "llm engineer",
-    "prompt engineer",
-    "generative ai",
-    "genai engineer",
-    "gen ai",
-)
 REJECT_KEYWORDS = (
     "frontend",
     "front-end",
@@ -73,8 +57,8 @@ def should_accept_title(title: str) -> bool:
 
 
 def evaluate_title(title: str) -> TitleFilterDecision:
-    normalized = _normalize_title(title)
-    seniority_hits = _matched_whole_words(normalized, ABOVE_SENIORITY_MARKERS)
+    normalized = normalize_title(title)
+    seniority_hits = matched_whole_words(normalized, ABOVE_SENIORITY_MARKERS)
     if seniority_hits:
         return TitleFilterDecision(
             accepted=False,
@@ -85,18 +69,24 @@ def evaluate_title(title: str) -> TitleFilterDecision:
             decision="REJECT",
         )
 
-    education_hits = _matched_whole_words(normalized, EDUCATION_ROLE_MARKERS)
-    if education_hits:
+    # Shared hard-negative IGNORE roles (education / recruiter / writer) — skip LLM entirely.
+    classified = classify_title_match(title)
+    if classified.rule in {RULE_INCOMPATIBLE_EDUCATION, RULE_INCOMPATIBLE_NON_ENGINEERING}:
+        log_classification_rule(title=title, classification=classified)
         return TitleFilterDecision(
             accepted=False,
-            reason="Education/teaching role",
+            reason=(
+                "Education/teaching role"
+                if classified.rule == RULE_INCOMPATIBLE_EDUCATION
+                else "Non-engineering role"
+            ),
             normalized_title=normalized,
             positive_rules=[],
-            negative_rules=education_hits,
+            negative_rules=list(classified.negative_hits),
             decision="REJECT",
         )
 
-    positive_rules = [keyword for keyword in ("java", "jvm", "spring", "spring boot", "kotlin") if keyword in normalized]
+    positive_rules = jvm_title_hits(normalized)
     if positive_rules:
         return TitleFilterDecision(
             accepted=True,
@@ -107,10 +97,13 @@ def evaluate_title(title: str) -> TitleFilterDecision:
             decision="PASS",
         )
 
-    ai_hits = [marker for marker in AI_ONLY_MARKERS if marker in normalized]
+    ai_hits = matched_phrase(normalized, AI_ONLY_MARKERS)
     if not ai_hits and (" ai " in f" {normalized} " or normalized.startswith("ai ") or "ai/" in normalized):
         ai_hits = ["ai"]
-    if ai_hits and not any(token in normalized for token in ("backend", "back-end", "java", "kotlin", "spring", "jvm")):
+    if ai_hits and not any(
+        re.search(rf"\b{re.escape(token)}\b", normalized)
+        for token in ("backend", "back-end", "java", "kotlin", "spring", "jvm")
+    ):
         return TitleFilterDecision(
             accepted=False,
             reason="AI-only role",
@@ -209,17 +202,3 @@ def evaluate_title(title: str) -> TitleFilterDecision:
         negative_rules=negative_rules,
         decision="PASS",
     )
-
-
-def _matched_whole_words(normalized_title: str, markers: tuple[str, ...]) -> list[str]:
-    hits: list[str] = []
-    for marker in markers:
-        if re.search(rf"\b{re.escape(marker)}\b", normalized_title, flags=re.IGNORECASE):
-            hits.append(marker)
-    return hits
-
-
-def _normalize_title(title: str) -> str:
-    normalized = title.strip().lower()
-    normalized = re.sub(r"\s+", " ", normalized)
-    return normalized

@@ -162,8 +162,8 @@ def test_minimal_java_title_can_be_strong_match() -> None:
     result = analyzer.analyze("Title: Java Backend Engineer", content_completeness="MINIMAL")
 
     assert result.decision == Decision.STRONG_MATCH
-    assert "описание вакансии неполное" in " ".join(result.nuances)
-    assert "Explicit Java stack is already present in the trusted title." in result.decision_reason
+    assert any("Job description is not available in the LinkedIn email" in item for item in result.info_items)
+    assert "Explicit Java + backend signals in title" in result.decision_reason
 
 
 def test_incomplete_content_does_not_create_false_missing_skill_gaps() -> None:
@@ -232,8 +232,9 @@ def test_partial_with_two_skills_and_java_title_is_strong() -> None:
 
     result = analyzer.analyze("Title: Java Backend Engineer", content_completeness="PARTIAL")
     assert result.decision == Decision.STRONG_MATCH
-    assert result.explicit_skill_count == 2
     assert result.evidence_sufficient is True
+    assert "Explicit Java + backend signals in title" in result.decision_reason
+    assert any("Job description is not available" in item for item in result.info_items)
 
 
 def test_partial_with_four_skills_may_be_strong() -> None:
@@ -268,9 +269,10 @@ def test_partial_with_four_skills_may_be_strong() -> None:
 
     result = analyzer.analyze("Title: Java Backend Engineer", content_completeness="PARTIAL")
     assert result.decision == Decision.STRONG_MATCH
-    assert result.match_percentage == 100.0
-    assert result.explicit_skill_count == 4
     assert result.evidence_sufficient is True
+    assert "Explicit Java + backend signals in title" in result.decision_reason
+    # Deterministic title path skips LLM skill scoring on PARTIAL cards.
+    assert result.match_percentage is None
 
 
 def test_raw_location_strings_are_not_used_as_nuances() -> None:

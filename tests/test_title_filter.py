@@ -74,6 +74,13 @@ def test_title_filter_rejects_education_and_teaching_roles() -> None:
         assert decision.decision == "REJECT", title
 
 
+def test_title_filter_rejects_javascript_as_non_java_pass_signal() -> None:
+    decision = evaluate_title("JavaScript Developer")
+    assert "java" not in decision.positive_rules
+    # May still PASS as generic or REJECT depending on other rules; must not be Java PASS.
+    assert decision.reason != "Explicit Java/JVM signal in title"
+
+
 def test_title_filter_rejects_ai_only_roles() -> None:
     cases = (
         "AI Engineer",

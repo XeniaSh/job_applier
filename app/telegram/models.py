@@ -26,6 +26,7 @@ class TelegramVacancyCard:
     info_items: list[str] = field(default_factory=list)
     recommended_resume: str = "java-backend"
     content_completeness: str = "PARTIAL"
+    decision_reason: str | None = None
 
 
 @dataclass(frozen=True)

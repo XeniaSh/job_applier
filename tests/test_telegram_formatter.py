@@ -14,19 +14,54 @@ def test_formatter_escapes_html_and_limits_lists() -> None:
         match_percentage=87.5,
         gaps=["redis", "webflux", "extra"],
         nuances=["Нужно <проверить>", "Удаленка & география", "Третья", "Четвертая"],
+        warnings=["Нужно <проверить>", "Удаленка & география", "Третья", "Четвертая"],
         recommended_resume="java-backend",
         content_completeness="PARTIAL",
+        decision_reason="Backend role detected, but the technology stack is unknown",
     )
 
     rendered = format_telegram_card_html(card)
-    assert "<b>POTENTIAL_MATCH · Java &lt;Lead&gt; &amp; &quot;Kotlin&quot;</b>" in rendered
+    assert "<b>🟡 POTENTIAL</b>" in rendered
+    assert "Java &lt;Lead&gt; &amp; &quot;Kotlin&quot;" in rendered
     assert "ACME &lt;Corp&gt;" in rendered
+    assert "<b>Why:</b>" in rendered
+    assert "Backend role detected, but the technology stack is unknown" in rendered
     assert "Стек: 87.5%" in rendered
     assert "— redis" in rendered
     assert "— webflux" in rendered
     assert "— extra" not in rendered
     assert "⚠️ Нужно &lt;проверить&gt;" in rendered
     assert "⚠️ Четвертая" not in rendered
+
+
+def test_strong_partial_card_shows_why_and_info_not_warning() -> None:
+    card = TelegramVacancyCard(
+        source="li",
+        external_id="1",
+        decision="STRONG_MATCH",
+        title="Senior Java Backend Engineer",
+        company="Nexthink",
+        location="Lausanne, Vaud, Switzerland",
+        url="https://www.linkedin.com/jobs/view/1/",
+        match_percentage=None,
+        gaps=[],
+        warnings=[],
+        info_items=["Job description is not available in the LinkedIn email"],
+        recommended_resume="java-backend",
+        content_completeness="PARTIAL",
+        decision_reason="Explicit Java + backend signals in title",
+    )
+    rendered = format_telegram_card_html(card)
+    assert "<b>🟢 STRONG</b>" in rendered
+    assert "Senior Java Backend Engineer" in rendered
+    assert "Nexthink" in rendered
+    assert "Lausanne, Vaud, Switzerland" in rendered
+    assert "<b>Why:</b>" in rendered
+    assert "Explicit Java + backend signals in title" in rendered
+    assert "<b>Info:</b>" in rendered
+    assert "Job description is not available in the LinkedIn email" in rendered
+    assert "⚠️" not in rendered
+    assert "POTENTIAL" not in rendered
 
 
 def test_formatter_caps_message_length() -> None:
