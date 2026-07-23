@@ -2352,6 +2352,7 @@ def _process_callback_update(
     answered = False
     answer_at: float | None = None
     answer_state = "no"
+    should_reconcile = False
 
     if timing_logger is not None:
         timing_logger(f"Callback received {callback_data}")
@@ -2376,6 +2377,7 @@ def _process_callback_update(
             raise
 
     try:
+        should_reconcile = True
         if action == "skip":
             _handle_terminal_action(
                 action="SKIPPED",
@@ -2438,167 +2440,159 @@ def _process_callback_update(
         elif action == "prepare":
             if current_status in {STATUS_APPLIED, STATUS_SKIPPED}:
                 answer_once("Вакансия уже закрыта")
-                return
-            if current_status in {STATUS_PREPARE_REQUESTED, STATUS_PREPARING}:
+            elif current_status in {STATUS_PREPARE_REQUESTED, STATUS_PREPARING}:
                 answer_once("Уже в обработке")
-                if message_id > 0 and url:
-                    try:
-                        client.edit_message_text(
-                            chat_id=configured_chat_id,
-                            message_id=message_id,
-                            text=build_loading_text(title=title, company=company),
-                            buttons=build_loading_buttons(url),
-                        )
-                    except (TelegramRequestError, TelegramMessageNotModifiedError, ValueError):
-                        _ = None
-                return
-            if current_status == STATUS_PREPARED:
+            elif current_status == STATUS_PREPARED:
                 answer_once("Отклик уже готов")
-                return
-            storage.update_delivery_and_history(
-                source=source,
-                external_id=external_id,
-                chat_id=configured_chat_id,
-                delivery_status=STATUS_PREPARE_REQUESTED,
-                history_status=STATUS_PREPARE_REQUESTED,
-                timestamp_field=None,
-            )
-            answer_once("Добавлено в очередь на подготовку отклика")
-            if message_id > 0 and url:
-                try:
-                    edit_start = time.monotonic()
-                    client.edit_message_text(
-                        chat_id=configured_chat_id,
-                        message_id=message_id,
-                        text=build_loading_text(title=title, company=company),
-                        buttons=build_loading_buttons(url),
-                    )
-                    if timing_logger is not None:
-                        timing_logger(
-                            f"Callback {action}:{source}:{external_id} editMessageText +{int((time.monotonic() - edit_start) * 1000)}ms"
-                        )
-                except TelegramMessageNotModifiedError:
-                    _ = None
-            _enqueue_prepare_priority(
-                storage=storage,
-                source=source,
-                external_id=external_id,
-                enqueue_reason="callback_prepare",
-                timing_logger=timing_logger,
-            )
+            else:
+                storage.update_delivery_and_history(
+                    source=source,
+                    external_id=external_id,
+                    chat_id=configured_chat_id,
+                    delivery_status=STATUS_PREPARE_REQUESTED,
+                    history_status=STATUS_PREPARE_REQUESTED,
+                    timestamp_field=None,
+                )
+                answer_once("Добавлено в очередь на подготовку отклика")
+                _enqueue_prepare_priority(
+                    storage=storage,
+                    source=source,
+                    external_id=external_id,
+                    enqueue_reason="callback_prepare",
+                    timing_logger=timing_logger,
+                )
         elif action == "copy":
             get_preparation = getattr(storage, "get_preparation", None)
             prep = get_preparation(source, external_id) if callable(get_preparation) else None
             if prep is None or prep.status != STATUS_PREPARED or not prep.cover_letter:
                 answer_once("Отклик еще не готов")
-                return
-            existing_cover_id = getattr(prep, "cover_letter_message_id", None)
-            if isinstance(existing_cover_id, int) and existing_cover_id > 0:
-                answer_once("Cover letter already sent below this vacancy.")
-                return
-            sent_ref = client.send_text_message(
-                prep.cover_letter,
-                chat_id=configured_chat_id,
-                reply_to_message_id=message_id if message_id > 0 else None,
-            )
-            set_aux = getattr(storage, "set_preparation_aux_message_id", None)
-            if callable(set_aux):
-                set_aux(
-                    source=source,
-                    external_id=external_id,
-                    cover_letter_message_id=sent_ref.message_id,
-                )
-            answer_once("Cover letter sent")
+            else:
+                existing_cover_id = getattr(prep, "cover_letter_message_id", None)
+                if isinstance(existing_cover_id, int) and existing_cover_id > 0:
+                    answer_once("Cover letter already sent below this vacancy.")
+                else:
+                    sent_ref = client.send_text_message(
+                        prep.cover_letter,
+                        chat_id=configured_chat_id,
+                        reply_to_message_id=message_id if message_id > 0 else None,
+                    )
+                    set_aux = getattr(storage, "set_preparation_aux_message_id", None)
+                    if callable(set_aux):
+                        set_aux(
+                            source=source,
+                            external_id=external_id,
+                            cover_letter_message_id=sent_ref.message_id,
+                        )
+                    answer_once("Cover letter sent")
         else:  # action == "resume"
             get_preparation = getattr(storage, "get_preparation", None)
             prep = get_preparation(source, external_id) if callable(get_preparation) else None
             if prep is None or prep.status != STATUS_PREPARED or not prep.resume_name:
                 answer_once("Resume PDF not found.")
-                return
-            existing_resume_id = getattr(prep, "resume_message_id", None)
-            if isinstance(existing_resume_id, int) and existing_resume_id > 0:
-                answer_once("Resume already sent below this vacancy.")
-                return
-            cache = resume_cache_service
-            if cache is None:
-                if resumes_dir is None:
-                    answer_once("Resume PDF not found.")
-                    return
-                cache = ResumeCacheService(
-                    resumes_dir=resumes_dir,
-                    storage=storage,
-                    telegram_client=client,
-                )
-            resume_result = cache.get_or_upload(
-                resume_name=prep.resume_name,
-                chat_id=configured_chat_id,
-            )
-            if resume_result.missing:
-                answer_once("Resume PDF not found.")
-                return
-            caption = _build_resume_caption(
-                resume_name=prep.resume_name,
-                title=title,
-                company=company,
-            )
-            sent_doc = None
-            if resume_result.telegram_file_id:
-                try:
-                    sent_doc = client.send_document_by_file_id(
-                        chat_id=configured_chat_id,
-                        file_id=resume_result.telegram_file_id,
-                        caption=caption,
-                        reply_to_message_id=message_id if message_id > 0 else None,
-                    )
-                except TelegramRequestError:
-                    sent_doc = None
-            if sent_doc is None:
-                if resumes_dir is None:
-                    answer_once("Resume PDF not found.")
-                    return
-                resume_path, _resume_error = resolve_resume_path(resumes_dir, prep.resume_name)
-                if resume_path is None:
-                    answer_once("Resume PDF not found.")
-                    return
-                sent_doc = client.send_document(
-                    file_path=str(resume_path),
-                    caption=caption,
-                    chat_id=configured_chat_id,
-                    reply_to_message_id=message_id if message_id > 0 else None,
-                )
-                stat = resume_path.stat()
-                save_cache = getattr(storage, "save_resume_cache", None)
-                if callable(save_cache):
-                    save_cache(
-                        resume_name=prep.resume_name,
-                        file_path=str(resume_path),
-                        file_mtime_ns=int(stat.st_mtime_ns),
-                        file_size=int(stat.st_size),
-                        telegram_file_id=sent_doc.file_id,
-                        telegram_file_unique_id=sent_doc.file_unique_id,
-                    )
-            set_aux = getattr(storage, "set_preparation_aux_message_id", None)
-            if callable(set_aux):
-                set_aux(
-                    source=source,
-                    external_id=external_id,
-                    resume_message_id=sent_doc.message_id,
-                )
-            answer_once("Resume sent")
+            else:
+                existing_resume_id = getattr(prep, "resume_message_id", None)
+                if isinstance(existing_resume_id, int) and existing_resume_id > 0:
+                    answer_once("Resume already sent below this vacancy.")
+                else:
+                    cache = resume_cache_service
+                    if cache is None:
+                        if resumes_dir is None:
+                            answer_once("Resume PDF not found.")
+                        else:
+                            cache = ResumeCacheService(
+                                resumes_dir=resumes_dir,
+                                storage=storage,
+                                telegram_client=client,
+                            )
+                    if cache is not None:
+                        resume_result = cache.get_or_upload(
+                            resume_name=prep.resume_name,
+                            chat_id=configured_chat_id,
+                        )
+                        if resume_result.missing:
+                            answer_once("Resume PDF not found.")
+                        else:
+                            caption = _build_resume_caption(
+                                resume_name=prep.resume_name,
+                                title=title,
+                                company=company,
+                            )
+                            sent_doc = None
+                            if resume_result.telegram_file_id:
+                                try:
+                                    sent_doc = client.send_document_by_file_id(
+                                        chat_id=configured_chat_id,
+                                        file_id=resume_result.telegram_file_id,
+                                        caption=caption,
+                                        reply_to_message_id=message_id if message_id > 0 else None,
+                                    )
+                                except TelegramRequestError:
+                                    sent_doc = None
+                            if sent_doc is None:
+                                if resumes_dir is None:
+                                    answer_once("Resume PDF not found.")
+                                else:
+                                    resume_path, _resume_error = resolve_resume_path(resumes_dir, prep.resume_name)
+                                    if resume_path is None:
+                                        answer_once("Resume PDF not found.")
+                                    else:
+                                        sent_doc = client.send_document(
+                                            file_path=str(resume_path),
+                                            caption=caption,
+                                            chat_id=configured_chat_id,
+                                            reply_to_message_id=message_id if message_id > 0 else None,
+                                        )
+                                        stat = resume_path.stat()
+                                        save_cache = getattr(storage, "save_resume_cache", None)
+                                        if callable(save_cache):
+                                            save_cache(
+                                                resume_name=prep.resume_name,
+                                                file_path=str(resume_path),
+                                                file_mtime_ns=int(stat.st_mtime_ns),
+                                                file_size=int(stat.st_size),
+                                                telegram_file_id=sent_doc.file_id,
+                                                telegram_file_unique_id=sent_doc.file_unique_id,
+                                            )
+                            if sent_doc is not None:
+                                set_aux = getattr(storage, "set_preparation_aux_message_id", None)
+                                if callable(set_aux):
+                                    set_aux(
+                                        source=source,
+                                        external_id=external_id,
+                                        resume_message_id=sent_doc.message_id,
+                                    )
+                                answer_once("Resume sent")
     except (ValueError, KeyError, TelegramRequestError, OSError):
         if not answered:
             answer_once("Не удалось обновить статус")
-        return
     finally:
+        if should_reconcile:
+            try:
+                _reconcile_vacancy_message(
+                    storage=storage,
+                    client=client,
+                    source=source,
+                    external_id=external_id,
+                    chat_id=configured_chat_id,
+                    message_id=message_id if message_id > 0 else None,
+                    title=title,
+                    company=company,
+                    url=url,
+                    undo_window_seconds=window_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Reconcile after callback failed vacancy=%s:%s error=%s",
+                    source,
+                    external_id,
+                    exc,
+                )
         if timing_logger is not None:
             ack_ms = int((answer_at - received_at) * 1000) if answer_at is not None else -1
             total_ms = int((time.monotonic() - received_at) * 1000)
             timing_logger(
                 f"Callback {action}:{source}:{external_id} ack_ms={ack_ms} total_ms={total_ms} answered={answer_state}"
             )
-
-    if action in {"copy", "resume", "prepare", "undo"}:
-        return
 
 
 def _handle_terminal_action(
@@ -2676,18 +2670,6 @@ def _handle_terminal_action(
             window_seconds,
         )
     answer_once(success_text)
-    _edit_archived_card(
-        client=client,
-        chat_id=configured_chat_id,
-        message_id=message_id,
-        url=url,
-        title=title,
-        company=company,
-        applied=(new_status == STATUS_APPLIED),
-        source=source,
-        external_id=external_id,
-        action_id=action_id,
-    )
     _cleanup_aux_messages(
         storage=storage,
         client=client,
@@ -2695,6 +2677,7 @@ def _handle_terminal_action(
         external_id=external_id,
         chat_id=configured_chat_id,
     )
+    _ = message_id, url, title, company, timing_logger
 
 
 def _handle_undo_action(
@@ -2741,11 +2724,13 @@ def _handle_undo_action(
     if action_at is None:
         answer_once("Undo period has expired.")
         logger.info("Undo rejected vacancy=%s:%s reason=expired", source, external_id)
+        _clear_expired_undo_metadata(storage, source, external_id, configured_chat_id)
         return
     age_seconds = (datetime.now(timezone.utc) - action_at).total_seconds()
     if age_seconds > float(window_seconds):
         answer_once("Undo period has expired.")
         logger.info("Undo rejected vacancy=%s:%s reason=expired", source, external_id)
+        _clear_expired_undo_metadata(storage, source, external_id, configured_chat_id)
         return
 
     undo_fn = getattr(storage, "undo_terminal_action", None)
@@ -2783,28 +2768,157 @@ def _handle_undo_action(
         restored_status,
     )
     answer_once("Action undone")
+    _ = message_id, url, title, company, client, timing_logger
+
+
+def _reconcile_vacancy_message(
+    *,
+    storage: TelegramDeliveryStorage,
+    client: TelegramClient,
+    source: str,
+    external_id: str,
+    chat_id: str,
+    message_id: int | None = None,
+    title: str | None = None,
+    company: str | None = None,
+    url: str | None = None,
+    undo_window_seconds: int = 600,
+    markup_only: bool = False,
+) -> None:
+    """Rebuild Telegram vacancy UI strictly from current DB state."""
+    get_delivery = getattr(storage, "get_delivery", None)
+    if not callable(get_delivery):
+        return
+    delivery = get_delivery(source, external_id)
+    if delivery is None:
+        return
+    resolved_chat_id = str(getattr(delivery, "chat_id", None) or chat_id)
+    resolved_message_id = int(message_id) if message_id and int(message_id) > 0 else int(delivery.message_id)
+    if resolved_message_id <= 0:
+        return
+
+    hist_title, hist_company, hist_url = _resolve_card_context(
+        storage=storage,
+        message={"text": "", "reply_markup": {}},
+        source=source,
+        external_id=external_id,
+    )
+    resolved_title = (title or hist_title or "Vacancy").strip() or "Vacancy"
+    resolved_company = company if company is not None else hist_company
+    resolved_url = url or hist_url
+    if not resolved_url:
+        return
+
+    status = str(delivery.status)
+    text, buttons = _ui_for_delivery_status(
+        storage=storage,
+        delivery=delivery,
+        status=status,
+        source=source,
+        external_id=external_id,
+        title=resolved_title,
+        company=resolved_company,
+        url=resolved_url,
+        undo_window_seconds=undo_window_seconds,
+    )
+
     try:
-        _restore_card_after_undo(
-            storage=storage,
-            client=client,
-            source=source,
-            external_id=external_id,
-            chat_id=configured_chat_id,
-            message_id=message_id,
-            restored_status=restored_status,
-            title=title,
-            company=company,
-            url=url,
-        )
-    except (TelegramRequestError, ValueError, KeyError) as exc:
+        if markup_only and status in {STATUS_APPLIED, STATUS_SKIPPED}:
+            client.edit_message_reply_markup(
+                chat_id=resolved_chat_id,
+                message_id=resolved_message_id,
+                buttons=buttons,
+            )
+        else:
+            client.edit_message_text(
+                chat_id=resolved_chat_id,
+                message_id=resolved_message_id,
+                text=text,
+                buttons=buttons,
+            )
+    except TelegramMessageNotModifiedError:
+        _ = None
+    except TelegramRequestError as exc:
         logger.warning(
-            "Undo telegram restore failed vacancy=%s:%s status=%s error=%s",
+            "Reconcile failed vacancy=%s:%s status=%s message_id=%s error=%s",
             source,
             external_id,
-            restored_status,
+            status,
+            resolved_message_id,
             exc,
         )
-    _ = timing_logger
+
+
+def _ui_for_delivery_status(
+    *,
+    storage: TelegramDeliveryStorage,
+    delivery,
+    status: str,
+    source: str,
+    external_id: str,
+    title: str,
+    company: str | None,
+    url: str,
+    undo_window_seconds: int,
+) -> tuple[str, list]:
+    if status in {STATUS_PREPARE_REQUESTED, STATUS_PREPARING}:
+        return build_loading_text(title=title, company=company), build_loading_buttons(url)
+    if status == STATUS_PREPARED:
+        prep = storage.get_preparation(source, external_id) if hasattr(storage, "get_preparation") else None
+        resume_name = getattr(prep, "resume_name", None) or "java-backend"
+        return (
+            build_ready_text(title=title, company=company, recommended_resume=resume_name),
+            build_prepared_application_buttons(source, external_id, url),
+        )
+    if status == STATUS_PREPARATION_FAILED:
+        return (
+            format_preparation_failed_html(title=title, company=company),
+            build_prepare_failed_buttons(source, external_id, url),
+        )
+    if status in {STATUS_APPLIED, STATUS_SKIPPED}:
+        action_id = None
+        if _undo_still_available(delivery, undo_window_seconds):
+            action_id = getattr(delivery, "last_action_id", None)
+        return (
+            format_archived_vacancy_html(applied=(status == STATUS_APPLIED), title=title, company=company),
+            build_archived_buttons(
+                url,
+                source=source,
+                external_id=external_id,
+                action_id=action_id,
+            ),
+        )
+    return _rebuild_sent_card(
+        storage=storage,
+        source=source,
+        external_id=external_id,
+        title=title,
+        company=company,
+        url=url,
+    )
+
+
+def _clear_expired_undo_metadata(
+    storage: TelegramDeliveryStorage,
+    source: str,
+    external_id: str,
+    chat_id: str,
+) -> None:
+    clear_fn = getattr(storage, "clear_undo_metadata", None)
+    if callable(clear_fn):
+        clear_fn(source=source, external_id=external_id, chat_id=chat_id)
+
+
+def _undo_still_available(delivery, window_seconds: int) -> bool:
+    action_id = getattr(delivery, "last_action_id", None)
+    if not action_id:
+        return False
+    if getattr(delivery, "status", None) not in {STATUS_APPLIED, STATUS_SKIPPED}:
+        return False
+    action_at = _parse_action_timestamp(getattr(delivery, "last_action_at", None))
+    if action_at is None:
+        return False
+    return (datetime.now(timezone.utc) - action_at).total_seconds() <= float(window_seconds)
 
 
 def _edit_archived_card(
@@ -2863,38 +2977,15 @@ def _restore_card_after_undo(
     company: str | None,
     url: str | None,
 ) -> None:
-    if message_id <= 0 or not url:
-        return
-    safe_title = title or "Vacancy"
-    if restored_status == STATUS_PREPARED:
-        prep = storage.get_preparation(source, external_id) if hasattr(storage, "get_preparation") else None
-        resume_name = getattr(prep, "resume_name", None) or "java-backend"
-        text = build_ready_text(title=safe_title, company=company, recommended_resume=resume_name)
-        buttons = build_prepared_application_buttons(source, external_id, url)
-    elif restored_status in {STATUS_PREPARE_REQUESTED, STATUS_PREPARING}:
-        text = build_loading_text(title=safe_title, company=company)
-        buttons = build_loading_buttons(url)
-    elif restored_status == STATUS_PREPARATION_FAILED:
-        text = format_preparation_failed_html(title=safe_title, company=company)
-        buttons = build_prepare_failed_buttons(source, external_id, url)
-    else:
-        text, buttons = _rebuild_sent_card(
-            storage=storage,
-            source=source,
-            external_id=external_id,
-            title=safe_title,
-            company=company,
-            url=url,
-        )
-    try:
-        client.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            buttons=buttons,
-        )
-    except TelegramMessageNotModifiedError:
-        _ = None
+    _ = restored_status, title, company, url
+    _reconcile_vacancy_message(
+        storage=storage,
+        client=client,
+        source=source,
+        external_id=external_id,
+        chat_id=chat_id,
+        message_id=message_id,
+    )
 
 
 def _rebuild_sent_card(
@@ -3945,10 +4036,26 @@ def _prepare_worker_loop(
         storage=worker_storage,
         telegram_client=telegram_client,
     )
+    recovery_interval = max(30, min(60, int(settings.preparing_recovery_timeout_seconds) // 10 or 30))
+    next_maintenance_at = 0.0
     if verbose:
         _run_log("Worker thread started", component="worker")
     while not stop_event.is_set():
         try:
+            now = time.monotonic()
+            if now >= next_maintenance_at:
+                _runtime_recover_abandoned_preparations(
+                    settings=settings,
+                    storage=worker_storage,
+                    telegram_client=telegram_client,
+                    verbose=verbose,
+                )
+                _expire_undo_buttons(
+                    settings=settings,
+                    storage=worker_storage,
+                    telegram_client=telegram_client,
+                )
+                next_maintenance_at = now + recovery_interval
             priority_keys = _drain_prepare_priorities(
                 storage=worker_storage,
                 timing_logger=_component_log("worker") if verbose else None,
@@ -4002,6 +4109,87 @@ def _prepare_worker_loop(
         except Exception as exc:  # noqa: BLE001
             _run_log(f"Queue drain check failed: {exc}", component="worker")
         _run_log("Worker exiting", component="worker")
+
+
+def _runtime_recover_abandoned_preparations(
+    *,
+    settings: Settings,
+    storage: TelegramDeliveryStorage,
+    telegram_client: TelegramClient,
+    verbose: bool,
+) -> list[tuple[str, str]]:
+    recover_preparing = getattr(storage, "recover_abandoned_preparing", None)
+    if not callable(recover_preparing):
+        return []
+    recovered = recover_preparing(
+        worker_alive=True,
+        timeout_seconds=settings.preparing_recovery_timeout_seconds,
+    )
+    for source, external_id in recovered:
+        if verbose:
+            _run_log(f"Runtime recovered abandoned preparation {source}:{external_id}", component="worker")
+        _reconcile_recovered_preparation_message(
+            storage=storage,
+            client=telegram_client,
+            chat_id=str(settings.telegram_chat_id),
+            source=source,
+            external_id=external_id,
+            auto_retry=True,
+        )
+        _enqueue_prepare_priority(
+            storage=storage,
+            source=source,
+            external_id=external_id,
+            enqueue_reason="runtime_recovery",
+            timing_logger=_component_log("worker") if verbose else None,
+        )
+    return recovered
+
+
+def _expire_undo_buttons(
+    *,
+    settings: Settings,
+    storage: TelegramDeliveryStorage,
+    telegram_client: TelegramClient,
+) -> int:
+    list_expired = getattr(storage, "list_expired_undo_deliveries", None)
+    if not callable(list_expired):
+        return 0
+    expired = list_expired(window_seconds=int(settings.undo_window_seconds), limit=50)
+    cleared = 0
+    for delivery in expired:
+        clear_fn = getattr(storage, "clear_undo_metadata", None)
+        if callable(clear_fn):
+            clear_fn(
+                source=delivery.source,
+                external_id=delivery.external_id,
+                chat_id=delivery.chat_id,
+            )
+        try:
+            _reconcile_vacancy_message(
+                storage=storage,
+                client=telegram_client,
+                source=delivery.source,
+                external_id=delivery.external_id,
+                chat_id=delivery.chat_id,
+                message_id=delivery.message_id,
+                undo_window_seconds=int(settings.undo_window_seconds),
+                markup_only=True,
+            )
+            cleared += 1
+            logger.info(
+                "Undo button expired vacancy=%s:%s",
+                delivery.source,
+                delivery.external_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Undo expiry reconcile failed vacancy=%s:%s error=%s",
+                delivery.source,
+                delivery.external_id,
+                exc,
+            )
+    return cleared
 
 
 def _poll_telegram_actions_once(
@@ -4169,42 +4357,76 @@ def _prepare_one_application(
     print_dry_run_items: bool,
     timing_logger: Callable[[str], None] | None,
 ) -> _PrepareOneResult:
-    if not dry_run:
-        get_delivery = getattr(storage, "get_delivery", None)
-        claim = getattr(storage, "claim_for_preparation", None)
-        current_status = None
-        if callable(get_delivery):
-            delivery = get_delivery(source, external_id)
-            current_status = delivery.status if delivery is not None else None
-        if current_status in {STATUS_PREPARED, STATUS_APPLIED, STATUS_SKIPPED, STATUS_PREPARING}:
+    claimed = False
+    try:
+        if not dry_run:
+            get_delivery = getattr(storage, "get_delivery", None)
+            claim = getattr(storage, "claim_for_preparation", None)
+            current_status = None
+            if callable(get_delivery):
+                delivery = get_delivery(source, external_id)
+                current_status = delivery.status if delivery is not None else None
+            if current_status in {STATUS_PREPARED, STATUS_APPLIED, STATUS_SKIPPED, STATUS_PREPARING}:
+                if timing_logger is not None:
+                    timing_logger(f"Prepare skipped claim {source}:{external_id} status={current_status}")
+                return _PrepareOneResult()
+            if callable(claim):
+                claimed = bool(
+                    claim(
+                        source=source,
+                        external_id=external_id,
+                        chat_id=settings.telegram_chat_id,
+                    )
+                )
+                if not claimed:
+                    refreshed = None
+                    if callable(get_delivery):
+                        row = get_delivery(source, external_id)
+                        refreshed = row.status if row is not None else None
+                    if timing_logger is not None:
+                        timing_logger(f"Prepare skipped claim {source}:{external_id} status={refreshed or 'unknown'}")
+                    return _PrepareOneResult()
+                if timing_logger is not None:
+                    timing_logger(f"Prepare claimed {source}:{external_id}")
+
+        item_started_at = time.monotonic()
+        if timing_logger is not None:
+            timing_logger(f"Prepare start {source}:{external_id}")
+        generation_started_at = time.monotonic()
+        try:
+            prepared = service.prepare(source=source, external_id=external_id)
+        except (
+            ApplicationPreparationError,
+            LLMRequestError,
+            LLMResponseError,
+            CoverLetterValidationError,
+            PromptLoadError,
+            Exception,
+        ) as exc:
             if timing_logger is not None:
-                timing_logger(f"Prepare skipped claim {source}:{external_id} status={current_status}")
-            return _PrepareOneResult()
-        if callable(claim):
-            claimed = bool(
-                claim(
+                timing_logger(
+                    f"Prepare failed {source}:{external_id} +{int((time.monotonic() - generation_started_at) * 1000)}ms"
+                )
+            if not dry_run:
+                _mark_preparation_failed(
+                    storage=storage,
+                    telegram_client=telegram_client,
+                    settings=settings,
                     source=source,
                     external_id=external_id,
-                    chat_id=settings.telegram_chat_id,
+                    error_message=str(exc),
+                    resume_name=None,
+                    language=None,
+                    cover_letter=None,
+                    vacancy_title=None,
+                    vacancy_company=None,
+                    vacancy_url=None,
+                    timing_logger=timing_logger,
                 )
-            )
-            if not claimed:
-                refreshed = None
-                if callable(get_delivery):
-                    row = get_delivery(source, external_id)
-                    refreshed = row.status if row is not None else None
-                if timing_logger is not None:
-                    timing_logger(f"Prepare skipped claim {source}:{external_id} status={refreshed or 'unknown'}")
-                return _PrepareOneResult()
-            if timing_logger is not None:
-                timing_logger(f"Prepare claimed {source}:{external_id}")
+            elif print_dry_run_items:
+                typer.echo(f"FAILED {source}:{external_id} {exc}")
+            return _PrepareOneResult(errors_count=1)
 
-    item_started_at = time.monotonic()
-    if timing_logger is not None:
-        timing_logger(f"Prepare start {source}:{external_id}")
-    generation_started_at = time.monotonic()
-    try:
-        prepared = service.prepare(source=source, external_id=external_id)
         if timing_logger is not None:
             timing_logger(
                 f"Prepare generated {source}:{external_id} +{int((time.monotonic() - generation_started_at) * 1000)}ms"
@@ -4235,107 +4457,99 @@ def _prepare_one_application(
                         f"Prepare LLM {event.get('operation')} +{event.get('elapsed_ms')}ms "
                         f"tokens={event.get('total_tokens')}"
                     )
-    except (
-        ApplicationPreparationError,
-        LLMRequestError,
-        LLMResponseError,
-        CoverLetterValidationError,
-        PromptLoadError,
-    ) as exc:
-        if timing_logger is not None:
-            timing_logger(
-                f"Prepare failed {source}:{external_id} +{int((time.monotonic() - generation_started_at) * 1000)}ms"
-            )
-        if not dry_run:
-            message_ref = storage.get_message_ref(
+
+        generated_packages = 1
+        if dry_run:
+            missing = 1 if prepared.resume_path is None else 0
+            if print_dry_run_items:
+                _print_prepared_dry_run(prepared)
+            return _PrepareOneResult(generated_packages=generated_packages, pdf_missing=missing)
+
+        message_ref = storage.get_message_ref(
+            source=source,
+            external_id=external_id,
+            chat_id=settings.telegram_chat_id,
+        )
+        if message_ref is None:
+            _mark_preparation_failed(
+                storage=storage,
+                telegram_client=telegram_client,
+                settings=settings,
                 source=source,
                 external_id=external_id,
-                chat_id=settings.telegram_chat_id,
+                error_message="Original Telegram card is missing.",
+                resume_name=prepared.recommended_resume,
+                language=prepared.language,
+                cover_letter=prepared.cover_letter,
+                vacancy_title=prepared.title,
+                vacancy_company=prepared.company,
+                vacancy_url=prepared.url,
+                timing_logger=timing_logger,
+                update_telegram=False,
             )
-            db_started_at = time.monotonic()
-            storage.update_status(
-                source=source,
-                external_id=external_id,
-                chat_id=settings.telegram_chat_id,
-                status=STATUS_PREPARATION_FAILED,
-            )
-            storage.save_preparation(
-                source=source,
-                external_id=external_id,
-                status=STATUS_PREPARATION_FAILED,
-                resume_name=None,
-                language=None,
-                error_message=str(exc),
-                cover_letter=None,
-                vacancy_title=None,
-                vacancy_company=None,
-                vacancy_url=None,
-            )
-            storage.mark_history_status(
-                source=source,
-                external_id=external_id,
-                status=STATUS_PREPARATION_FAILED,
-                timestamp_field=None,
+            return _PrepareOneResult(generated_packages=generated_packages, errors_count=1)
+
+        try:
+            telegram_started_at = time.monotonic()
+            telegram_client.edit_message_text(  # type: ignore[union-attr]
+                chat_id=message_ref[0],
+                message_id=message_ref[1],
+                text=build_ready_text(
+                    title=prepared.title,
+                    company=prepared.company,
+                    recommended_resume=prepared.recommended_resume,
+                ),
+                buttons=build_prepared_application_buttons(
+                    source=prepared.source,
+                    external_id=prepared.external_id,
+                    url=prepared.url,
+                ),
             )
             if timing_logger is not None:
                 timing_logger(
-                    f"Prepare phase database {source}:{external_id} "
-                    f"+{int((time.monotonic() - db_started_at) * 1000)}ms"
+                    f"Prepare phase telegram_update {source}:{external_id} "
+                    f"+{int((time.monotonic() - telegram_started_at) * 1000)}ms"
                 )
-            if message_ref is not None:
-                try:
-                    title, company, url = _resolve_card_context(
-                        storage=storage,
-                        message={"text": "", "reply_markup": {}},
-                        source=source,
-                        external_id=external_id,
-                    )
-                    if url:
-                        telegram_started_at = time.monotonic()
-                        telegram_client.edit_message_text(  # type: ignore[union-attr]
-                            chat_id=message_ref[0],
-                            message_id=message_ref[1],
-                            text=format_preparation_failed_html(title=title, company=company),
-                            buttons=build_prepare_failed_buttons(source=source, external_id=external_id, url=url),
-                        )
-                        if timing_logger is not None:
-                            timing_logger(
-                                f"Prepare phase telegram_update {source}:{external_id} "
-                                f"+{int((time.monotonic() - telegram_started_at) * 1000)}ms"
-                            )
-                except (TelegramRequestError, TelegramMessageNotModifiedError, ValueError):
-                    logger.warning("Primary vacancy message update failed for preparation error: %s:%s", source, external_id)
-        elif print_dry_run_items:
-            typer.echo(f"FAILED {source}:{external_id} {exc}")
-        return _PrepareOneResult(errors_count=1)
+                timing_logger(
+                    f"Prepare editMessageText {source}:{external_id} +{int((time.monotonic() - telegram_started_at) * 1000)}ms"
+                )
+        except TelegramMessageNotModifiedError:
+            if timing_logger is not None:
+                timing_logger(f"Prepare phase telegram_update {source}:{external_id} +0ms")
+            _ = None
+        except (TelegramRequestError, ValueError) as exc:
+            _mark_preparation_failed(
+                storage=storage,
+                telegram_client=telegram_client,
+                settings=settings,
+                source=source,
+                external_id=external_id,
+                error_message=str(exc),
+                resume_name=prepared.recommended_resume,
+                language=prepared.language,
+                cover_letter=prepared.cover_letter,
+                vacancy_title=prepared.title,
+                vacancy_company=prepared.company,
+                vacancy_url=prepared.url,
+                timing_logger=timing_logger,
+                update_telegram=False,
+            )
+            return _PrepareOneResult(generated_packages=generated_packages, errors_count=1)
 
-    generated_packages = 1
-    if dry_run:
-        missing = 1 if prepared.resume_path is None else 0
-        if print_dry_run_items:
-            _print_prepared_dry_run(prepared)
-        return _PrepareOneResult(generated_packages=generated_packages, pdf_missing=missing)
-
-    message_ref = storage.get_message_ref(
-        source=source,
-        external_id=external_id,
-        chat_id=settings.telegram_chat_id,
-    )
-    if message_ref is None:
         db_started_at = time.monotonic()
         storage.update_status(
             source=source,
             external_id=external_id,
             chat_id=settings.telegram_chat_id,
-            status=STATUS_PREPARATION_FAILED,
+            status=STATUS_PREPARED,
         )
         storage.save_preparation(
             source=source,
             external_id=external_id,
-            status=STATUS_PREPARATION_FAILED,
+            status=STATUS_PREPARED,
             resume_name=prepared.recommended_resume,
             language=prepared.language,
-            error_message="Original Telegram card is missing.",
+            error_message=None,
             cover_letter=prepared.cover_letter,
             vacancy_title=prepared.title,
             vacancy_company=prepared.company,
@@ -4344,114 +4558,137 @@ def _prepare_one_application(
         storage.mark_history_status(
             source=source,
             external_id=external_id,
-            status=STATUS_PREPARATION_FAILED,
-            timestamp_field=None,
+            status=STATUS_PREPARED,
+            timestamp_field="prepared_at",
         )
         if timing_logger is not None:
             timing_logger(
                 f"Prepare phase database {source}:{external_id} "
                 f"+{int((time.monotonic() - db_started_at) * 1000)}ms"
             )
-        return _PrepareOneResult(generated_packages=generated_packages, errors_count=1)
+            timing_logger(
+                f"Prepare done {source}:{external_id} total={int((time.monotonic() - item_started_at) * 1000)}ms"
+            )
+        return _PrepareOneResult(
+            generated_packages=generated_packages,
+            prepared_successfully=1,
+            telegram_sent=1,
+        )
+    finally:
+        if claimed and not dry_run:
+            _ensure_preparation_left_preparing(
+                storage=storage,
+                telegram_client=telegram_client,
+                settings=settings,
+                source=source,
+                external_id=external_id,
+                timing_logger=timing_logger,
+            )
 
-    try:
-        telegram_started_at = time.monotonic()
-        telegram_client.edit_message_text(  # type: ignore[union-attr]
-            chat_id=message_ref[0],
-            message_id=message_ref[1],
-            text=build_ready_text(
-                title=prepared.title,
-                company=prepared.company,
-                recommended_resume=prepared.recommended_resume,
-            ),
-            buttons=build_prepared_application_buttons(
-                source=prepared.source,
-                external_id=prepared.external_id,
-                url=prepared.url,
-            ),
-        )
-        if timing_logger is not None:
-            timing_logger(
-                f"Prepare phase telegram_update {source}:{external_id} "
-                f"+{int((time.monotonic() - telegram_started_at) * 1000)}ms"
-            )
-            timing_logger(
-                f"Prepare editMessageText {source}:{external_id} +{int((time.monotonic() - telegram_started_at) * 1000)}ms"
-            )
-    except TelegramMessageNotModifiedError:
-        if timing_logger is not None:
-            timing_logger(f"Prepare phase telegram_update {source}:{external_id} +0ms")
-        _ = None
-    except (TelegramRequestError, ValueError) as exc:
-        db_started_at = time.monotonic()
-        storage.update_status(
-            source=source,
-            external_id=external_id,
-            chat_id=settings.telegram_chat_id,
-            status=STATUS_PREPARATION_FAILED,
-        )
-        storage.save_preparation(
-            source=source,
-            external_id=external_id,
-            status=STATUS_PREPARATION_FAILED,
-            resume_name=prepared.recommended_resume,
-            language=prepared.language,
-            error_message=str(exc),
-            cover_letter=prepared.cover_letter,
-            vacancy_title=prepared.title,
-            vacancy_company=prepared.company,
-            vacancy_url=prepared.url,
-        )
-        storage.mark_history_status(
-            source=source,
-            external_id=external_id,
-            status=STATUS_PREPARATION_FAILED,
-            timestamp_field=None,
-        )
-        if timing_logger is not None:
-            timing_logger(
-                f"Prepare phase database {source}:{external_id} "
-                f"+{int((time.monotonic() - db_started_at) * 1000)}ms"
-            )
-        return _PrepareOneResult(generated_packages=generated_packages, errors_count=1)
 
+def _mark_preparation_failed(
+    *,
+    storage: TelegramDeliveryStorage,
+    telegram_client: TelegramClient | None,
+    settings: Settings,
+    source: str,
+    external_id: str,
+    error_message: str,
+    resume_name: str | None,
+    language: str | None,
+    cover_letter: str | None,
+    vacancy_title: str | None,
+    vacancy_company: str | None,
+    vacancy_url: str | None,
+    timing_logger: Callable[[str], None] | None,
+    update_telegram: bool = True,
+) -> None:
     db_started_at = time.monotonic()
     storage.update_status(
         source=source,
         external_id=external_id,
         chat_id=settings.telegram_chat_id,
-        status=STATUS_PREPARED,
+        status=STATUS_PREPARATION_FAILED,
     )
     storage.save_preparation(
         source=source,
         external_id=external_id,
-        status=STATUS_PREPARED,
-        resume_name=prepared.recommended_resume,
-        language=prepared.language,
-        error_message=None,
-        cover_letter=prepared.cover_letter,
-        vacancy_title=prepared.title,
-        vacancy_company=prepared.company,
-        vacancy_url=prepared.url,
+        status=STATUS_PREPARATION_FAILED,
+        resume_name=resume_name,
+        language=language,
+        error_message=error_message,
+        cover_letter=cover_letter,
+        vacancy_title=vacancy_title,
+        vacancy_company=vacancy_company,
+        vacancy_url=vacancy_url,
     )
     storage.mark_history_status(
         source=source,
         external_id=external_id,
-        status=STATUS_PREPARED,
-        timestamp_field="prepared_at",
+        status=STATUS_PREPARATION_FAILED,
+        timestamp_field=None,
     )
     if timing_logger is not None:
         timing_logger(
             f"Prepare phase database {source}:{external_id} "
             f"+{int((time.monotonic() - db_started_at) * 1000)}ms"
         )
-        timing_logger(
-            f"Prepare done {source}:{external_id} total={int((time.monotonic() - item_started_at) * 1000)}ms"
+    if not update_telegram or telegram_client is None:
+        return
+    try:
+        _reconcile_vacancy_message(
+            storage=storage,
+            client=telegram_client,
+            source=source,
+            external_id=external_id,
+            chat_id=str(settings.telegram_chat_id),
+            undo_window_seconds=int(settings.undo_window_seconds),
         )
-    return _PrepareOneResult(
-        generated_packages=generated_packages,
-        prepared_successfully=1,
-        telegram_sent=1,
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Primary vacancy message update failed for preparation error: %s:%s (%s)",
+            source,
+            external_id,
+            exc,
+        )
+
+
+def _ensure_preparation_left_preparing(
+    *,
+    storage: TelegramDeliveryStorage,
+    telegram_client: TelegramClient | None,
+    settings: Settings,
+    source: str,
+    external_id: str,
+    timing_logger: Callable[[str], None] | None,
+) -> None:
+    get_delivery = getattr(storage, "get_delivery", None)
+    if not callable(get_delivery):
+        return
+    delivery = get_delivery(source, external_id)
+    if delivery is None or delivery.status != STATUS_PREPARING:
+        return
+    logger.error(
+        "Preparation left in PREPARING; forcing PREPARATION_FAILED vacancy=%s:%s",
+        source,
+        external_id,
+    )
+    if timing_logger is not None:
+        timing_logger(f"Prepare safety-net failed {source}:{external_id} reason=stuck_preparing")
+    _mark_preparation_failed(
+        storage=storage,
+        telegram_client=telegram_client,
+        settings=settings,
+        source=source,
+        external_id=external_id,
+        error_message="Preparation interrupted before completion.",
+        resume_name=None,
+        language=None,
+        cover_letter=None,
+        vacancy_title=None,
+        vacancy_company=None,
+        vacancy_url=None,
+        timing_logger=timing_logger,
     )
 
 

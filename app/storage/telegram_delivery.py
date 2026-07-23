@@ -305,6 +305,61 @@ class TelegramDeliveryStorage:
             conn.commit()
         return recovered
 
+    def list_expired_undo_deliveries(
+        self,
+        *,
+        window_seconds: int,
+        limit: int = 50,
+    ) -> list[TelegramDeliveryRecord]:
+        """Return APPLIED/SKIPPED rows whose undo window has elapsed but metadata remains."""
+        safe_timeout = max(1, int(window_seconds))
+        safe_limit = max(1, int(limit))
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=safe_timeout)
+        with self._connect() as conn:
+            self._ensure_delivery_columns(conn)
+            rows = conn.execute(
+                """
+                select source, external_id, chat_id, message_id, sent_at, status,
+                       previous_status, last_action, last_action_id, last_action_at
+                from telegram_deliveries
+                where status in (?, ?)
+                  and last_action_id is not null
+                  and last_action_at is not null
+                order by last_action_at asc
+                limit ?
+                """,
+                (STATUS_APPLIED, STATUS_SKIPPED, safe_limit * 5),
+            ).fetchall()
+        expired: list[TelegramDeliveryRecord] = []
+        for row in rows:
+            delivery = _row_to_delivery(row)
+            action_at = _parse_iso_datetime(delivery.last_action_at)
+            if action_at is None or action_at > cutoff:
+                continue
+            expired.append(delivery)
+            if len(expired) >= safe_limit:
+                break
+        return expired
+
+    def clear_undo_metadata(self, *, source: str, external_id: str, chat_id: str) -> bool:
+        with self._connect() as conn:
+            self._ensure_delivery_columns(conn)
+            cursor = conn.execute(
+                """
+                update telegram_deliveries
+                set previous_status = null,
+                    last_action = null,
+                    last_action_id = null,
+                    last_action_at = null
+                where source = ? and external_id = ? and chat_id = ?
+                  and status in (?, ?)
+                  and last_action_id is not null
+                """,
+                (source, external_id, str(chat_id), STATUS_APPLIED, STATUS_SKIPPED),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
     def upsert_application_history(
         self,
         *,

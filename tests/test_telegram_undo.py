@@ -202,10 +202,11 @@ def test_undo_expired_does_not_change_status(tmp_path: Path) -> None:
     after = storage.get_delivery("linkedin-email", "4443325085")
     assert after is not None
     assert after.status == STATUS_APPLIED
-    assert after.previous_status == STATUS_SENT
+    assert after.last_action_id is None
+    assert after.previous_status is None
     assert ("cb-undo", "Undo period has expired.") in client.answers
-    assert len(client.edits) == edits_before
-
+    assert len(client.edits) == edits_before + 1
+    assert all(btn.text != "↩️ Undo" for row in client.edits[-1]["buttons"] for btn in row)
 
 def test_repeated_undo_is_idempotent(tmp_path: Path) -> None:
     storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
@@ -387,8 +388,8 @@ def test_double_applied_is_idempotent(tmp_path: Path) -> None:
     assert second.status == STATUS_APPLIED
     assert second.last_action_id == first_action_id
     assert ("cb-2", "Отклик уже отмечен") in client.answers
-    assert len(client.edits) == 1
-
+    assert len(client.edits) == 2
+    assert all("Marked as applied" in item["text"] for item in client.edits)
 
 def test_legacy_callback_formats_still_parse() -> None:
     assert parse_callback_data("applied:li:4443325085") == ("applied", "linkedin-email", "4443325085", None)

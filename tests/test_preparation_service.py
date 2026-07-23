@@ -405,7 +405,7 @@ def test_prepare_appends_relocation_block_for_new_zealand(tmp_path: Path, monkey
 
     assert prepared.cover_letter.startswith(base_letter)
     assert "Although I currently live outside New Zealand" in prepared.cover_letter
-    assert "I can travel to New Zealand for in-person interviews" in prepared.cover_letter
+    assert "can travel to New Zealand for in-person interviews" in prepared.cover_letter
     log_text = "\n".join(record.getMessage() for record in caplog.records)
     assert "Cover letter profile: relocation (New Zealand)" in log_text
 

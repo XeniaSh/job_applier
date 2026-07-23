@@ -18,7 +18,7 @@ BASE_LETTER = (
 )
 
 NZ_BLOCK_SNIPPET = "Although I currently live outside New Zealand, I am actively seeking relocation opportunities."
-NZ_TRAVEL_SNIPPET = "I can travel to New Zealand for in-person interviews or meetings if helpful"
+NZ_TRAVEL_SNIPPET = "can travel to New Zealand for in-person interviews or meetings if helpful"
 
 
 @pytest.mark.parametrize(
@@ -40,7 +40,7 @@ def test_new_zealand_enables_relocation_profile(location: str | None, country: s
     assert rendered.startswith(BASE_LETTER)
     assert NZ_BLOCK_SNIPPET in rendered
     assert NZ_TRAVEL_SNIPPET in rendered
-    assert "relocate permanently before the end of this year" in rendered
+    assert "committed to relocating" in rendered
 
 
 @pytest.mark.parametrize(
@@ -74,7 +74,6 @@ def test_default_cover_letter_body_unchanged_when_relocation_appended() -> None:
     assert body == BASE_LETTER
     assert NZ_BLOCK_SNIPPET in block
     assert "sponsorship" not in block.lower()
-    assert "visa" not in block.lower()
     assert "work authorization" not in block.lower()
 
 

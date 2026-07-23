@@ -1128,16 +1128,27 @@ def test_prepare_callback_sets_loading_state(monkeypatch) -> None:
     events: list[str] = []
 
     class FakeStorage:
+        def __init__(self) -> None:
+            self.status = "SENT"
+
         def update_delivery_and_history(self, **kwargs):
             calls["updates"].append(kwargs)
+            self.status = kwargs["delivery_status"]
 
         def get_delivery(self, source, external_id):
             _ = source, external_id
-            return type("D", (), {"status": "SENT"})()
+            return type("D", (), {"status": self.status, "message_id": 10, "chat_id": "123"})()
 
         def get_history_title_company_url(self, source, external_id):
             _ = source, external_id
             return ("Backend Role", "ACME", "https://www.linkedin.com/jobs/view/1/")
+
+        def get_state(self, key):
+            _ = key
+            return None
+
+        def set_state(self, key, value):
+            _ = key, value
 
     class FakeClient:
         def answer_callback_query(self, callback_query_id, text=None):
@@ -1671,12 +1682,16 @@ def test_applied_after_prepare_updates_prepared_card() -> None:
     calls = {"status": [], "answers": [], "edits": []}
 
     class Storage:
+        def __init__(self) -> None:
+            self.status = "PREPARED"
+
         def get_delivery(self, source, external_id):
             _ = source, external_id
-            return type("D", (), {"status": "PREPARED"})()
+            return type("D", (), {"status": self.status, "message_id": 51, "chat_id": "123"})()
 
         def update_delivery_and_history(self, **kwargs):
             calls["status"].append(kwargs)
+            self.status = kwargs["delivery_status"]
 
         def get_history_title_company_url(self, source, external_id):
             _ = source, external_id
@@ -1684,7 +1699,7 @@ def test_applied_after_prepare_updates_prepared_card() -> None:
 
         def get_preparation(self, source, external_id):
             _ = source, external_id
-            return type("P", (), {"resume_message_id": None, "cover_letter_message_id": None})()
+            return type("P", (), {"resume_message_id": None, "cover_letter_message_id": None, "resume_name": "java-backend"})()
 
         def clear_preparation_aux_message_ids(self, **kwargs):
             _ = kwargs
@@ -1851,7 +1866,10 @@ def test_repeated_applied_presses_are_idempotent() -> None:
         configured_chat_id="123",
     )
     assert len(calls["status"]) == 1
-    assert len(calls["edits"]) == 1
+    assert len(calls["edits"]) == 2
+    assert all("Marked as applied" in item["text"] for item in calls["edits"])
+    assert calls["answers"][0] == ("cb-applied-1", "Отклик отмечен как отправленный")
+    assert calls["answers"][1] == ("cb-applied-2", "Отклик уже отмечен")
     assert calls["answers"] == [
         ("cb-applied-1", "Отклик отмечен как отправленный"),
         ("cb-applied-2", "Отклик уже отмечен"),
