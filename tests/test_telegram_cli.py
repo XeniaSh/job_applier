@@ -604,8 +604,23 @@ def test_poll_callbacks_skip_prepare_unknown_and_wrong_chat() -> None:
     calls = {"status": [], "answers": [], "edits": []}
 
     class FakeStorage:
+        def __init__(self):
+            self.statuses = {
+                "4439013108": "SENT",
+                "4439013109": "SENT",
+                "4439013111": "SENT",
+            }
+
+        def get_delivery(self, source, external_id):
+            _ = source
+            status = self.statuses.get(external_id)
+            if status is None:
+                return None
+            return type("D", (), {"status": status})()
+
         def update_delivery_and_history(self, **kwargs):
             calls["status"].append(kwargs)
+            self.statuses[kwargs["external_id"]] = kwargs["delivery_status"]
 
         def set_state(self, key, value):
             calls.setdefault("state", []).append((key, value))
@@ -721,14 +736,12 @@ def test_poll_callbacks_skip_prepare_unknown_and_wrong_chat() -> None:
     assert ("cb3", "Некорректное действие") in calls["answers"]
     assert ("cb4", "Действие недоступно для этого чата") in calls["answers"]
     assert len(calls["edits"]) == 3
-    assert any("❌ Skipped" in item["text"] for item in calls["edits"])
-    assert any("✅ Applied" in item["text"] for item in calls["edits"])
+    assert any("Marked as skipped" in item["text"] for item in calls["edits"])
+    assert any("Marked as applied" in item["text"] for item in calls["edits"])
     for item in calls["edits"]:
         buttons = item["buttons"]
-        assert len(buttons) == 1
-        assert len(buttons[0]) == 1
-        assert buttons[0][0].text == "🔗 Open vacancy"
-        assert str(buttons[0][0].url).startswith("https://www.linkedin.com/jobs/view/")
+        assert buttons[-1][0].text == "🔗 Open vacancy"
+        assert str(buttons[-1][0].url).startswith("https://www.linkedin.com/jobs/view/")
 
 
 def test_poll_telegram_actions_persists_offset_and_repeated_updates(monkeypatch) -> None:
@@ -1650,8 +1663,8 @@ def test_applied_before_prepare_updates_card_in_place() -> None:
     assert calls["status"][0]["timestamp_field"] == "applied_at"
     assert calls["answers"] == [("cb-applied-before", "Отклик отмечен как отправленный")]
     assert len(calls["edits"]) == 1
-    assert "✅ Applied" in calls["edits"][0]["text"]
-    assert calls["edits"][0]["buttons"][0][0].text == "🔗 Open vacancy"
+    assert "Marked as applied" in calls["edits"][0]["text"]
+    assert calls["edits"][0]["buttons"][-1][0].text == "🔗 Open vacancy"
 
 
 def test_applied_after_prepare_updates_prepared_card() -> None:
@@ -1706,7 +1719,7 @@ def test_applied_after_prepare_updates_prepared_card() -> None:
     )
     assert calls["status"][0]["delivery_status"] == "APPLIED"
     assert calls["answers"] == [("cb-applied-after-prepare", "Отклик отмечен как отправленный")]
-    assert "✅ Applied" in calls["edits"][0]["text"]
+    assert "Marked as applied" in calls["edits"][0]["text"]
 
 
 def test_applied_after_copy_still_marks_applied() -> None:

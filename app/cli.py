@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass
 import hashlib
+import html
 import inspect
 import json
 import logging
@@ -53,6 +54,7 @@ from app.storage.telegram_delivery import (
     STATUS_PREPARING,
     STATUS_PREPARED,
     STATUS_PREPARATION_FAILED,
+    STATUS_SENT,
     STATUS_SKIPPED,
     TelegramDeliveryStorage,
 )
@@ -60,6 +62,7 @@ from app.telegram.client import (
     TelegramClient,
     TelegramMessageNotModifiedError,
     TelegramRequestError,
+    build_action_buttons,
     build_archived_buttons,
     build_loading_buttons,
     build_loading_text,
@@ -75,6 +78,7 @@ from app.telegram.formatter import (
     format_archived_vacancy_html,
     format_preparation_failed_html,
     format_preparation_interrupted_html,
+    format_telegram_card_html,
 )
 from app.telegram.models import (
     ApplicationHistoryRecord,
@@ -942,6 +946,7 @@ def run_pipeline(
                     resumes_dir=settings.resumes_dir,
                     resume_cache_service=callback_resume_cache,
                     timing_logger=_component_log("poller") if verbose else None,
+                    undo_window_seconds=settings.undo_window_seconds,
                 )
                 if prepare_requests > 0:
                     _run_log("Prepare request received", component="poller")
@@ -1013,6 +1018,7 @@ def poll_telegram_actions(
                     timeout=timeout,
                     resumes_dir=settings.resumes_dir,
                     timing_logger=None,
+                    undo_window_seconds=settings.undo_window_seconds,
                 )
             except TelegramRequestError as exc:
                 typer.secho(f"Ошибка Telegram polling: {exc}", err=True, fg=typer.colors.RED)
@@ -2296,6 +2302,7 @@ def _process_callback_update(
     resumes_dir: Path | None = None,
     resume_cache_service: ResumeCacheService | None = None,
     timing_logger: Callable[[str], None] | None = None,
+    undo_window_seconds: int | None = None,
 ) -> None:
     received_at = time.monotonic()
     callback = update.get("callback_query")
@@ -2318,7 +2325,7 @@ def _process_callback_update(
         return
 
     try:
-        action, source, external_id = parse_callback_data(callback_data)
+        action, source, external_id, action_token = parse_callback_data(callback_data)
     except ValueError:
         if callback_id:
             client.answer_callback_query(callback_id, text="Некорректное действие")
@@ -2333,10 +2340,14 @@ def _process_callback_update(
     )
 
     get_delivery = getattr(storage, "get_delivery", None)
-    current_status = None
-    if callable(get_delivery):
-        current = get_delivery(source, external_id)
-        current_status = current.status if current is not None else None
+    current = get_delivery(source, external_id) if callable(get_delivery) else None
+    current_status = current.status if current is not None else None
+    window_seconds = undo_window_seconds
+    if window_seconds is None:
+        try:
+            window_seconds = int(Settings().undo_window_seconds)
+        except Exception:  # noqa: BLE001
+            window_seconds = 600
 
     answered = False
     answer_at: float | None = None
@@ -2366,62 +2377,63 @@ def _process_callback_update(
 
     try:
         if action == "skip":
-            if current_status == STATUS_SKIPPED:
-                answer_once("Вакансия уже пропущена")
-                return
-            storage.update_delivery_and_history(
+            _handle_terminal_action(
+                action="SKIPPED",
+                new_status=STATUS_SKIPPED,
+                current=current,
+                current_status=current_status,
                 source=source,
                 external_id=external_id,
-                chat_id=configured_chat_id,
-                delivery_status=STATUS_SKIPPED,
-                history_status=STATUS_SKIPPED,
-                timestamp_field="skipped_at",
-            )
-            answer_once("Вакансия пропущена")
-            _edit_archived_card(
+                storage=storage,
                 client=client,
-                chat_id=configured_chat_id,
+                configured_chat_id=configured_chat_id,
                 message_id=message_id,
                 url=url,
                 title=title,
                 company=company,
-                applied=False,
-            )
-            _cleanup_aux_messages(
-                storage=storage,
-                client=client,
-                source=source,
-                external_id=external_id,
-                chat_id=configured_chat_id,
+                window_seconds=window_seconds,
+                answer_once=answer_once,
+                timing_logger=timing_logger,
+                already_text="Вакансия уже пропущена",
+                success_text="Вакансия пропущена",
             )
         elif action == "applied":
-            if current_status == STATUS_APPLIED:
-                answer_once("Отклик уже отмечен")
-                return
-            storage.update_delivery_and_history(
+            _handle_terminal_action(
+                action="APPLIED",
+                new_status=STATUS_APPLIED,
+                current=current,
+                current_status=current_status,
                 source=source,
                 external_id=external_id,
-                chat_id=configured_chat_id,
-                delivery_status=STATUS_APPLIED,
-                history_status=STATUS_APPLIED,
-                timestamp_field="applied_at",
-            )
-            answer_once("Отклик отмечен как отправленный")
-            _edit_archived_card(
+                storage=storage,
                 client=client,
-                chat_id=configured_chat_id,
+                configured_chat_id=configured_chat_id,
                 message_id=message_id,
                 url=url,
                 title=title,
                 company=company,
-                applied=True,
+                window_seconds=window_seconds,
+                answer_once=answer_once,
+                timing_logger=timing_logger,
+                already_text="Отклик уже отмечен",
+                success_text="Отклик отмечен как отправленный",
             )
-            _cleanup_aux_messages(
-                storage=storage,
-                client=client,
+        elif action == "undo":
+            _handle_undo_action(
                 source=source,
                 external_id=external_id,
-                chat_id=configured_chat_id,
+                action_token=action_token or "",
+                current=current,
+                storage=storage,
+                client=client,
+                configured_chat_id=configured_chat_id,
+                message_id=message_id,
+                url=url,
+                title=title,
+                company=company,
+                window_seconds=window_seconds,
+                answer_once=answer_once,
+                timing_logger=timing_logger,
             )
         elif action == "prepare":
             if current_status in {STATUS_APPLIED, STATUS_SKIPPED}:
@@ -2585,8 +2597,214 @@ def _process_callback_update(
                 f"Callback {action}:{source}:{external_id} ack_ms={ack_ms} total_ms={total_ms} answered={answer_state}"
             )
 
-    if action in {"copy", "resume", "prepare"}:
+    if action in {"copy", "resume", "prepare", "undo"}:
         return
+
+
+def _handle_terminal_action(
+    *,
+    action: str,
+    new_status: str,
+    current,
+    current_status: str | None,
+    source: str,
+    external_id: str,
+    storage: TelegramDeliveryStorage,
+    client: TelegramClient,
+    configured_chat_id: str,
+    message_id: int,
+    url: str | None,
+    title: str,
+    company: str | None,
+    window_seconds: int,
+    answer_once: Callable[[str | None], None],
+    timing_logger: Callable[[str], None] | None,
+    already_text: str,
+    success_text: str,
+) -> None:
+    logger.info("Callback %s received vacancy=%s:%s", action.lower(), source, external_id)
+    if current_status == new_status:
+        answer_once(already_text)
+        return
+    # Reject only when storage can look up deliveries and the vacancy is missing.
+    # Legacy/mock storages without get_delivery keep the old Applied/Skip path.
+    if current is None and callable(getattr(storage, "get_delivery", None)):
+        answer_once("Вакансия не найдена")
+        logger.info("Action rejected vacancy=%s:%s reason=unknown_vacancy", source, external_id)
+        return
+
+    previous_status = current_status if current_status is not None else STATUS_SENT
+    apply_fn = getattr(storage, "apply_terminal_action", None)
+    if callable(apply_fn):
+        try:
+            action_id = apply_fn(
+                source=source,
+                external_id=external_id,
+                chat_id=configured_chat_id,
+                new_status=new_status,
+                previous_status=previous_status,
+                action=action,
+            )
+        except KeyError:
+            answer_once("Вакансия не найдена")
+            logger.info("Action rejected vacancy=%s:%s reason=unknown_vacancy", source, external_id)
+            return
+    else:
+        storage.update_delivery_and_history(
+            source=source,
+            external_id=external_id,
+            chat_id=configured_chat_id,
+            delivery_status=new_status,
+            history_status=new_status,
+            timestamp_field="applied_at" if new_status == STATUS_APPLIED else "skipped_at",
+        )
+        action_id = None
+
+    logger.info(
+        "Action transition vacancy=%s:%s from=%s to=%s action_id=%s",
+        source,
+        external_id,
+        previous_status,
+        new_status,
+        action_id or "n/a",
+    )
+    if action_id:
+        logger.info(
+            "Undo available vacancy=%s:%s expires_in=%ss",
+            source,
+            external_id,
+            window_seconds,
+        )
+    answer_once(success_text)
+    _edit_archived_card(
+        client=client,
+        chat_id=configured_chat_id,
+        message_id=message_id,
+        url=url,
+        title=title,
+        company=company,
+        applied=(new_status == STATUS_APPLIED),
+        source=source,
+        external_id=external_id,
+        action_id=action_id,
+    )
+    _cleanup_aux_messages(
+        storage=storage,
+        client=client,
+        source=source,
+        external_id=external_id,
+        chat_id=configured_chat_id,
+    )
+
+
+def _handle_undo_action(
+    *,
+    source: str,
+    external_id: str,
+    action_token: str,
+    current,
+    storage: TelegramDeliveryStorage,
+    client: TelegramClient,
+    configured_chat_id: str,
+    message_id: int,
+    url: str | None,
+    title: str,
+    company: str | None,
+    window_seconds: int,
+    answer_once: Callable[[str | None], None],
+    timing_logger: Callable[[str], None] | None,
+) -> None:
+    logger.info(
+        "Callback undo received vacancy=%s:%s action_id=%s",
+        source,
+        external_id,
+        action_token,
+    )
+    if current is None:
+        answer_once("Вакансия не найдена")
+        logger.info("Undo rejected vacancy=%s:%s reason=unknown_vacancy", source, external_id)
+        return
+
+    previous_status = getattr(current, "previous_status", None)
+    last_action_id = getattr(current, "last_action_id", None)
+    if not previous_status or not last_action_id:
+        answer_once("Action has already been undone.")
+        logger.info("Undo rejected vacancy=%s:%s reason=already_undone", source, external_id)
+        return
+
+    if last_action_id != action_token:
+        answer_once("This action is no longer current.")
+        logger.info("Undo rejected vacancy=%s:%s reason=stale_action", source, external_id)
+        return
+
+    action_at = _parse_action_timestamp(getattr(current, "last_action_at", None))
+    if action_at is None:
+        answer_once("Undo period has expired.")
+        logger.info("Undo rejected vacancy=%s:%s reason=expired", source, external_id)
+        return
+    age_seconds = (datetime.now(timezone.utc) - action_at).total_seconds()
+    if age_seconds > float(window_seconds):
+        answer_once("Undo period has expired.")
+        logger.info("Undo rejected vacancy=%s:%s reason=expired", source, external_id)
+        return
+
+    undo_fn = getattr(storage, "undo_terminal_action", None)
+    if not callable(undo_fn):
+        answer_once("Undo is unavailable.")
+        return
+    result_code, restored_status = undo_fn(
+        source=source,
+        external_id=external_id,
+        chat_id=configured_chat_id,
+        expected_action_id=action_token,
+    )
+    if result_code == "already_undone":
+        answer_once("Action has already been undone.")
+        logger.info("Undo rejected vacancy=%s:%s reason=already_undone", source, external_id)
+        return
+    if result_code == "stale_action":
+        answer_once("This action is no longer current.")
+        logger.info("Undo rejected vacancy=%s:%s reason=stale_action", source, external_id)
+        return
+    if result_code == "no_previous_status":
+        answer_once("Undo is unavailable.")
+        logger.info("Undo rejected vacancy=%s:%s reason=no_previous_status", source, external_id)
+        return
+    if result_code != "ok" or not restored_status:
+        answer_once("Вакансия не найдена")
+        logger.info("Undo rejected vacancy=%s:%s reason=%s", source, external_id, result_code)
+        return
+
+    logger.info(
+        "Undo transition vacancy=%s:%s from=%s to=%s",
+        source,
+        external_id,
+        current.status,
+        restored_status,
+    )
+    answer_once("Action undone")
+    try:
+        _restore_card_after_undo(
+            storage=storage,
+            client=client,
+            source=source,
+            external_id=external_id,
+            chat_id=configured_chat_id,
+            message_id=message_id,
+            restored_status=restored_status,
+            title=title,
+            company=company,
+            url=url,
+        )
+    except (TelegramRequestError, ValueError, KeyError) as exc:
+        logger.warning(
+            "Undo telegram restore failed vacancy=%s:%s status=%s error=%s",
+            source,
+            external_id,
+            restored_status,
+            exc,
+        )
+    _ = timing_logger
 
 
 def _edit_archived_card(
@@ -2598,10 +2816,21 @@ def _edit_archived_card(
     title: str,
     company: str | None,
     applied: bool,
+    source: str | None = None,
+    external_id: str | None = None,
+    action_id: str | None = None,
 ) -> None:
     if message_id <= 0:
         return
-    buttons = build_archived_buttons(url) if url else []
+    if url:
+        buttons = build_archived_buttons(
+            url,
+            source=source,
+            external_id=external_id,
+            action_id=action_id,
+        )
+    else:
+        buttons = []
     try:
         client.edit_message_text(
             chat_id=chat_id,
@@ -2611,6 +2840,117 @@ def _edit_archived_card(
         )
     except TelegramMessageNotModifiedError:
         _ = None
+    except TelegramRequestError as exc:
+        logger.warning(
+            "Archived card edit failed vacancy=%s:%s message_id=%s error=%s",
+            source,
+            external_id,
+            message_id,
+            exc,
+        )
+
+
+def _restore_card_after_undo(
+    *,
+    storage: TelegramDeliveryStorage,
+    client: TelegramClient,
+    source: str,
+    external_id: str,
+    chat_id: str,
+    message_id: int,
+    restored_status: str,
+    title: str,
+    company: str | None,
+    url: str | None,
+) -> None:
+    if message_id <= 0 or not url:
+        return
+    safe_title = title or "Vacancy"
+    if restored_status == STATUS_PREPARED:
+        prep = storage.get_preparation(source, external_id) if hasattr(storage, "get_preparation") else None
+        resume_name = getattr(prep, "resume_name", None) or "java-backend"
+        text = build_ready_text(title=safe_title, company=company, recommended_resume=resume_name)
+        buttons = build_prepared_application_buttons(source, external_id, url)
+    elif restored_status in {STATUS_PREPARE_REQUESTED, STATUS_PREPARING}:
+        text = build_loading_text(title=safe_title, company=company)
+        buttons = build_loading_buttons(url)
+    elif restored_status == STATUS_PREPARATION_FAILED:
+        text = format_preparation_failed_html(title=safe_title, company=company)
+        buttons = build_prepare_failed_buttons(source, external_id, url)
+    else:
+        text, buttons = _rebuild_sent_card(
+            storage=storage,
+            source=source,
+            external_id=external_id,
+            title=safe_title,
+            company=company,
+            url=url,
+        )
+    try:
+        client.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            buttons=buttons,
+        )
+    except TelegramMessageNotModifiedError:
+        _ = None
+
+
+def _rebuild_sent_card(
+    *,
+    storage: TelegramDeliveryStorage,
+    source: str,
+    external_id: str,
+    title: str,
+    company: str | None,
+    url: str,
+) -> tuple[str, list]:
+    cached = None
+    get_cache = getattr(storage, "get_prepare_cache", None)
+    if callable(get_cache):
+        cached = get_cache(source, external_id)
+    if cached and cached.get("evaluation_json"):
+        try:
+            evaluation = VacancyEvaluation.model_validate_json(str(cached["evaluation_json"]))
+            warnings, info_items = card_display_sections(evaluation)
+            card = TelegramVacancyCard(
+                source=map_source_to_code(source),
+                external_id=external_id,
+                decision=evaluation.decision.value,
+                title=str(cached.get("title") or title),
+                company=cached.get("company") if cached.get("company") is not None else company,
+                location=cached.get("location"),
+                url=str(cached.get("url") or url),
+                match_percentage=evaluation.match_percentage,
+                gaps=evaluation.gaps,
+                nuances=evaluation.nuances,
+                warnings=warnings,
+                info_items=info_items,
+                recommended_resume=evaluation.recommended_resume.value,
+                content_completeness=str(cached.get("content_completeness") or "PARTIAL"),
+                decision_reason=evaluation.decision_reason,
+            )
+            return format_telegram_card_html(card), build_action_buttons(source, external_id, url)
+        except Exception:  # noqa: BLE001
+            _ = None
+    lines = [f"<b>{html.escape(title, quote=True)}</b>"]
+    if company:
+        lines.append(html.escape(company, quote=True))
+    return "\n".join(lines), build_action_buttons(source, external_id, url)
+
+
+def _parse_action_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _build_resume_caption(*, resume_name: str, title: str, company: str | None) -> str:
@@ -3674,6 +4014,7 @@ def _poll_telegram_actions_once(
     resumes_dir: Path | None = None,
     resume_cache_service: ResumeCacheService | None = None,
     timing_logger: Callable[[str], None] | None = None,
+    undo_window_seconds: int | None = None,
 ) -> tuple[int | None, int]:
     updates = client.get_updates(offset=offset, timeout=timeout)
     next_offset = offset
@@ -3685,7 +4026,7 @@ def _poll_telegram_actions_once(
             callback_data = callback.get("data", "") if isinstance(callback, dict) else ""
             if isinstance(callback_data, str):
                 try:
-                    action, _source, _external_id = parse_callback_data(callback_data)
+                    action, _source, _external_id, _action_id = parse_callback_data(callback_data)
                     if action == "prepare":
                         prepare_requests += 1
                 except ValueError:
@@ -3698,6 +4039,7 @@ def _poll_telegram_actions_once(
                 resumes_dir=resumes_dir,
                 resume_cache_service=resume_cache_service,
                 timing_logger=timing_logger,
+                undo_window_seconds=undo_window_seconds,
             )
         except Exception as exc:  # noqa: BLE001
             if timing_logger is not None:

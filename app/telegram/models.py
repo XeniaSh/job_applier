@@ -51,6 +51,10 @@ class TelegramDeliveryRecord:
     message_id: int
     sent_at: str
     status: str
+    previous_status: str | None = None
+    last_action: str | None = None
+    last_action_id: str | None = None
+    last_action_at: str | None = None
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -102,31 +103,25 @@ class TelegramDeliveryStorage:
             params.append(source)
         where_sql = f" where {' and '.join(clauses)}" if clauses else ""
         sql = (
-            "select source, external_id, chat_id, message_id, sent_at, status "
+            "select source, external_id, chat_id, message_id, sent_at, status, "
+            "previous_status, last_action, last_action_id, last_action_at "
             f"from telegram_deliveries{where_sql} "
             "order by sent_at desc, external_id desc "
             "limit ?"
         )
         params.append(safe_limit)
         with self._connect() as conn:
+            self._ensure_delivery_columns(conn)
             rows = conn.execute(sql, params).fetchall()
-        return [
-            TelegramDeliveryRecord(
-                source=str(row[0]),
-                external_id=str(row[1]),
-                chat_id=str(row[2]),
-                message_id=int(row[3]),
-                sent_at=str(row[4]),
-                status=str(row[5]),
-            )
-            for row in rows
-        ]
+        return [_row_to_delivery(row) for row in rows]
 
     def get_delivery(self, source: str, external_id: str) -> TelegramDeliveryRecord | None:
         with self._connect() as conn:
+            self._ensure_delivery_columns(conn)
             row = conn.execute(
                 """
-                select source, external_id, chat_id, message_id, sent_at, status
+                select source, external_id, chat_id, message_id, sent_at, status,
+                       previous_status, last_action, last_action_id, last_action_at
                 from telegram_deliveries
                 where source = ? and external_id = ?
                 order by sent_at desc
@@ -136,14 +131,7 @@ class TelegramDeliveryStorage:
             ).fetchone()
         if row is None:
             return None
-        return TelegramDeliveryRecord(
-            source=str(row[0]),
-            external_id=str(row[1]),
-            chat_id=str(row[2]),
-            message_id=int(row[3]),
-            sent_at=str(row[4]),
-            status=str(row[5]),
-        )
+        return _row_to_delivery(row)
 
     def set_status(self, source: str, external_id: str, status: str) -> None:
         if status not in ALLOWED_STATUSES:
@@ -428,6 +416,7 @@ class TelegramDeliveryStorage:
             raise ValueError(f"Unsupported history timestamp field: {timestamp_field}")
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
+            self._ensure_delivery_columns(conn)
             cursor = conn.execute(
                 """
                 update telegram_deliveries
@@ -467,6 +456,130 @@ class TelegramDeliveryStorage:
                     (history_status, now, source, external_id),
                 )
             conn.commit()
+
+    def apply_terminal_action(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        chat_id: str,
+        new_status: str,
+        previous_status: str,
+        action: str,
+        action_id: str | None = None,
+    ) -> str:
+        """Mark vacancy APPLIED/SKIPPED and store undo metadata. Returns action_id."""
+        if new_status not in {STATUS_APPLIED, STATUS_SKIPPED}:
+            raise ValueError(f"Unsupported terminal status: {new_status}")
+        if previous_status not in ALLOWED_STATUSES:
+            raise ValueError(f"Unknown previous status: {previous_status}")
+        token = (action_id or secrets.token_hex(4)).strip()
+        now = datetime.now(timezone.utc).isoformat()
+        timestamp_field = "applied_at" if new_status == STATUS_APPLIED else "skipped_at"
+        with self._connect() as conn:
+            self._ensure_delivery_columns(conn)
+            cursor = conn.execute(
+                """
+                update telegram_deliveries
+                set status = ?,
+                    previous_status = ?,
+                    last_action = ?,
+                    last_action_id = ?,
+                    last_action_at = ?
+                where source = ? and external_id = ? and chat_id = ?
+                """,
+                (
+                    new_status,
+                    previous_status,
+                    action,
+                    token,
+                    now,
+                    source,
+                    external_id,
+                    str(chat_id),
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"Delivery not found: {source}:{external_id}:{chat_id}")
+            conn.execute(
+                """
+                insert into application_history (
+                    source, external_id, first_seen_at, current_status
+                )
+                values (?, ?, ?, ?)
+                on conflict(source, external_id) do nothing
+                """,
+                (source, external_id, now, new_status),
+            )
+            conn.execute(
+                f"""
+                update application_history
+                set current_status = ?, {timestamp_field} = coalesce({timestamp_field}, ?)
+                where source = ? and external_id = ?
+                """,
+                (new_status, now, source, external_id),
+            )
+            conn.commit()
+        return token
+
+    def undo_terminal_action(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        chat_id: str,
+        expected_action_id: str,
+    ) -> tuple[str, str | None]:
+        """
+        Restore previous_status if action_id matches.
+
+        Returns (result_code, restored_status).
+        result_code: ok | already_undone | stale_action | no_previous_status | not_found
+        """
+        with self._connect() as conn:
+            self._ensure_delivery_columns(conn)
+            row = conn.execute(
+                """
+                select status, previous_status, last_action_id, last_action_at
+                from telegram_deliveries
+                where source = ? and external_id = ? and chat_id = ?
+                """,
+                (source, external_id, str(chat_id)),
+            ).fetchone()
+            if row is None:
+                return "not_found", None
+            current_status = str(row[0])
+            previous_status = str(row[1]) if row[1] is not None else None
+            last_action_id = str(row[2]) if row[2] is not None else None
+            if previous_status is None or last_action_id is None:
+                return "already_undone", None
+            if last_action_id != expected_action_id:
+                return "stale_action", None
+            if previous_status not in ALLOWED_STATUSES:
+                return "no_previous_status", None
+            conn.execute(
+                """
+                update telegram_deliveries
+                set status = ?,
+                    previous_status = null,
+                    last_action = null,
+                    last_action_id = null,
+                    last_action_at = null
+                where source = ? and external_id = ? and chat_id = ?
+                """,
+                (previous_status, source, external_id, str(chat_id)),
+            )
+            conn.execute(
+                """
+                update application_history
+                set current_status = ?
+                where source = ? and external_id = ?
+                """,
+                (previous_status, source, external_id),
+            )
+            conn.commit()
+        _ = current_status
+        return "ok", previous_status
 
     def list_application_history(
         self,
@@ -1013,10 +1126,15 @@ class TelegramDeliveryStorage:
                     message_id integer not null,
                     sent_at text not null,
                     status text not null,
+                    previous_status text,
+                    last_action text,
+                    last_action_id text,
+                    last_action_at text,
                     primary key (source, external_id, chat_id)
                 )
                 """
             )
+            self._ensure_delivery_columns(conn)
             conn.execute(
                 """
                 create table if not exists telegram_state (
@@ -1111,6 +1229,22 @@ class TelegramDeliveryStorage:
             self._ensure_prepare_cache_columns(conn)
             conn.commit()
 
+    def _ensure_delivery_columns(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("pragma table_info(telegram_deliveries)").fetchall()
+        if not rows:
+            return
+        existing = {str(row[1]) for row in rows}
+        extra_columns = {
+            "previous_status": "text",
+            "last_action": "text",
+            "last_action_id": "text",
+            "last_action_at": "text",
+        }
+        for name, type_name in extra_columns.items():
+            if name in existing:
+                continue
+            conn.execute(f"alter table telegram_deliveries add column {name} {type_name}")
+
     def _ensure_preparation_columns(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("pragma table_info(application_preparations)").fetchall()
         existing = {str(row[1]) for row in rows}
@@ -1152,6 +1286,21 @@ class TelegramDeliveryStorage:
             if name in existing:
                 continue
             conn.execute(f"alter table vacancy_prepare_cache add column {name} {type_name}")
+
+
+def _row_to_delivery(row: sqlite3.Row | tuple) -> TelegramDeliveryRecord:
+    return TelegramDeliveryRecord(
+        source=str(row[0]),
+        external_id=str(row[1]),
+        chat_id=str(row[2]),
+        message_id=int(row[3]),
+        sent_at=str(row[4]),
+        status=str(row[5]),
+        previous_status=str(row[6]) if len(row) > 6 and row[6] is not None else None,
+        last_action=str(row[7]) if len(row) > 7 and row[7] is not None else None,
+        last_action_id=str(row[8]) if len(row) > 8 and row[8] is not None else None,
+        last_action_at=str(row[9]) if len(row) > 9 and row[9] is not None else None,
+    )
 
 
 def _parse_iso_datetime(value: object) -> datetime | None:

@@ -319,14 +319,10 @@ def build_action_buttons(source: str, external_id: str, url: str) -> list[list[T
     prepare_data = _callback_data("prepare", compact_source, external_id)
     applied_data = _callback_data("applied", compact_source, external_id)
     return [
-        [
-            TelegramInlineButton(text="Prepare", callback_data=prepare_data),
-            TelegramInlineButton(text="Applied", callback_data=applied_data),
-        ],
-        [
-            TelegramInlineButton(text="Skip", callback_data=skip_data),
-            TelegramInlineButton(text="Open vacancy", url=validated_url),
-        ],
+        [TelegramInlineButton(text="🛠 Prepare", callback_data=prepare_data)],
+        [TelegramInlineButton(text="✅ Applied", callback_data=applied_data)],
+        [TelegramInlineButton(text="⏭ Skip", callback_data=skip_data)],
+        [TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)],
     ]
 
 
@@ -341,10 +337,8 @@ def build_prepared_application_buttons(source: str, external_id: str, url: str) 
         [TelegramInlineButton(text="📋 Copy Cover Letter", callback_data=copy_data)],
         [TelegramInlineButton(text="📎 Resume PDF", callback_data=resume_data)],
         [TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)],
-        [
-            TelegramInlineButton(text="✅ Applied", callback_data=applied_data),
-            TelegramInlineButton(text="❌ Skip", callback_data=skip_data),
-        ],
+        [TelegramInlineButton(text="✅ Applied", callback_data=applied_data)],
+        [TelegramInlineButton(text="⏭ Skip", callback_data=skip_data)],
     ]
 
 
@@ -353,9 +347,21 @@ def build_loading_buttons(url: str) -> list[list[TelegramInlineButton]]:
     return [[TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)]]
 
 
-def build_archived_buttons(url: str) -> list[list[TelegramInlineButton]]:
+def build_archived_buttons(
+    url: str,
+    *,
+    source: str | None = None,
+    external_id: str | None = None,
+    action_id: str | None = None,
+) -> list[list[TelegramInlineButton]]:
     validated_url = validate_vacancy_url(url)
-    return [[TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)]]
+    rows: list[list[TelegramInlineButton]] = []
+    if source and external_id and action_id:
+        compact_source = map_source_to_code(source)
+        undo_data = _callback_data("undo", compact_source, external_id, action_id=action_id)
+        rows.append([TelegramInlineButton(text="↩️ Undo", callback_data=undo_data)])
+    rows.append([TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)])
+    return rows
 
 
 def build_prepare_failed_buttons(source: str, external_id: str, url: str) -> list[list[TelegramInlineButton]]:
@@ -365,10 +371,9 @@ def build_prepare_failed_buttons(source: str, external_id: str, url: str) -> lis
     skip_data = _callback_data("skip", compact_source, external_id)
     return [
         [TelegramInlineButton(text="Retry preparation", callback_data=prepare_data)],
-        [TelegramInlineButton(text="Skip", callback_data=skip_data)],
+        [TelegramInlineButton(text="⏭ Skip", callback_data=skip_data)],
         [TelegramInlineButton(text="Open vacancy", url=validated_url)],
     ]
-
 
 def build_loading_text(*, title: str, company: str | None) -> str:
     return format_preparing_application_html(title=title, company=company)
@@ -403,17 +408,30 @@ def map_code_to_source(code: str) -> str:
     return mapped
 
 
-def parse_callback_data(value: str) -> tuple[str, str, str]:
+def parse_callback_data(value: str) -> tuple[str, str, str, str | None]:
+    """
+    Parse callback payload.
+
+    Formats:
+    - action:source:external_id
+    - undo:source:external_id:action_id
+    """
     parts = value.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        action, source_code, external_id = parts
+        action_id = None
+    elif len(parts) == 4 and parts[0] == "undo":
+        action, source_code, external_id, action_id = parts
+    else:
         raise ValueError("Malformed callback data.")
-    action, source_code, external_id = parts
-    if action not in {"skip", "prepare", "applied", "copy", "resume"}:
+    if action not in {"skip", "prepare", "applied", "copy", "resume", "undo"}:
         raise ValueError("Unsupported callback action.")
     if not external_id.strip():
         raise ValueError("Invalid external id in callback data.")
+    if action == "undo" and (not action_id or not action_id.strip()):
+        raise ValueError("Invalid undo action id.")
     source = map_code_to_source(source_code)
-    return action, source, external_id
+    return action, source, external_id, action_id
 
 
 def validate_linkedin_job_url(url: str) -> str:
@@ -427,8 +445,17 @@ def validate_vacancy_url(url: str) -> str:
     raise ValueError("Only HTTP(S) vacancy URLs are allowed.")
 
 
-def _callback_data(action: str, source_code: str, external_id: str) -> str:
-    value = f"{action}:{source_code}:{external_id}"
+def _callback_data(
+    action: str,
+    source_code: str,
+    external_id: str,
+    *,
+    action_id: str | None = None,
+) -> str:
+    if action_id:
+        value = f"{action}:{source_code}:{external_id}:{action_id}"
+    else:
+        value = f"{action}:{source_code}:{external_id}"
     if len(value.encode("utf-8")) > 64:
         raise ValueError("callback_data exceeds Telegram limit.")
     return value

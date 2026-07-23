@@ -229,7 +229,7 @@ def format_preparation_interrupted_html(*, title: str, company: str | None, auto
 
 
 def format_archived_vacancy_html(*, applied: bool, title: str, company: str | None) -> str:
-    header = "✅ Applied" if applied else "❌ Skipped"
+    header = "✅ Marked as applied" if applied else "⏭ Marked as skipped"
     lines = [header, "", _escape(title)]
     if company:
         lines.append(_escape(company))
