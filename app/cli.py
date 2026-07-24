@@ -2724,13 +2724,25 @@ def _handle_undo_action(
     if action_at is None:
         answer_once("Undo period has expired.")
         logger.info("Undo rejected vacancy=%s:%s reason=expired", source, external_id)
-        _clear_expired_undo_metadata(storage, source, external_id, configured_chat_id)
+        _clear_expired_undo_metadata(
+            storage,
+            source,
+            external_id,
+            configured_chat_id,
+            expected_action_id=action_token or None,
+        )
         return
     age_seconds = (datetime.now(timezone.utc) - action_at).total_seconds()
     if age_seconds > float(window_seconds):
         answer_once("Undo period has expired.")
         logger.info("Undo rejected vacancy=%s:%s reason=expired", source, external_id)
-        _clear_expired_undo_metadata(storage, source, external_id, configured_chat_id)
+        _clear_expired_undo_metadata(
+            storage,
+            source,
+            external_id,
+            configured_chat_id,
+            expected_action_id=action_token or None,
+        )
         return
 
     undo_fn = getattr(storage, "undo_terminal_action", None)
@@ -2903,10 +2915,17 @@ def _clear_expired_undo_metadata(
     source: str,
     external_id: str,
     chat_id: str,
+    *,
+    expected_action_id: str | None = None,
 ) -> None:
     clear_fn = getattr(storage, "clear_undo_metadata", None)
     if callable(clear_fn):
-        clear_fn(source=source, external_id=external_id, chat_id=chat_id)
+        clear_fn(
+            source=source,
+            external_id=external_id,
+            chat_id=chat_id,
+            expected_action_id=expected_action_id,
+        )
 
 
 def _undo_still_available(delivery, window_seconds: int) -> bool:
@@ -2919,73 +2938,6 @@ def _undo_still_available(delivery, window_seconds: int) -> bool:
     if action_at is None:
         return False
     return (datetime.now(timezone.utc) - action_at).total_seconds() <= float(window_seconds)
-
-
-def _edit_archived_card(
-    *,
-    client: TelegramClient,
-    chat_id: str,
-    message_id: int,
-    url: str | None,
-    title: str,
-    company: str | None,
-    applied: bool,
-    source: str | None = None,
-    external_id: str | None = None,
-    action_id: str | None = None,
-) -> None:
-    if message_id <= 0:
-        return
-    if url:
-        buttons = build_archived_buttons(
-            url,
-            source=source,
-            external_id=external_id,
-            action_id=action_id,
-        )
-    else:
-        buttons = []
-    try:
-        client.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=format_archived_vacancy_html(applied=applied, title=title, company=company),
-            buttons=buttons,
-        )
-    except TelegramMessageNotModifiedError:
-        _ = None
-    except TelegramRequestError as exc:
-        logger.warning(
-            "Archived card edit failed vacancy=%s:%s message_id=%s error=%s",
-            source,
-            external_id,
-            message_id,
-            exc,
-        )
-
-
-def _restore_card_after_undo(
-    *,
-    storage: TelegramDeliveryStorage,
-    client: TelegramClient,
-    source: str,
-    external_id: str,
-    chat_id: str,
-    message_id: int,
-    restored_status: str,
-    title: str,
-    company: str | None,
-    url: str | None,
-) -> None:
-    _ = restored_status, title, company, url
-    _reconcile_vacancy_message(
-        storage=storage,
-        client=client,
-        source=source,
-        external_id=external_id,
-        chat_id=chat_id,
-        message_id=message_id,
-    )
 
 
 def _rebuild_sent_card(
@@ -4155,33 +4107,80 @@ def _expire_undo_buttons(
     list_expired = getattr(storage, "list_expired_undo_deliveries", None)
     if not callable(list_expired):
         return 0
-    expired = list_expired(window_seconds=int(settings.undo_window_seconds), limit=50)
+    window_seconds = int(settings.undo_window_seconds)
+    expired = list_expired(window_seconds=window_seconds, limit=50)
     cleared = 0
     for delivery in expired:
-        clear_fn = getattr(storage, "clear_undo_metadata", None)
-        if callable(clear_fn):
-            clear_fn(
-                source=delivery.source,
-                external_id=delivery.external_id,
-                chat_id=delivery.chat_id,
-            )
+        expected_action_id = delivery.last_action_id
+        if not expected_action_id:
+            continue
         try:
-            _reconcile_vacancy_message(
+            get_delivery = getattr(storage, "get_delivery", None)
+            current = get_delivery(delivery.source, delivery.external_id) if callable(get_delivery) else None
+            if current is None or current.status not in {STATUS_APPLIED, STATUS_SKIPPED}:
+                continue
+            if current.last_action_id != expected_action_id:
+                logger.info(
+                    "Undo expiry skipped vacancy=%s:%s reason=stale_action",
+                    delivery.source,
+                    delivery.external_id,
+                )
+                continue
+            if _undo_still_available(current, window_seconds):
+                continue
+
+            title, company, url = _resolve_card_context(
                 storage=storage,
-                client=telegram_client,
+                message={"text": "", "reply_markup": {}},
                 source=delivery.source,
                 external_id=delivery.external_id,
-                chat_id=delivery.chat_id,
-                message_id=delivery.message_id,
-                undo_window_seconds=int(settings.undo_window_seconds),
-                markup_only=True,
             )
+            if not url or int(delivery.message_id) <= 0:
+                logger.warning(
+                    "Undo expiry skipped vacancy=%s:%s reason=missing_message_context",
+                    delivery.source,
+                    delivery.external_id,
+                )
+                continue
+
+            buttons = build_archived_buttons(
+                url,
+                source=delivery.source,
+                external_id=delivery.external_id,
+                action_id=None,
+            )
+            try:
+                telegram_client.edit_message_reply_markup(
+                    chat_id=str(delivery.chat_id),
+                    message_id=int(delivery.message_id),
+                    buttons=buttons,
+                )
+            except TelegramMessageNotModifiedError:
+                _ = None
+            except TelegramRequestError as exc:
+                logger.warning(
+                    "Undo expiry telegram edit failed vacancy=%s:%s error=%s",
+                    delivery.source,
+                    delivery.external_id,
+                    exc,
+                )
+                continue
+
+            clear_fn = getattr(storage, "clear_undo_metadata", None)
+            if callable(clear_fn):
+                clear_fn(
+                    source=delivery.source,
+                    external_id=delivery.external_id,
+                    chat_id=delivery.chat_id,
+                    expected_action_id=expected_action_id,
+                )
             cleared += 1
             logger.info(
                 "Undo button expired vacancy=%s:%s",
                 delivery.source,
                 delivery.external_id,
             )
+            _ = title, company
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Undo expiry reconcile failed vacancy=%s:%s error=%s",

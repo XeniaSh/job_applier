@@ -341,22 +341,51 @@ class TelegramDeliveryStorage:
                 break
         return expired
 
-    def clear_undo_metadata(self, *, source: str, external_id: str, chat_id: str) -> bool:
+    def clear_undo_metadata(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        chat_id: str,
+        expected_action_id: str | None = None,
+    ) -> bool:
         with self._connect() as conn:
             self._ensure_delivery_columns(conn)
-            cursor = conn.execute(
-                """
-                update telegram_deliveries
-                set previous_status = null,
-                    last_action = null,
-                    last_action_id = null,
-                    last_action_at = null
-                where source = ? and external_id = ? and chat_id = ?
-                  and status in (?, ?)
-                  and last_action_id is not null
-                """,
-                (source, external_id, str(chat_id), STATUS_APPLIED, STATUS_SKIPPED),
-            )
+            if expected_action_id:
+                cursor = conn.execute(
+                    """
+                    update telegram_deliveries
+                    set previous_status = null,
+                        last_action = null,
+                        last_action_id = null,
+                        last_action_at = null
+                    where source = ? and external_id = ? and chat_id = ?
+                      and status in (?, ?)
+                      and last_action_id = ?
+                    """,
+                    (
+                        source,
+                        external_id,
+                        str(chat_id),
+                        STATUS_APPLIED,
+                        STATUS_SKIPPED,
+                        expected_action_id,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    update telegram_deliveries
+                    set previous_status = null,
+                        last_action = null,
+                        last_action_id = null,
+                        last_action_at = null
+                    where source = ? and external_id = ? and chat_id = ?
+                      and status in (?, ?)
+                      and last_action_id is not null
+                    """,
+                    (source, external_id, str(chat_id), STATUS_APPLIED, STATUS_SKIPPED),
+                )
             conn.commit()
         return cursor.rowcount > 0
 
