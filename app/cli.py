@@ -777,6 +777,30 @@ def run_pipeline(
     _run_log("Job Applier started.", component="main")
     _run_log("Press Ctrl+C to stop.", component="main")
     _run_log("Poller started.", component="poller")
+
+    def _poll_callbacks_now(*, timeout: int) -> None:
+        nonlocal offset
+        try:
+            offset, prepare_requests = _poll_telegram_actions_once(
+                client=telegram_client,
+                storage=deliveries,
+                configured_chat_id=str(settings.telegram_chat_id),
+                offset=offset,
+                timeout=timeout,
+                resumes_dir=settings.resumes_dir,
+                resume_cache_service=callback_resume_cache,
+                timing_logger=_component_log("poller") if verbose else None,
+                undo_window_seconds=settings.undo_window_seconds,
+            )
+            if prepare_requests > 0:
+                _run_log("Prepare request received", component="poller")
+                prepare_wakeup_event.set()
+        except TelegramRequestError as exc:
+            details = _format_telegram_error(exc, secrets=_runtime_secrets(settings))
+            _run_log(f"Telegram poll failed:\n  {details}", component="poller")
+            if timeout > 0:
+                time.sleep(poll_interval)
+
     try:
         while True:
             now = time.monotonic()
@@ -794,6 +818,7 @@ def run_pipeline(
                         ),
                     )
                     collect_ms = max(0, int((time.monotonic() - collect_start) * 1000))
+                    _poll_callbacks_now(timeout=0)
                     analyze_start = time.monotonic()
                     _analyze_pipeline_items(
                         analyzer=analyzer,
@@ -805,13 +830,16 @@ def run_pipeline(
                         verbose=verbose,
                     )
                     analyze_ms = max(0, int((time.monotonic() - analyze_start) * 1000))
+                    _poll_callbacks_now(timeout=0)
                     telegram_start = time.monotonic()
                     _deliver_pipeline_items(
                         pipeline=pipeline_result,
                         deliveries=deliveries,
                         telegram_client=telegram_client,
                         chat_id=settings.telegram_chat_id,
+                        poll_callbacks=lambda: _poll_callbacks_now(timeout=0),
                     )
+                    _poll_callbacks_now(timeout=0)
                     telegram_ms = max(0, int((time.monotonic() - telegram_start) * 1000))
                     cycle_ms = max(0, int((time.monotonic() - cycle_start) * 1000))
 
@@ -936,26 +964,7 @@ def run_pipeline(
                     _run_log(f"Pipeline cycle failed: {exc}", component="main")
                 next_cycle_monotonic = time.monotonic() + interval
 
-            try:
-                offset, prepare_requests = _poll_telegram_actions_once(
-                    client=telegram_client,
-                    storage=deliveries,
-                    configured_chat_id=str(settings.telegram_chat_id),
-                    offset=offset,
-                    timeout=poll_interval,
-                    resumes_dir=settings.resumes_dir,
-                    resume_cache_service=callback_resume_cache,
-                    timing_logger=_component_log("poller") if verbose else None,
-                    undo_window_seconds=settings.undo_window_seconds,
-                )
-                if prepare_requests > 0:
-                    _run_log("Prepare request received", component="poller")
-                    prepare_wakeup_event.set()
-            except TelegramRequestError as exc:
-                details = _format_telegram_error(exc, secrets=_runtime_secrets(settings))
-                _run_log(f"Telegram poll failed:\n  {details}", component="poller")
-                time.sleep(poll_interval)
-                continue
+            _poll_callbacks_now(timeout=poll_interval)
     except KeyboardInterrupt:
         _run_log("Shutdown requested (KeyboardInterrupt)", component="main")
     finally:
@@ -1583,13 +1592,20 @@ def _analyze_pipeline_items(
         item.telegram_eligible = decision in {"STRONG_MATCH", "POTENTIAL_MATCH"}
 
 
+# How often to drain Telegram callbacks while sending a vacancy batch.
+_TELEGRAM_POLL_EVERY_N_SENT_CARDS = 4
+
+
 def _deliver_pipeline_items(
     *,
     pipeline: PipelineResult,
     deliveries: TelegramDeliveryStorage,
     telegram_client: TelegramClient,
     chat_id: str,
+    poll_callbacks: Callable[[], None] | None = None,
+    poll_every_n_sent: int = _TELEGRAM_POLL_EVERY_N_SENT_CARDS,
 ) -> None:
+    sent_since_poll = 0
     for item in pipeline.items:
         if item.vacancy is None:
             continue
@@ -1697,6 +1713,12 @@ def _deliver_pipeline_items(
             timestamp_field="sent_at",
         )
         item.telegram_delivered = True
+        if poll_callbacks is None or poll_every_n_sent <= 0:
+            continue
+        sent_since_poll += 1
+        if sent_since_poll >= poll_every_n_sent:
+            poll_callbacks()
+            sent_since_poll = 0
 
 
 def _pipeline_verbose_outcomes(pipeline: PipelineResult) -> list[str]:
@@ -2628,6 +2650,8 @@ def _handle_terminal_action(
         return
 
     previous_status = current_status if current_status is not None else STATUS_SENT
+    # Ack Telegram early so the client spinner clears before DB/network work.
+    answer_once(success_text)
     apply_fn = getattr(storage, "apply_terminal_action", None)
     if callable(apply_fn):
         try:
@@ -2640,7 +2664,6 @@ def _handle_terminal_action(
                 action=action,
             )
         except KeyError:
-            answer_once("Вакансия не найдена")
             logger.info("Action rejected vacancy=%s:%s reason=unknown_vacancy", source, external_id)
             return
     else:
@@ -2669,7 +2692,6 @@ def _handle_terminal_action(
             external_id,
             window_seconds,
         )
-    answer_once(success_text)
     _cleanup_aux_messages(
         storage=storage,
         client=client,

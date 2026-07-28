@@ -90,11 +90,13 @@ def _bootstrap_common(monkeypatch, *, decision: Decision = Decision.POTENTIAL_MA
 
 
 def _run_single_cycle(monkeypatch) -> None:
-    monkeypatch.setattr(
-        cli_module,
-        "_poll_telegram_actions_once",
-        lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
-    )
+    def _poll_once(**kwargs):
+        # Interleaved polls during the cycle use timeout=0; stop on the idle poll.
+        if int(kwargs.get("timeout", 0) or 0) == 0:
+            return kwargs.get("offset"), 0
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(cli_module, "_poll_telegram_actions_once", _poll_once)
 
 
 def test_run_all_seen_cycle_logs_and_reason(monkeypatch, tmp_path: Path) -> None:
@@ -816,7 +818,8 @@ def test_run_repeated_cycles_produce_stable_logs(monkeypatch, tmp_path: Path) ->
     calls = {"count": 0}
 
     def fake_poll(**kwargs):
-        _ = kwargs
+        if int(kwargs.get("timeout", 0) or 0) == 0:
+            return kwargs.get("offset"), 0
         calls["count"] += 1
         if calls["count"] >= 4:
             raise KeyboardInterrupt()
@@ -915,7 +918,8 @@ def test_run_polling_failure_does_not_change_vacancy_counters(monkeypatch, tmp_p
     calls = {"count": 0}
 
     def fake_poll(**kwargs):
-        _ = kwargs
+        if int(kwargs.get("timeout", 0) or 0) == 0:
+            return kwargs.get("offset"), 0
         calls["count"] += 1
         if calls["count"] == 1:
             raise cli_module.TelegramRequestError("temporary request failed")
