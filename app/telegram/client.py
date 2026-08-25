@@ -172,6 +172,7 @@ class TelegramClient:
         *,
         file_path: str,
         caption: str,
+        content_type: str = "application/pdf",
         chat_id: str | None = None,
         reply_to_message_id: int | None = None,
     ) -> TelegramDocumentRef:
@@ -186,7 +187,7 @@ class TelegramClient:
                     response = client.post(
                         url,
                         data=data,
-                        files={"document": (Path(file_path).name, handle, "application/pdf")},
+                        files={"document": (Path(file_path).name, handle, content_type)},
                     )
         except OSError as exc:
             raise TelegramRequestError(
@@ -334,7 +335,7 @@ def build_prepared_application_buttons(source: str, external_id: str, url: str) 
     applied_data = _callback_data("applied", compact_source, external_id)
     skip_data = _callback_data("skip", compact_source, external_id)
     return [
-        [TelegramInlineButton(text="📋 Copy Cover Letter", callback_data=copy_data)],
+        [TelegramInlineButton(text="📋 Cover Letter", callback_data=copy_data)],
         [TelegramInlineButton(text="📎 Resume PDF", callback_data=resume_data)],
         [TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)],
         [TelegramInlineButton(text="✅ Applied", callback_data=applied_data)],

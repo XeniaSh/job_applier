@@ -399,3 +399,46 @@ def test_recover_abandoned_preparing_respects_timeout_when_worker_alive(tmp_path
     assert recovered == [("linkedin-email", "911")]
     assert storage.get_delivery("linkedin-email", "911").status == STATUS_PREPARE_REQUESTED  # type: ignore[union-attr]
     assert storage.get_delivery("linkedin-email", "912").status == STATUS_PREPARING  # type: ignore[union-attr]
+
+
+def test_preparation_table_migrates_artifact_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy_preparation.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            create table application_preparations (
+                source text not null,
+                external_id text not null,
+                prepared_at text,
+                resume_name text,
+                language text,
+                status text not null,
+                error_message text,
+                cover_letter text,
+                vacancy_title text,
+                vacancy_company text,
+                vacancy_url text,
+                resume_message_id integer,
+                cover_letter_message_id integer,
+                primary key (source, external_id)
+            )
+            """
+        )
+        conn.commit()
+
+    storage = TelegramDeliveryStorage(db_path=db_path)
+    storage.save_preparation(
+        source="linkedin-email",
+        external_id="legacy-artifact",
+        status=STATUS_PREPARED,
+        resume_name="java",
+        language="en",
+        error_message=None,
+        cover_letter="Letter",
+        cover_letter_pdf_path="data/prepared/linkedin-email/legacy-artifact/cover_letter.pdf",
+        cover_letter_pdf_message_id=9002,
+    )
+    prep = storage.get_preparation("linkedin-email", "legacy-artifact")
+    assert prep is not None
+    assert prep.cover_letter_pdf_path
+    assert prep.cover_letter_pdf_message_id == 9002

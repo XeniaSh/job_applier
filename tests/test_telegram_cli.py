@@ -1308,13 +1308,13 @@ def test_resume_button_sends_pdf_on_demand_and_missing_notifies(monkeypatch) -> 
             return type("P", (), {"status": "PREPARED", "cover_letter": "x", "resume_name": "java-backend", "resume_message_id": None})()
 
     class CacheOk:
-        def get_or_upload(self, *, resume_name, chat_id, force_upload=False):
-            _ = resume_name, chat_id, force_upload
+        def get_or_upload(self, *, resume_name, chat_id, force_upload=False, upload_if_missing=True):
+            _ = resume_name, chat_id, force_upload, upload_if_missing
             return type("R", (), {"missing": False, "telegram_file_id": "FILE123"})()
 
     class CacheMissing:
-        def get_or_upload(self, *, resume_name, chat_id, force_upload=False):
-            _ = resume_name, chat_id, force_upload
+        def get_or_upload(self, *, resume_name, chat_id, force_upload=False, upload_if_missing=True):
+            _ = resume_name, chat_id, force_upload, upload_if_missing
             return type("R", (), {"missing": True, "telegram_file_id": None, "resume_path": None})()
 
     update = {
@@ -1342,6 +1342,79 @@ def test_resume_button_sends_pdf_on_demand_and_missing_notifies(monkeypatch) -> 
         resume_cache_service=CacheMissing(),
     )
     assert any(text == "Resume PDF not found." for _, text in sent["answers"])
+
+
+def test_resume_button_with_real_cache_service_sends_single_reply_pdf(tmp_path) -> None:
+    resumes_dir = tmp_path / "resumes"
+    resumes_dir.mkdir(parents=True, exist_ok=True)
+    pdf = resumes_dir / "java-backend.pdf"
+    pdf.write_bytes(b"%PDF")
+    db_path = tmp_path / "jobs.db"
+    storage = TelegramDeliveryStorage(db_path=db_path)
+    storage.save_sent(source="linkedin-email", external_id="1", chat_id="123", message_id=12)
+    storage.save_preparation(
+        source="linkedin-email",
+        external_id="1",
+        status=STATUS_PREPARED,
+        resume_name="java",
+        language="en",
+        error_message=None,
+        cover_letter="x",
+    )
+
+    sent = {"upload_calls": 0, "by_id_calls": 0, "answers": []}
+
+    class FakeClient:
+        def answer_callback_query(self, callback_query_id, text=None):
+            sent["answers"].append((callback_query_id, text))
+
+        def send_document_by_file_id(self, **kwargs):
+            sent["by_id_calls"] += 1
+            raise AssertionError("No cached file id on first send")
+
+        def send_document(self, **kwargs):
+            sent["upload_calls"] += 1
+            assert kwargs["reply_to_message_id"] == 12
+            return type(
+                "R",
+                (),
+                {"message_id": 222, "file_id": "FILE123", "file_unique_id": "U1", "chat_id": "123"},
+            )()
+
+        def edit_message_text(self, **kwargs):
+            _ = kwargs
+
+        def delete_message(self, **kwargs):
+            _ = kwargs
+
+    client = FakeClient()
+    cache_service = cli_module.ResumeCacheService(
+        resumes_dir=resumes_dir,
+        storage=storage,
+        telegram_client=client,  # type: ignore[arg-type]
+        resume_paths={"java": pdf},
+    )
+
+    update = {
+        "callback_query": {
+            "id": "cb-real-cache",
+            "data": "resume:li:1",
+            "message": {"chat": {"id": "123"}, "message_id": 12},
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=client,
+        storage=storage,
+        configured_chat_id="123",
+        resumes_dir=resumes_dir,
+        resume_cache_service=cache_service,
+    )
+    assert sent["upload_calls"] == 1
+    assert sent["by_id_calls"] == 0
+    prep = storage.get_preparation("linkedin-email", "1")
+    assert prep is not None
+    assert prep.resume_message_id == 222
 
 
 def test_resume_button_does_not_duplicate_when_already_sent(monkeypatch) -> None:
@@ -1467,8 +1540,8 @@ def test_resume_invalid_cached_file_id_falls_back_to_upload_once(monkeypatch, tm
             assert kwargs["resume_message_id"] == 333
 
     class Cache:
-        def get_or_upload(self, *, resume_name, chat_id, force_upload=False):
-            _ = resume_name, chat_id, force_upload
+        def get_or_upload(self, *, resume_name, chat_id, force_upload=False, upload_if_missing=True):
+            _ = resume_name, chat_id, force_upload, upload_if_missing
             return type("R", (), {"missing": False, "telegram_file_id": "OLD_FILE_ID", "resume_path": str(pdf)})()
 
     update = {
@@ -1500,6 +1573,9 @@ def test_copy_cover_letter_does_not_duplicate_when_already_sent() -> None:
         def send_text_message(self, *args, **kwargs):
             raise AssertionError("should not send duplicate cover letter")
 
+        def send_document(self, **kwargs):
+            raise AssertionError("should not send document without PDF path")
+
     class Storage:
         def get_preparation(self, source, external_id):
             _ = source, external_id
@@ -1511,6 +1587,8 @@ def test_copy_cover_letter_does_not_duplicate_when_already_sent() -> None:
                     "cover_letter": "ONLY LETTER",
                     "resume_name": "java-backend",
                     "cover_letter_message_id": 555,
+                    "cover_letter_pdf_path": None,
+                    "cover_letter_pdf_message_id": None,
                 },
             )()
 
@@ -1527,7 +1605,7 @@ def test_copy_cover_letter_does_not_duplicate_when_already_sent() -> None:
         storage=Storage(),
         configured_chat_id="123",
     )
-    assert any("Cover letter already sent below this vacancy." == text for _, text in answers)
+    assert any("Cover letter sent" == text for _, text in answers)
 
 
 def test_applied_cleanup_failures_do_not_block_transition(monkeypatch) -> None:
@@ -1922,3 +2000,108 @@ def test_applied_status_persists_across_storage_restart(tmp_path) -> None:
     assert applied_rows
     assert applied_rows[0].current_status == "APPLIED"
     assert applied_rows[0].applied_at is not None
+
+
+def test_cover_letter_button_sends_text_and_pdf_when_available(tmp_path) -> None:
+    pdf = tmp_path / "cover_letter.pdf"
+    pdf.write_bytes(b"%PDF-1.7")
+    calls = {"doc": [], "aux": [], "texts": []}
+
+    class Storage:
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type(
+                "P",
+                (),
+                {
+                    "status": "PREPARED",
+                    "cover_letter": "Letter",
+                    "cover_letter_message_id": None,
+                    "cover_letter_pdf_path": str(pdf),
+                    "cover_letter_pdf_message_id": None,
+                },
+            )()
+
+        def set_preparation_aux_message_id(self, **kwargs):
+            calls["aux"].append(kwargs)
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            _ = callback_query_id, text
+
+        def send_text_message(self, text, **kwargs):
+            calls["texts"].append((text, kwargs))
+            return type("T", (), {"message_id": 901, "chat_id": "123"})()
+
+        def send_document(self, **kwargs):
+            calls["doc"].append(kwargs)
+            return type("D", (), {"message_id": 900, "file_id": "F", "file_unique_id": "U", "chat_id": "123"})()
+
+    cli_module._process_callback_update(
+        update={
+            "callback_query": {
+                "id": "cb-copy",
+                "data": "copy:li:1",
+                "message": {"chat": {"id": "123"}, "message_id": 12},
+            }
+        },
+        client=Client(),
+        storage=Storage(),
+        configured_chat_id="123",
+    )
+
+    assert len(calls["texts"]) == 1
+    assert calls["texts"][0][0] == "Letter"
+    assert len(calls["doc"]) == 1
+    assert calls["doc"][0]["content_type"] == "application/pdf"
+    assert any("cover_letter_message_id" in item for item in calls["aux"])
+    assert any("cover_letter_pdf_message_id" in item for item in calls["aux"])
+
+
+def test_cover_letter_without_pdf_falls_back_to_text_only() -> None:
+    answers = []
+    sent_texts = []
+
+    class Storage:
+        def get_preparation(self, source, external_id):
+            _ = source, external_id
+            return type(
+                "P",
+                (),
+                {
+                    "status": "PREPARED",
+                    "cover_letter": "Letter only",
+                    "cover_letter_message_id": None,
+                    "cover_letter_pdf_path": None,
+                    "cover_letter_pdf_message_id": None,
+                },
+            )()
+
+        def set_preparation_aux_message_id(self, **kwargs):
+            _ = kwargs
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            answers.append((callback_query_id, text))
+
+        def send_text_message(self, text, **kwargs):
+            sent_texts.append((text, kwargs))
+            return type("T", (), {"message_id": 901, "chat_id": "123"})()
+
+        def send_document(self, **kwargs):
+            raise AssertionError("should not send missing file")
+
+    cli_module._process_callback_update(
+        update={
+            "callback_query": {
+                "id": "cb-cover-missing",
+                "data": "copy:li:1",
+                "message": {"chat": {"id": "123"}, "message_id": 12},
+            }
+        },
+        client=Client(),
+        storage=Storage(),
+        configured_chat_id="123",
+    )
+    assert sent_texts and sent_texts[0][0] == "Letter only"
+    assert any(text == "Cover letter sent" for _, text in answers)

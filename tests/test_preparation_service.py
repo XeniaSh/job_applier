@@ -523,3 +523,100 @@ def test_prepare_uses_selected_profile_pdf_for_package(tmp_path: Path, monkeypat
     assert prepared.recommended_resume == "java_ai"
     assert prepared.resume_path == str(ai_resume.resolve())
     assert prepared.timing_breakdown["llm_calls"] == 2
+
+
+def test_prepare_writes_cover_letter_artifacts_once(tmp_path: Path, monkeypatch) -> None:
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    llm = _FakeLLM(language="en", text="I can help with Java backend delivery.")
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        artifacts_dir=tmp_path / "prepared",
+        candidate_name="Jane Doe",
+        prepare_cache=_FakePrepareCache(
+            {
+                "evaluation_json": _evaluation().model_dump_json(),
+                "analysis_text": "Java backend role",
+                "title": "Java Engineer",
+                "company": "ACME",
+                "location": "Remote",
+                "url": "https://example.com/job",
+                "content_completeness": "FULL",
+            }
+        ),
+    )
+
+    prepared = service.prepare("linkedin-email", "artifact-1")
+
+    assert llm.cover_calls == 1
+    assert prepared.cover_letter_txt_path is not None
+    assert prepared.cover_letter_pdf_path is not None
+    assert Path(prepared.cover_letter_txt_path).is_file()
+    assert Path(prepared.cover_letter_pdf_path).is_file()
+
+
+def test_prepare_pdf_failure_is_non_fatal(tmp_path: Path, monkeypatch) -> None:
+    from app.application import preparation_service as module
+    from app.cover_letter_documents import CoverLetterArtifacts
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+
+    txt_file = tmp_path / "prepared" / "linkedin-email" / "x" / "cover_letter.txt"
+    txt_file.parent.mkdir(parents=True, exist_ok=True)
+    txt_file.write_text("Letter", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "generate_cover_letter_artifacts",
+        lambda **kwargs: CoverLetterArtifacts(
+            txt_path=txt_file,
+            pdf_path=None,
+            pdf_error="PDF generation failed: boom",
+        ),
+    )
+
+    llm = _FakeLLM(language="en", text="I can help with Java backend delivery.")
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        artifacts_dir=tmp_path / "prepared",
+        candidate_name="Jane Doe",
+        prepare_cache=_FakePrepareCache(
+            {
+                "evaluation_json": _evaluation().model_dump_json(),
+                "analysis_text": "Java backend role",
+                "title": "Java Engineer",
+                "company": "ACME",
+                "location": "Remote",
+                "url": "https://example.com/job",
+                "content_completeness": "FULL",
+            }
+        ),
+    )
+
+    prepared = service.prepare("linkedin-email", "artifact-2")
+
+    assert llm.cover_calls == 1
+    assert prepared.cover_letter_txt_path == str(txt_file)
+    assert prepared.cover_letter_pdf_path is None

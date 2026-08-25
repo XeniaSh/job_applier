@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     resumes_dir: Path = Path("resumes")
     resume_profiles_path: Path = Path(__file__).resolve().parent.parent / "resume_profiles.yaml"
+    prepared_artifacts_dir: Path = Path("data/prepared")
+    candidate_name: str = ""
+    cover_letter_pdf_font_path: Path | None = None
     candidate_preferred_language: str = "en"
     candidate_grammatical_gender: str = "neutral"
     pipeline_interval_seconds: int = 300

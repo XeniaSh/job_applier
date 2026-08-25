@@ -4,6 +4,7 @@ app/__init__.py
 app/__main__.py
 app/cli.py
 app/config.py
+app/cover_letter_documents.py
 app/cover_letter_profiles.py
 app/formatter.py
 app/llm_client.py
@@ -28,6 +29,7 @@ tests/test_collect_greenhouse_cli.py
 tests/test_collect_hh_cli.py
 tests/test_collect_linkedin_email_cli.py
 tests/test_config_greenhouse.py
+tests/test_cover_letter_documents.py
 tests/test_cover_letter_profiles.py
 tests/test_email_imap_client.py
 tests/test_formatter.py

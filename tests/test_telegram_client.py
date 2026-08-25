@@ -123,6 +123,7 @@ def test_url_validation_and_callback_limit() -> None:
         "https://www.linkedin.com/jobs/view/4439013108/",
     )
     assert prepared_buttons[0][0].callback_data == "copy:li:4439013108"
+    assert prepared_buttons[0][0].text == "📋 Cover Letter"
     assert prepared_buttons[1][0].callback_data == "resume:li:4439013108"
     assert prepared_buttons[2][0].url == "https://www.linkedin.com/jobs/view/4439013108/"
     assert prepared_buttons[2][0].text == "🔗 Open vacancy"
@@ -162,6 +163,7 @@ def test_send_prepared_application_payload_contains_buttons(monkeypatch) -> None
     payload = request_kwargs["json"]
     keyboard = payload["reply_markup"]["inline_keyboard"]
     assert keyboard[0][0]["callback_data"] == "copy:li:4439013108"
+    assert keyboard[0][0]["text"] == "📋 Cover Letter"
     assert keyboard[1][0]["callback_data"] == "resume:li:4439013108"
     assert keyboard[2][0]["url"] == "https://www.linkedin.com/jobs/view/4439013108/"
     assert keyboard[3][0]["callback_data"] == "applied:li:4439013108"

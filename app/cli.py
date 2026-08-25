@@ -672,6 +672,9 @@ def prepare_telegram_applications(
         llm_client=llm_client,
         email_client=email_client,
         resumes_dir=settings.resumes_dir,
+        artifacts_dir=settings.prepared_artifacts_dir,
+        candidate_name=settings.candidate_name,
+        cover_letter_pdf_font_path=settings.cover_letter_pdf_font_path,
         preferred_language=settings.candidate_preferred_language,
         grammatical_gender=settings.candidate_grammatical_gender,
         prepare_cache=storage,
@@ -774,6 +777,9 @@ def run_pipeline(
         llm_client=llm_client,
         email_client=email_client,
         resumes_dir=settings.resumes_dir,
+        artifacts_dir=settings.prepared_artifacts_dir,
+        candidate_name=settings.candidate_name,
+        cover_letter_pdf_font_path=settings.cover_letter_pdf_font_path,
         preferred_language=settings.candidate_preferred_language,
         grammatical_gender=settings.candidate_grammatical_gender,
         prepare_cache=deliveries,
@@ -2530,9 +2536,7 @@ def _process_callback_update(
                 answer_once("Отклик еще не готов")
             else:
                 existing_cover_id = getattr(prep, "cover_letter_message_id", None)
-                if isinstance(existing_cover_id, int) and existing_cover_id > 0:
-                    answer_once("Cover letter already sent below this vacancy.")
-                else:
+                if not (isinstance(existing_cover_id, int) and existing_cover_id > 0):
                     sent_ref = client.send_text_message(
                         prep.cover_letter,
                         chat_id=configured_chat_id,
@@ -2545,7 +2549,26 @@ def _process_callback_update(
                             external_id=external_id,
                             cover_letter_message_id=sent_ref.message_id,
                         )
-                    answer_once("Cover letter sent")
+                pdf_path_raw = getattr(prep, "cover_letter_pdf_path", None)
+                existing_pdf_id = getattr(prep, "cover_letter_pdf_message_id", None)
+                if pdf_path_raw and not (isinstance(existing_pdf_id, int) and existing_pdf_id > 0):
+                    file_path = Path(pdf_path_raw)
+                    if file_path.is_file():
+                        sent_doc = client.send_document(
+                            file_path=str(file_path),
+                            caption=_build_cover_letter_caption(kind="PDF", title=title, company=company),
+                            content_type="application/pdf",
+                            chat_id=configured_chat_id,
+                            reply_to_message_id=message_id if message_id > 0 else None,
+                        )
+                        set_aux = getattr(storage, "set_preparation_aux_message_id", None)
+                        if callable(set_aux):
+                            set_aux(
+                                source=source,
+                                external_id=external_id,
+                                cover_letter_pdf_message_id=sent_doc.message_id,
+                            )
+                answer_once("Cover letter sent")
         else:  # action == "resume"
             get_preparation = getattr(storage, "get_preparation", None)
             prep = get_preparation(source, external_id) if callable(get_preparation) else None
@@ -2570,6 +2593,7 @@ def _process_callback_update(
                         resume_result = cache.get_or_upload(
                             resume_name=prep.resume_name,
                             chat_id=configured_chat_id,
+                            upload_if_missing=False,
                         )
                         if resume_result.missing:
                             answer_once("Resume PDF not found.")
@@ -3067,6 +3091,11 @@ def _build_resume_caption(*, resume_name: str, title: str, company: str | None) 
     return f"Resume · {resume_name.replace('-', ' ').title()}\n{title} · {company_part}"
 
 
+def _build_cover_letter_caption(*, kind: str, title: str, company: str | None) -> str:
+    company_part = company or "n/a"
+    return f"Cover Letter {kind}\n{title} · {company_part}"
+
+
 def _cleanup_aux_messages(
     *,
     storage: TelegramDeliveryStorage,
@@ -3081,7 +3110,8 @@ def _cleanup_aux_messages(
         return
     resume_message_id = getattr(prep, "resume_message_id", None)
     cover_message_id = getattr(prep, "cover_letter_message_id", None)
-    for message_id in [resume_message_id, cover_message_id]:
+    cover_pdf_message_id = getattr(prep, "cover_letter_pdf_message_id", None)
+    for message_id in [resume_message_id, cover_message_id, cover_pdf_message_id]:
         if not isinstance(message_id, int) or message_id <= 0:
             continue
         try:
@@ -4487,6 +4517,7 @@ def _prepare_one_application(
                     resume_name=None,
                     language=None,
                     cover_letter=None,
+                    cover_letter_pdf_path=None,
                     vacancy_title=None,
                     vacancy_company=None,
                     vacancy_url=None,
@@ -4550,6 +4581,7 @@ def _prepare_one_application(
                 resume_name=prepared.recommended_resume,
                 language=prepared.language,
                 cover_letter=prepared.cover_letter,
+                cover_letter_pdf_path=prepared.cover_letter_pdf_path,
                 vacancy_title=prepared.title,
                 vacancy_company=prepared.company,
                 vacancy_url=prepared.url,
@@ -4597,6 +4629,7 @@ def _prepare_one_application(
                 resume_name=prepared.recommended_resume,
                 language=prepared.language,
                 cover_letter=prepared.cover_letter,
+                cover_letter_pdf_path=prepared.cover_letter_pdf_path,
                 vacancy_title=prepared.title,
                 vacancy_company=prepared.company,
                 vacancy_url=prepared.url,
@@ -4620,6 +4653,7 @@ def _prepare_one_application(
             language=prepared.language,
             error_message=None,
             cover_letter=prepared.cover_letter,
+            cover_letter_pdf_path=prepared.cover_letter_pdf_path,
             vacancy_title=prepared.title,
             vacancy_company=prepared.company,
             vacancy_url=prepared.url,
@@ -4666,6 +4700,7 @@ def _mark_preparation_failed(
     resume_name: str | None,
     language: str | None,
     cover_letter: str | None,
+    cover_letter_pdf_path: str | None,
     vacancy_title: str | None,
     vacancy_company: str | None,
     vacancy_url: str | None,
@@ -4687,6 +4722,7 @@ def _mark_preparation_failed(
         language=language,
         error_message=error_message,
         cover_letter=cover_letter,
+        cover_letter_pdf_path=cover_letter_pdf_path,
         vacancy_title=vacancy_title,
         vacancy_company=vacancy_company,
         vacancy_url=vacancy_url,
@@ -4754,6 +4790,7 @@ def _ensure_preparation_left_preparing(
         resume_name=None,
         language=None,
         cover_letter=None,
+        cover_letter_pdf_path=None,
         vacancy_title=None,
         vacancy_company=None,
         vacancy_url=None,

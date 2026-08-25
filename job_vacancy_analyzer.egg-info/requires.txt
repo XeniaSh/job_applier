@@ -4,3 +4,4 @@ pydantic-settings>=2.10.0
 typer>=0.16.0
 python-dotenv>=1.1.0
 pyyaml
+fpdf2>=2.8.8

@@ -208,9 +208,12 @@ class TelegramDeliveryStorage:
                 conn.execute(
                     """
                     insert into application_preparations (
-                        source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url, resume_message_id, cover_letter_message_id
+                        source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter,
+                        cover_letter_pdf_path,
+                        vacancy_title, vacancy_company, vacancy_url,
+                        resume_message_id, cover_letter_message_id, cover_letter_pdf_message_id
                     )
-                    values (?, ?, ?, null, null, ?, null, null, null, null, null, null, null)
+                    values (?, ?, ?, null, null, ?, null, null, null, null, null, null, null, null, null)
                     on conflict(source, external_id) do update set
                         prepared_at = excluded.prepared_at,
                         status = excluded.status,
@@ -1012,20 +1015,25 @@ class TelegramDeliveryStorage:
         language: str | None,
         error_message: str | None,
         cover_letter: str | None = None,
+        cover_letter_pdf_path: str | None = None,
         vacancy_title: str | None = None,
         vacancy_company: str | None = None,
         vacancy_url: str | None = None,
         resume_message_id: int | None = None,
         cover_letter_message_id: int | None = None,
+        cover_letter_pdf_message_id: int | None = None,
     ) -> None:
         prepared_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
                 insert into application_preparations (
-                    source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url, resume_message_id, cover_letter_message_id
+                    source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter,
+                    cover_letter_pdf_path,
+                    vacancy_title, vacancy_company, vacancy_url,
+                    resume_message_id, cover_letter_message_id, cover_letter_pdf_message_id
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(source, external_id) do update set
                     prepared_at = excluded.prepared_at,
                     resume_name = excluded.resume_name,
@@ -1033,11 +1041,13 @@ class TelegramDeliveryStorage:
                     status = excluded.status,
                     error_message = excluded.error_message,
                     cover_letter = excluded.cover_letter,
+                    cover_letter_pdf_path = excluded.cover_letter_pdf_path,
                     vacancy_title = excluded.vacancy_title,
                     vacancy_company = excluded.vacancy_company,
                     vacancy_url = excluded.vacancy_url,
                     resume_message_id = coalesce(excluded.resume_message_id, application_preparations.resume_message_id),
-                    cover_letter_message_id = coalesce(excluded.cover_letter_message_id, application_preparations.cover_letter_message_id)
+                    cover_letter_message_id = coalesce(excluded.cover_letter_message_id, application_preparations.cover_letter_message_id),
+                    cover_letter_pdf_message_id = coalesce(excluded.cover_letter_pdf_message_id, application_preparations.cover_letter_pdf_message_id)
                 """,
                 (
                     source,
@@ -1048,11 +1058,13 @@ class TelegramDeliveryStorage:
                     status,
                     error_message,
                     cover_letter,
+                    cover_letter_pdf_path,
                     vacancy_title,
                     vacancy_company,
                     vacancy_url,
                     int(resume_message_id) if resume_message_id is not None else None,
                     int(cover_letter_message_id) if cover_letter_message_id is not None else None,
+                    int(cover_letter_pdf_message_id) if cover_letter_pdf_message_id is not None else None,
                 ),
             )
             conn.commit()
@@ -1061,7 +1073,10 @@ class TelegramDeliveryStorage:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                select source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter, vacancy_title, vacancy_company, vacancy_url, resume_message_id, cover_letter_message_id
+                select source, external_id, prepared_at, resume_name, language, status, error_message, cover_letter,
+                       cover_letter_pdf_path,
+                       vacancy_title, vacancy_company, vacancy_url,
+                       resume_message_id, cover_letter_message_id, cover_letter_pdf_message_id
                 from application_preparations
                 where source = ? and external_id = ?
                 """,
@@ -1078,11 +1093,13 @@ class TelegramDeliveryStorage:
             status=str(row[5]),
             error_message=str(row[6]) if row[6] is not None else None,
             cover_letter=str(row[7]) if row[7] is not None else None,
-            vacancy_title=str(row[8]) if row[8] is not None else None,
-            vacancy_company=str(row[9]) if row[9] is not None else None,
-            vacancy_url=str(row[10]) if row[10] is not None else None,
-            resume_message_id=int(row[11]) if row[11] is not None else None,
-            cover_letter_message_id=int(row[12]) if row[12] is not None else None,
+            cover_letter_pdf_path=str(row[8]) if row[8] is not None else None,
+            vacancy_title=str(row[9]) if row[9] is not None else None,
+            vacancy_company=str(row[10]) if row[10] is not None else None,
+            vacancy_url=str(row[11]) if row[11] is not None else None,
+            resume_message_id=int(row[12]) if row[12] is not None else None,
+            cover_letter_message_id=int(row[13]) if row[13] is not None else None,
+            cover_letter_pdf_message_id=int(row[14]) if row[14] is not None else None,
         )
 
     def set_preparation_aux_message_id(
@@ -1092,6 +1109,7 @@ class TelegramDeliveryStorage:
         external_id: str,
         resume_message_id: int | None = None,
         cover_letter_message_id: int | None = None,
+        cover_letter_pdf_message_id: int | None = None,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -1099,12 +1117,14 @@ class TelegramDeliveryStorage:
                 update application_preparations
                 set
                     resume_message_id = coalesce(?, resume_message_id),
-                    cover_letter_message_id = coalesce(?, cover_letter_message_id)
+                    cover_letter_message_id = coalesce(?, cover_letter_message_id),
+                    cover_letter_pdf_message_id = coalesce(?, cover_letter_pdf_message_id)
                 where source = ? and external_id = ?
                 """,
                 (
                     int(resume_message_id) if resume_message_id is not None else None,
                     int(cover_letter_message_id) if cover_letter_message_id is not None else None,
+                    int(cover_letter_pdf_message_id) if cover_letter_pdf_message_id is not None else None,
                     source,
                     external_id,
                 ),
@@ -1116,7 +1136,9 @@ class TelegramDeliveryStorage:
             conn.execute(
                 """
                 update application_preparations
-                set resume_message_id = null, cover_letter_message_id = null
+                set resume_message_id = null,
+                    cover_letter_message_id = null,
+                    cover_letter_pdf_message_id = null
                 where source = ? and external_id = ?
                 """,
                 (source, external_id),
@@ -1238,11 +1260,13 @@ class TelegramDeliveryStorage:
                     status text not null,
                     error_message text,
                     cover_letter text,
+                    cover_letter_pdf_path text,
                     vacancy_title text,
                     vacancy_company text,
                     vacancy_url text,
                     resume_message_id integer,
                     cover_letter_message_id integer,
+                    cover_letter_pdf_message_id integer,
                     primary key (source, external_id)
                 )
                 """
@@ -1334,11 +1358,13 @@ class TelegramDeliveryStorage:
         existing = {str(row[1]) for row in rows}
         extra_columns = {
             "cover_letter": "text",
+            "cover_letter_pdf_path": "text",
             "vacancy_title": "text",
             "vacancy_company": "text",
             "vacancy_url": "text",
             "resume_message_id": "integer",
             "cover_letter_message_id": "integer",
+            "cover_letter_pdf_message_id": "integer",
         }
         for name, type_name in extra_columns.items():
             if name in existing:

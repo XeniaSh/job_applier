@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from app.collectors.email_imap_client import EmailIMAPClient
 from app.collectors.linkedin_email_parser import parse_linkedin_email
 from app.collectors.linkedin_models import LinkedInEmailVacancy
+from app.cover_letter_documents import CoverLetterArtifacts, generate_cover_letter_artifacts
 from app.cover_letter_profiles import apply_cover_letter_profile, resolve_cover_letter_profile
 from app.llm_client import LLMClient
 from app.models import CoverLetterResult, VacancyEvaluation
@@ -47,6 +48,8 @@ class PreparedApplication:
     resume_path: str | None
     cover_letter: str
     language: str
+    cover_letter_txt_path: str | None = None
+    cover_letter_pdf_path: str | None = None
     warnings: list[str] = field(default_factory=list)
     timing_breakdown: dict[str, Any] = field(default_factory=dict)
 
@@ -90,6 +93,9 @@ class PreparationService:
         llm_client: LLMClient,
         email_client: EmailIMAPClient,
         resumes_dir: Path,
+        artifacts_dir: Path = Path("data/prepared"),
+        candidate_name: str = "",
+        cover_letter_pdf_font_path: Path | None = None,
         preferred_language: str = "en",
         grammatical_gender: str = "neutral",
         prepare_cache: PrepareCacheStore | None = None,
@@ -100,6 +106,9 @@ class PreparationService:
         self._llm_client = llm_client
         self._email_client = email_client
         self._resumes_dir = resumes_dir
+        self._artifacts_dir = artifacts_dir
+        self._candidate_name = candidate_name
+        self._cover_letter_pdf_font_path = cover_letter_pdf_font_path
         self._preferred_language = preferred_language
         self._grammatical_gender = grammatical_gender
         self._prepare_cache = prepare_cache
@@ -242,6 +251,12 @@ class PreparationService:
 
         logger.info("START serialization")
         serialization_started = perf_counter()
+        artifact_result = self._generate_cover_letter_artifacts(
+            source=source,
+            external_id=external_id,
+            language=cover_result.language,
+            cover_letter=cover_result.cover_letter,
+        )
         if not analysis_cached or used_imap_fallback:
             self._store_prepare_cache(
                 source=source,
@@ -258,6 +273,8 @@ class PreparationService:
             warnings.append("Описание вакансии неполное — требуется открыть LinkedIn")
         if resume_warning:
             warnings.append(resume_warning)
+        if artifact_result.pdf_error:
+            logger.warning("%s", artifact_result.pdf_error)
         warnings.extend(_collect_warning_nuances(analysis.nuances))
 
         llm_events = list(getattr(self._llm_client, "last_timing_events", []))[llm_events_before:]
@@ -313,6 +330,8 @@ class PreparationService:
             resume_path=str(resume_path) if resume_path is not None else None,
             cover_letter=cover_result.cover_letter,
             language=cover_result.language,
+            cover_letter_txt_path=str(artifact_result.txt_path) if artifact_result.txt_path is not None else None,
+            cover_letter_pdf_path=str(artifact_result.pdf_path) if artifact_result.pdf_path is not None else None,
             warnings=_dedupe_preserve(warnings),
             timing_breakdown=timing_breakdown,
         )
@@ -408,6 +427,37 @@ class PreparationService:
         )
         result.cover_letter = apply_cover_letter_profile(result.cover_letter, letter_profile)
         return result
+
+    def _generate_cover_letter_artifacts(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        language: str,
+        cover_letter: str,
+    ) -> CoverLetterArtifacts:
+        try:
+            return generate_cover_letter_artifacts(
+                base_dir=self._artifacts_dir,
+                source=source,
+                external_id=external_id,
+                candidate_name=self._candidate_name,
+                language=language,
+                cover_letter_text=cover_letter,
+                font_path=self._cover_letter_pdf_font_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to generate cover letter artifacts for %s:%s: %s",
+                source,
+                external_id,
+                exc,
+            )
+            return CoverLetterArtifacts(
+                txt_path=None,
+                pdf_path=None,
+                pdf_error=f"cover letter artifacts failed: {exc}",
+            )
 
 
 @dataclass(frozen=True)

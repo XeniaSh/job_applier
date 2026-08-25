@@ -161,7 +161,7 @@ def test_prepared_skipped_undo_restores_prepared(tmp_path: Path) -> None:
     assert restored is not None
     assert restored.status == STATUS_PREPARED
     assert ("cb-undo", "Action undone") in client.answers
-    assert any(btn.text == "📋 Copy Cover Letter" for row in client.edits[-1]["buttons"] for btn in row)
+    assert any(btn.text == "📋 Cover Letter" for row in client.edits[-1]["buttons"] for btn in row)
 
 
 def test_undo_expired_does_not_change_status(tmp_path: Path) -> None:

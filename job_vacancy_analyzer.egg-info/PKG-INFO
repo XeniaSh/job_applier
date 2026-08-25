@@ -10,6 +10,7 @@ Requires-Dist: pydantic-settings>=2.10.0
 Requires-Dist: typer>=0.16.0
 Requires-Dist: python-dotenv>=1.1.0
 Requires-Dist: pyyaml
+Requires-Dist: fpdf2>=2.8.8
 
 # Job Applier
 

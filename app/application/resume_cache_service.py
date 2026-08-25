@@ -40,6 +40,7 @@ class ResumeCacheService:
         resume_name: str,
         chat_id: str,
         force_upload: bool = False,
+        upload_if_missing: bool = True,
     ) -> ResumeDeliveryResult:
         normalized_name = _normalize_resume_name(
             resume_name,
@@ -81,6 +82,17 @@ class ResumeCacheService:
                 resume_path=current_path,
                 telegram_file_id=cached.telegram_file_id,
                 cache_hit=True,
+                uploaded=False,
+                missing=False,
+            )
+
+        if not upload_if_missing:
+            # Callback flow disables upload here to avoid duplicate messages.
+            return ResumeDeliveryResult(
+                resume_name=normalized_name,
+                resume_path=current_path,
+                telegram_file_id=None,
+                cache_hit=False,
                 uploaded=False,
                 missing=False,
             )
