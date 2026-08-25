@@ -15,6 +15,11 @@ class CoverLetterArtifacts:
     pdf_error: str | None = None
 
 
+def resolve_cover_letter_artifact_paths(*, base_dir: Path, source: str, external_id: str) -> tuple[Path, Path]:
+    target_dir = base_dir / _safe_segment(source) / _safe_segment(external_id)
+    return target_dir / "cover_letter.txt", target_dir / "cover_letter.pdf"
+
+
 def generate_cover_letter_artifacts(
     *,
     base_dir: Path,
@@ -25,25 +30,20 @@ def generate_cover_letter_artifacts(
     cover_letter_text: str,
     font_path: Path | None = None,
 ) -> CoverLetterArtifacts:
-    target_dir = base_dir / _safe_segment(source) / _safe_segment(external_id)
+    txt_path, pdf_path = resolve_cover_letter_artifact_paths(
+        base_dir=base_dir,
+        source=source,
+        external_id=external_id,
+    )
+    target_dir = txt_path.parent
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    txt_path = target_dir / "cover_letter.txt"
     txt_path.write_text(cover_letter_text.strip() + "\n", encoding="utf-8")
 
-    normalized_name = candidate_name.strip()
-    if not normalized_name:
-        return CoverLetterArtifacts(
-            txt_path=txt_path,
-            pdf_path=None,
-            pdf_error="CANDIDATE_NAME is not configured; cover_letter.pdf was skipped.",
-        )
-
-    pdf_path = target_dir / "cover_letter.pdf"
     try:
         _render_cover_letter_pdf(
             output_path=pdf_path,
-            candidate_name=normalized_name,
+            candidate_name=candidate_name.strip(),
             language=language.strip().lower(),
             body=cover_letter_text.strip(),
             font_path=font_path,
@@ -70,7 +70,9 @@ def _render_cover_letter_pdf(
     today = datetime.now(timezone.utc).date().isoformat()
     greeting = "Команде по найму," if use_ru else "Dear Hiring Team,"
     closing = "С уважением," if use_ru else "Best regards,"
-    full_text = f"{candidate_name}\n{today}\n\n{greeting}\n\n{body}\n\n{closing}\n{candidate_name}"
+    header_lines = [today] if not candidate_name else [candidate_name, today]
+    footer_lines = [closing] if not candidate_name else [closing, candidate_name]
+    full_text = "\n".join([*header_lines, "", greeting, "", body, "", *footer_lines])
 
     pdf = FPDF(format="A4")
     pdf.set_auto_page_break(auto=True, margin=20)

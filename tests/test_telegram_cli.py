@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -1189,6 +1190,7 @@ def test_prepare_callback_sets_loading_state(monkeypatch) -> None:
         client=FakeClient(),
         storage=FakeStorage(),
         configured_chat_id="123",
+        artifacts_dir=Path("missing-artifacts"),
     )
     assert calls["updates"][0]["delivery_status"] == "PREPARE_REQUESTED"
     assert "⏳ Preparing application..." in calls["edit"]["text"]
@@ -1604,6 +1606,7 @@ def test_copy_cover_letter_does_not_duplicate_when_already_sent() -> None:
         client=FakeClient(),
         storage=Storage(),
         configured_chat_id="123",
+        artifacts_dir=Path("missing-artifacts"),
     )
     assert any("Cover letter sent" == text for _, text in answers)
 
@@ -1626,7 +1629,16 @@ def test_applied_cleanup_failures_do_not_block_transition(monkeypatch) -> None:
 
         def get_preparation(self, source, external_id):
             _ = source, external_id
-            return type("P", (), {"resume_message_id": 1001, "cover_letter_message_id": 1002})()
+            return type(
+                "P",
+                (),
+                {
+                    "resume_message_id": 1001,
+                    "cover_letter_message_id": 1002,
+                    "cover_letter_txt_message_id": 1003,
+                    "cover_letter_pdf_message_id": 1004,
+                },
+            )()
 
         def clear_preparation_aux_message_ids(self, **kwargs):
             _ = kwargs
@@ -1659,7 +1671,7 @@ def test_applied_cleanup_failures_do_not_block_transition(monkeypatch) -> None:
     )
     assert calls["updated"] == 1
     assert calls["edited"] == 1
-    assert calls["deleted"] == 2
+    assert calls["deleted"] == 4
 
 
 def test_prepare_message_not_modified_is_harmless() -> None:
@@ -2003,6 +2015,8 @@ def test_applied_status_persists_across_storage_restart(tmp_path) -> None:
 
 
 def test_cover_letter_button_sends_text_and_pdf_when_available(tmp_path) -> None:
+    txt = tmp_path / "cover_letter.txt"
+    txt.write_text("Letter", encoding="utf-8")
     pdf = tmp_path / "cover_letter.pdf"
     pdf.write_bytes(b"%PDF-1.7")
     calls = {"doc": [], "aux": [], "texts": []}
@@ -2017,6 +2031,8 @@ def test_cover_letter_button_sends_text_and_pdf_when_available(tmp_path) -> None
                     "status": "PREPARED",
                     "cover_letter": "Letter",
                     "cover_letter_message_id": None,
+                    "cover_letter_txt_path": str(txt),
+                    "cover_letter_txt_message_id": None,
                     "cover_letter_pdf_path": str(pdf),
                     "cover_letter_pdf_message_id": None,
                 },
@@ -2052,9 +2068,11 @@ def test_cover_letter_button_sends_text_and_pdf_when_available(tmp_path) -> None
 
     assert len(calls["texts"]) == 1
     assert calls["texts"][0][0] == "Letter"
-    assert len(calls["doc"]) == 1
-    assert calls["doc"][0]["content_type"] == "application/pdf"
+    assert len(calls["doc"]) == 2
+    assert calls["doc"][0]["content_type"] == "text/plain"
+    assert calls["doc"][1]["content_type"] == "application/pdf"
     assert any("cover_letter_message_id" in item for item in calls["aux"])
+    assert any("cover_letter_txt_message_id" in item for item in calls["aux"])
     assert any("cover_letter_pdf_message_id" in item for item in calls["aux"])
 
 
@@ -2072,6 +2090,8 @@ def test_cover_letter_without_pdf_falls_back_to_text_only() -> None:
                     "status": "PREPARED",
                     "cover_letter": "Letter only",
                     "cover_letter_message_id": None,
+                    "cover_letter_txt_path": None,
+                    "cover_letter_txt_message_id": None,
                     "cover_letter_pdf_path": None,
                     "cover_letter_pdf_message_id": None,
                 },
@@ -2102,6 +2122,7 @@ def test_cover_letter_without_pdf_falls_back_to_text_only() -> None:
         client=Client(),
         storage=Storage(),
         configured_chat_id="123",
+        artifacts_dir=Path("missing-artifacts"),
     )
     assert sent_texts and sent_texts[0][0] == "Letter only"
     assert any(text == "Cover letter sent" for _, text in answers)

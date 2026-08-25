@@ -38,6 +38,7 @@ from app.application.preparation_service import (
     PreparationService,
 )
 from app.application.resume_cache_service import KNOWN_RESUME_NAMES, ResumeCacheService
+from app.cover_letter_documents import resolve_cover_letter_artifact_paths
 from app.config import Settings
 from app.formatter import format_evaluation_ru
 from app.llm_client import CoverLetterValidationError, LLMClient, LLMRequestError, LLMResponseError
@@ -824,6 +825,7 @@ def run_pipeline(
                 offset=offset,
                 timeout=timeout,
                 resumes_dir=settings.resumes_dir,
+                artifacts_dir=settings.prepared_artifacts_dir,
                 resume_cache_service=callback_resume_cache,
                 timing_logger=_component_log("poller") if verbose else None,
                 undo_window_seconds=settings.undo_window_seconds,
@@ -1062,6 +1064,7 @@ def poll_telegram_actions(
                     offset=offset,
                     timeout=timeout,
                     resumes_dir=settings.resumes_dir,
+                    artifacts_dir=settings.prepared_artifacts_dir,
                     timing_logger=None,
                     undo_window_seconds=settings.undo_window_seconds,
                 )
@@ -2368,6 +2371,7 @@ def _process_callback_update(
     storage: TelegramDeliveryStorage,
     configured_chat_id: str,
     resumes_dir: Path | None = None,
+    artifacts_dir: Path = Path("data/prepared"),
     resume_cache_service: ResumeCacheService | None = None,
     timing_logger: Callable[[str], None] | None = None,
     undo_window_seconds: int | None = None,
@@ -2549,25 +2553,53 @@ def _process_callback_update(
                             external_id=external_id,
                             cover_letter_message_id=sent_ref.message_id,
                         )
+                txt_path = _resolve_cover_letter_artifact_path(
+                    prep_path=getattr(prep, "cover_letter_txt_path", None),
+                    source=source,
+                    external_id=external_id,
+                    artifacts_dir=artifacts_dir,
+                    filename="cover_letter.txt",
+                )
+                existing_txt_id = getattr(prep, "cover_letter_txt_message_id", None)
+                if txt_path is not None and not (isinstance(existing_txt_id, int) and existing_txt_id > 0):
+                    sent_txt = client.send_document(
+                        file_path=str(txt_path),
+                        caption=_build_cover_letter_caption(kind="TXT", title=title, company=company),
+                        content_type="text/plain",
+                        chat_id=configured_chat_id,
+                        reply_to_message_id=message_id if message_id > 0 else None,
+                    )
+                    set_aux = getattr(storage, "set_preparation_aux_message_id", None)
+                    if callable(set_aux):
+                        set_aux(
+                            source=source,
+                            external_id=external_id,
+                            cover_letter_txt_message_id=sent_txt.message_id,
+                        )
                 pdf_path_raw = getattr(prep, "cover_letter_pdf_path", None)
                 existing_pdf_id = getattr(prep, "cover_letter_pdf_message_id", None)
-                if pdf_path_raw and not (isinstance(existing_pdf_id, int) and existing_pdf_id > 0):
-                    file_path = Path(pdf_path_raw)
-                    if file_path.is_file():
-                        sent_doc = client.send_document(
-                            file_path=str(file_path),
-                            caption=_build_cover_letter_caption(kind="PDF", title=title, company=company),
-                            content_type="application/pdf",
-                            chat_id=configured_chat_id,
-                            reply_to_message_id=message_id if message_id > 0 else None,
+                pdf_path = _resolve_cover_letter_artifact_path(
+                    prep_path=pdf_path_raw,
+                    source=source,
+                    external_id=external_id,
+                    artifacts_dir=artifacts_dir,
+                    filename="cover_letter.pdf",
+                )
+                if pdf_path is not None and not (isinstance(existing_pdf_id, int) and existing_pdf_id > 0):
+                    sent_doc = client.send_document(
+                        file_path=str(pdf_path),
+                        caption=_build_cover_letter_caption(kind="PDF", title=title, company=company),
+                        content_type="application/pdf",
+                        chat_id=configured_chat_id,
+                        reply_to_message_id=message_id if message_id > 0 else None,
+                    )
+                    set_aux = getattr(storage, "set_preparation_aux_message_id", None)
+                    if callable(set_aux):
+                        set_aux(
+                            source=source,
+                            external_id=external_id,
+                            cover_letter_pdf_message_id=sent_doc.message_id,
                         )
-                        set_aux = getattr(storage, "set_preparation_aux_message_id", None)
-                        if callable(set_aux):
-                            set_aux(
-                                source=source,
-                                external_id=external_id,
-                                cover_letter_pdf_message_id=sent_doc.message_id,
-                            )
                 answer_once("Cover letter sent")
         else:  # action == "resume"
             get_preparation = getattr(storage, "get_preparation", None)
@@ -3096,6 +3128,29 @@ def _build_cover_letter_caption(*, kind: str, title: str, company: str | None) -
     return f"Cover Letter {kind}\n{title} · {company_part}"
 
 
+def _resolve_cover_letter_artifact_path(
+    *,
+    prep_path: str | None,
+    source: str,
+    external_id: str,
+    artifacts_dir: Path,
+    filename: str,
+) -> Path | None:
+    if prep_path:
+        candidate = Path(prep_path)
+        if candidate.is_file():
+            return candidate
+    txt_path, pdf_path = resolve_cover_letter_artifact_paths(
+        base_dir=artifacts_dir,
+        source=source,
+        external_id=external_id,
+    )
+    fallback = txt_path if filename == "cover_letter.txt" else pdf_path
+    if fallback.is_file():
+        return fallback
+    return None
+
+
 def _cleanup_aux_messages(
     *,
     storage: TelegramDeliveryStorage,
@@ -3110,8 +3165,9 @@ def _cleanup_aux_messages(
         return
     resume_message_id = getattr(prep, "resume_message_id", None)
     cover_message_id = getattr(prep, "cover_letter_message_id", None)
+    cover_txt_message_id = getattr(prep, "cover_letter_txt_message_id", None)
     cover_pdf_message_id = getattr(prep, "cover_letter_pdf_message_id", None)
-    for message_id in [resume_message_id, cover_message_id, cover_pdf_message_id]:
+    for message_id in [resume_message_id, cover_message_id, cover_txt_message_id, cover_pdf_message_id]:
         if not isinstance(message_id, int) or message_id <= 0:
             continue
         try:
@@ -4299,6 +4355,7 @@ def _poll_telegram_actions_once(
     offset: int | None,
     timeout: int,
     resumes_dir: Path | None = None,
+    artifacts_dir: Path = Path("data/prepared"),
     resume_cache_service: ResumeCacheService | None = None,
     timing_logger: Callable[[str], None] | None = None,
     undo_window_seconds: int | None = None,
@@ -4324,6 +4381,7 @@ def _poll_telegram_actions_once(
                 storage=storage,
                 configured_chat_id=configured_chat_id,
                 resumes_dir=resumes_dir,
+                artifacts_dir=artifacts_dir,
                 resume_cache_service=resume_cache_service,
                 timing_logger=timing_logger,
                 undo_window_seconds=undo_window_seconds,
@@ -4517,6 +4575,7 @@ def _prepare_one_application(
                     resume_name=None,
                     language=None,
                     cover_letter=None,
+                    cover_letter_txt_path=None,
                     cover_letter_pdf_path=None,
                     vacancy_title=None,
                     vacancy_company=None,
@@ -4581,6 +4640,7 @@ def _prepare_one_application(
                 resume_name=prepared.recommended_resume,
                 language=prepared.language,
                 cover_letter=prepared.cover_letter,
+                cover_letter_txt_path=prepared.cover_letter_txt_path,
                 cover_letter_pdf_path=prepared.cover_letter_pdf_path,
                 vacancy_title=prepared.title,
                 vacancy_company=prepared.company,
@@ -4629,6 +4689,7 @@ def _prepare_one_application(
                 resume_name=prepared.recommended_resume,
                 language=prepared.language,
                 cover_letter=prepared.cover_letter,
+                cover_letter_txt_path=prepared.cover_letter_txt_path,
                 cover_letter_pdf_path=prepared.cover_letter_pdf_path,
                 vacancy_title=prepared.title,
                 vacancy_company=prepared.company,
@@ -4653,6 +4714,7 @@ def _prepare_one_application(
             language=prepared.language,
             error_message=None,
             cover_letter=prepared.cover_letter,
+            cover_letter_txt_path=prepared.cover_letter_txt_path,
             cover_letter_pdf_path=prepared.cover_letter_pdf_path,
             vacancy_title=prepared.title,
             vacancy_company=prepared.company,
@@ -4700,6 +4762,7 @@ def _mark_preparation_failed(
     resume_name: str | None,
     language: str | None,
     cover_letter: str | None,
+    cover_letter_txt_path: str | None,
     cover_letter_pdf_path: str | None,
     vacancy_title: str | None,
     vacancy_company: str | None,
@@ -4722,6 +4785,7 @@ def _mark_preparation_failed(
         language=language,
         error_message=error_message,
         cover_letter=cover_letter,
+        cover_letter_txt_path=cover_letter_txt_path,
         cover_letter_pdf_path=cover_letter_pdf_path,
         vacancy_title=vacancy_title,
         vacancy_company=vacancy_company,
@@ -4790,6 +4854,7 @@ def _ensure_preparation_left_preparing(
         resume_name=None,
         language=None,
         cover_letter=None,
+        cover_letter_txt_path=None,
         cover_letter_pdf_path=None,
         vacancy_title=None,
         vacancy_company=None,

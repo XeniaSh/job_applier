@@ -20,7 +20,7 @@ def test_generate_cover_letter_artifacts_writes_txt_and_pdf(tmp_path: Path) -> N
     assert result.pdf_path.read_bytes().startswith(b"%PDF")
 
 
-def test_generate_cover_letter_artifacts_skips_pdf_when_name_missing(tmp_path: Path) -> None:
+def test_generate_cover_letter_artifacts_generates_pdf_when_name_missing(tmp_path: Path) -> None:
     result = generate_cover_letter_artifacts(
         base_dir=tmp_path / "prepared",
         source="linkedin-email",
@@ -31,8 +31,9 @@ def test_generate_cover_letter_artifacts_skips_pdf_when_name_missing(tmp_path: P
     )
 
     assert result.txt_path is not None
-    assert result.pdf_path is None
-    assert result.pdf_error is not None
+    assert result.pdf_path is not None
+    assert result.pdf_error is None
+    assert result.pdf_path.read_bytes().startswith(b"%PDF")
 
 
 def test_generate_cover_letter_artifacts_handles_unicode_font_failure(tmp_path: Path, monkeypatch) -> None:

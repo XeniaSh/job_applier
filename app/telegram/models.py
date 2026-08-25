@@ -98,10 +98,12 @@ class ApplicationPreparationRecord:
     status: str
     error_message: str | None
     cover_letter: str | None
+    cover_letter_txt_path: str | None
     cover_letter_pdf_path: str | None
     vacancy_title: str | None
     vacancy_company: str | None
     vacancy_url: str | None
     resume_message_id: int | None = None
     cover_letter_message_id: int | None = None
+    cover_letter_txt_message_id: int | None = None
     cover_letter_pdf_message_id: int | None = None
