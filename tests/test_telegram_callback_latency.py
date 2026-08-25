@@ -27,7 +27,7 @@ def _evaluation() -> VacancyEvaluation:
         match_percentage=80.0,
         matched_score=8.0,
         total_possible_score=10.0,
-        recommended_resume=RecommendedResume.JAVA_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
     )
 

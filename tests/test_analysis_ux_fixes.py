@@ -176,7 +176,7 @@ def test_telegram_card_separates_warnings_and_information() -> None:
         total_possible_score=0.0,
         explicit_skill_count=2,
         evidence_sufficient=False,
-        recommended_resume=RecommendedResume.JAVA_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
         warning_signals=[
             {"code": "location_constraint", "source": "vacancy_text", "evidence": "Requires relocation to PH"},

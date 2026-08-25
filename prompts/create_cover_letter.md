@@ -6,7 +6,7 @@ Input includes:
 - candidate profile (primary source of truth);
 - vacancy metadata/snippet (often only a title for LinkedIn email cards);
 - deterministic analysis result;
-- recommended resume.
+- selected resume profile ID.
 
 Hard rules:
 - Use only facts from candidate_profile.md and vacancy text.
@@ -74,5 +74,5 @@ Return JSON only:
 {
   "language": "ru" | "en",
   "cover_letter": "...",
-  "used_resume": "java-backend" | "kotlin-backend" | "fintech-backend" | "ai-adjacent-backend"
+  "used_resume": "the exact selected resume profile ID from the top-level recommended_resume input"
 }

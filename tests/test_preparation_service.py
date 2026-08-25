@@ -20,6 +20,8 @@ from app.models import (
     RecommendedResume,
     VacancyEvaluation,
 )
+from app.resume_profiles import ResumeProfile, ResumeProfiles
+from app.resume_selector import ResumeSelector
 
 
 def _raw_message() -> RawEmailMessage:
@@ -49,7 +51,7 @@ def _evaluation() -> VacancyEvaluation:
         total_possible_score=0.0,
         explicit_skill_count=2,
         evidence_sufficient=False,
-        recommended_resume=RecommendedResume.JAVA_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
     )
 
@@ -98,8 +100,23 @@ class _FakeLLM:
         return CoverLetterResult(
             language=self.language,
             cover_letter=self.text,
-            used_resume="java-backend",
+            used_resume=kwargs["recommended_resume"],
         )
+
+    def select_resume_profile(self, *, prompt: str) -> str:
+        _ = prompt
+        self.last_timing_events.append(
+            {
+                "operation": "resume_selection",
+                "model": self.model,
+                "elapsed_ms": 4,
+                "prompt_tokens": 3,
+                "completion_tokens": 2,
+                "total_tokens": 5,
+                "error": None,
+            }
+        )
+        return '{"selected_profile":"java_ai","reason":"AI workflow automation is central to the role."}'
 
 
 class _FakePrepareCache:
@@ -452,3 +469,57 @@ def test_prepare_keeps_default_cover_letter_for_australia(tmp_path: Path, monkey
     assert "New Zealand" not in prepared.cover_letter
     log_text = "\n".join(record.getMessage() for record in caplog.records)
     assert "Cover letter profile: default" in log_text
+
+
+def test_prepare_uses_selected_profile_pdf_for_package(tmp_path: Path, monkeypatch) -> None:
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    ai_resume = tmp_path / "resumes" / "java_ai.pdf"
+    ai_resume.parent.mkdir()
+    ai_resume.write_bytes(b"%PDF")
+    profiles = ResumeProfiles(
+        (
+            ResumeProfile("java", "General Java backend.", tmp_path / "resumes/java.pdf"),
+            ResumeProfile("java_ai", "Java backend plus AI automation.", ai_resume),
+        )
+    )
+    llm = _FakeLLM(language="en", text="I have around seven years of Java backend experience.")
+    selector = ResumeSelector(
+        llm_client=llm,
+        profiles=profiles,
+        prompt_template="{{ resume_profiles }}\n{{ job_description }}",
+    )
+    evaluation = _evaluation()
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=_FakePrepareCache(
+            {
+                "evaluation_json": evaluation.model_dump_json(),
+                "analysis_text": "AI workflow automation platform seeking a Java engineer",
+                "title": "Java Engineer",
+                "company": "ACME AI",
+                "location": "Remote",
+                "url": "https://example.com/job",
+                "content_completeness": "FULL",
+            }
+        ),
+        resume_selector=selector,
+    )
+
+    prepared = service.prepare("linkedin-email", "ai-1")
+
+    assert prepared.recommended_resume == "java_ai"
+    assert prepared.resume_path == str(ai_resume.resolve())
+    assert prepared.timing_breakdown["llm_calls"] == 2

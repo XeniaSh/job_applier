@@ -36,14 +36,15 @@ from app.application.preparation_service import (
     ApplicationPreparationError,
     PreparedApplication,
     PreparationService,
-    resolve_resume_path,
 )
 from app.application.resume_cache_service import KNOWN_RESUME_NAMES, ResumeCacheService
 from app.config import Settings
 from app.formatter import format_evaluation_ru
 from app.llm_client import CoverLetterValidationError, LLMClient, LLMRequestError, LLMResponseError
 from app.models import Decision, VacancyEvaluation
-from app.prompt_loader import PromptLoadError, load_analysis_prompt
+from app.prompt_loader import PromptLoadError, load_analysis_prompt, load_resume_selector_prompt
+from app.resume_profiles import ResumeProfiles, load_resume_profiles
+from app.resume_selector import ResumeSelector
 from app.skills_profile_loader import SkillsProfileLoadError, load_candidate_skills
 from app.storage.seen_jobs import SeenJobsStorage
 from app.storage.imap_checkpoint import ImapCheckpointStorage
@@ -113,6 +114,22 @@ def build_analyzer(settings: Settings) -> VacancyAnalyzer:
         llm_client=llm_client,
         skills_loader=load_candidate_skills,
         prompt_loader=load_analysis_prompt,
+    )
+
+
+def _load_configured_resume_profiles(settings: Settings) -> ResumeProfiles:
+    return load_resume_profiles(settings.resume_profiles_path)
+
+
+def _build_resume_selector(
+    *,
+    llm_client: LLMClient,
+    profiles: ResumeProfiles,
+) -> ResumeSelector:
+    return ResumeSelector(
+        llm_client=llm_client,
+        profiles=profiles,
+        prompt_template=load_resume_selector_prompt(),
     )
 
 
@@ -635,6 +652,11 @@ def prepare_telegram_applications(
         api_key=settings.llm_api_key,
         model=settings.llm_model,
     )
+    resume_profiles = _load_configured_resume_profiles(settings)
+    resume_selector = _build_resume_selector(
+        llm_client=llm_client,
+        profiles=resume_profiles,
+    )
     email_client = EmailIMAPClient(
         host=settings.linkedin_email_imap_host,
         port=settings.linkedin_email_imap_port,
@@ -653,6 +675,7 @@ def prepare_telegram_applications(
         preferred_language=settings.candidate_preferred_language,
         grammatical_gender=settings.candidate_grammatical_gender,
         prepare_cache=storage,
+        resume_selector=resume_selector,
     )
     result = _prepare_requested_applications(
         settings=settings,
@@ -701,6 +724,11 @@ def run_pipeline(
         api_key=settings.llm_api_key,
         model=settings.llm_model,
     )
+    resume_profiles = _load_configured_resume_profiles(settings)
+    resume_selector = _build_resume_selector(
+        llm_client=llm_client,
+        profiles=resume_profiles,
+    )
     email_client = EmailIMAPClient(
         host=settings.linkedin_email_imap_host,
         port=settings.linkedin_email_imap_port,
@@ -739,6 +767,7 @@ def run_pipeline(
         resumes_dir=settings.resumes_dir,
         storage=deliveries,
         telegram_client=telegram_client,
+        resume_paths={profile.id: profile.pdf for profile in resume_profiles.profiles},
     )
     preparation_service = PreparationService(
         analyzer=analyzer,
@@ -748,6 +777,7 @@ def run_pipeline(
         preferred_language=settings.candidate_preferred_language,
         grammatical_gender=settings.candidate_grammatical_gender,
         prepare_cache=deliveries,
+        resume_selector=resume_selector,
     )
 
     interval = max(1, int(settings.pipeline_interval_seconds))
@@ -1234,16 +1264,22 @@ def telegram_cache_resumes(
 
     storage = TelegramDeliveryStorage()
     client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    resume_profiles = _load_configured_resume_profiles(settings)
+    configured_resume_names = resume_profiles.ids
     cache_service = ResumeCacheService(
         resumes_dir=settings.resumes_dir,
         storage=storage,
         telegram_client=client,
+        resume_paths={profile.id: profile.pdf for profile in resume_profiles.profiles},
     )
 
-    selected = list(resume) if resume else list(KNOWN_RESUME_NAMES)
+    allowed_resume_names = configured_resume_names
+    selected = list(resume) if resume else list(allowed_resume_names)
     normalized_selected: list[str] = []
     for item in selected:
-        normalized_selected.append(_normalize_resume_name_or_exit(item))
+        normalized_selected.append(
+            _normalize_resume_name_or_exit(item, allowed_names=allowed_resume_names)
+        )
 
     cached = 0
     uploaded = 0
@@ -1313,7 +1349,11 @@ def telegram_clear_resume_cache(
         typer.echo(f"Deleted resume cache rows: {deleted}")
         return
 
-    normalized_name = _normalize_resume_name_or_exit(resume_name or "")
+    persisted_names = tuple(row.resume_name for row in storage.list_resume_cache())
+    normalized_name = _normalize_resume_name_or_exit(
+        resume_name or "",
+        allowed_names=tuple(dict.fromkeys((*KNOWN_RESUME_NAMES, *persisted_names))),
+    )
     if not yes:
         confirmed = typer.confirm(f"Delete resume cache {normalized_name}?", default=False)
         if not confirmed:
@@ -2554,8 +2594,12 @@ def _process_callback_update(
                                 if resumes_dir is None:
                                     answer_once("Resume PDF not found.")
                                 else:
-                                    resume_path, _resume_error = resolve_resume_path(resumes_dir, prep.resume_name)
-                                    if resume_path is None:
+                                    resume_path = (
+                                        Path(resume_result.resume_path)
+                                        if resume_result.resume_path
+                                        else None
+                                    )
+                                    if resume_path is None or not resume_path.is_file():
                                         answer_once("Resume PDF not found.")
                                     else:
                                         sent_doc = client.send_document(
@@ -2899,7 +2943,7 @@ def _ui_for_delivery_status(
         return build_loading_text(title=title, company=company), build_loading_buttons(url)
     if status == STATUS_PREPARED:
         prep = storage.get_preparation(source, external_id) if hasattr(storage, "get_preparation") else None
-        resume_name = getattr(prep, "resume_name", None) or "java-backend"
+        resume_name = getattr(prep, "resume_name", None) or "java"
         return (
             build_ready_text(title=title, company=company, recommended_resume=resume_name),
             build_prepared_application_buttons(source, external_id, url),
@@ -3301,10 +3345,14 @@ def _print_application_history_table(rows: list[ApplicationHistoryRecord]) -> No
         typer.echo("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
 
 
-def _normalize_resume_name_or_exit(value: str) -> str:
+def _normalize_resume_name_or_exit(
+    value: str,
+    *,
+    allowed_names: tuple[str, ...] = KNOWN_RESUME_NAMES,
+) -> str:
     normalized = value.strip().lower()
-    if normalized not in KNOWN_RESUME_NAMES:
-        allowed = ", ".join(KNOWN_RESUME_NAMES)
+    if normalized not in allowed_names:
+        allowed = ", ".join(allowed_names)
         typer.secho(
             f"Unknown resume identifier: {value}. Allowed: {allowed}",
             err=True,

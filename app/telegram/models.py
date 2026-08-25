@@ -24,7 +24,7 @@ class TelegramVacancyCard:
     nuances: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     info_items: list[str] = field(default_factory=list)
-    recommended_resume: str = "java-backend"
+    recommended_resume: str = "java"
     content_completeness: str = "PARTIAL"
     decision_reason: str | None = None
 

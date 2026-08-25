@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
-from app.models import RecommendedResume
 from app.storage.telegram_delivery import TelegramDeliveryStorage
 from app.telegram.client import TelegramClient
 
-KNOWN_RESUME_NAMES: tuple[str, ...] = tuple(item.value for item in RecommendedResume)
+KNOWN_RESUME_NAMES: tuple[str, ...] = ("java", "java_ai")
 
 
 @dataclass(frozen=True)
@@ -27,10 +27,12 @@ class ResumeCacheService:
         resumes_dir: Path,
         storage: TelegramDeliveryStorage,
         telegram_client: TelegramClient,
+        resume_paths: Mapping[str, Path] | None = None,
     ) -> None:
         self._resumes_dir = resumes_dir
         self._storage = storage
         self._telegram_client = telegram_client
+        self._resume_paths = dict(resume_paths or {})
 
     def get_or_upload(
         self,
@@ -39,8 +41,18 @@ class ResumeCacheService:
         chat_id: str,
         force_upload: bool = False,
     ) -> ResumeDeliveryResult:
-        normalized_name = _normalize_resume_name(resume_name)
-        path = _resolve_resume_path(self._resumes_dir, normalized_name)
+        normalized_name = _normalize_resume_name(
+            resume_name,
+            allowed_names=tuple(self._resume_paths) or KNOWN_RESUME_NAMES,
+        )
+        configured_path = self._resume_paths.get(normalized_name)
+        path = (
+            configured_path.resolve()
+            if configured_path is not None and configured_path.exists() and configured_path.is_file()
+            else None
+        )
+        if configured_path is None:
+            path = _resolve_resume_path(self._resumes_dir, normalized_name)
         if path is None:
             return ResumeDeliveryResult(
                 resume_name=normalized_name,
@@ -95,9 +107,13 @@ class ResumeCacheService:
         )
 
 
-def _normalize_resume_name(value: str) -> str:
+def _normalize_resume_name(
+    value: str,
+    *,
+    allowed_names: tuple[str, ...] = KNOWN_RESUME_NAMES,
+) -> str:
     normalized = value.strip().lower()
-    if normalized not in KNOWN_RESUME_NAMES:
+    if normalized not in allowed_names:
         raise ValueError(f"Unknown resume identifier: {value}")
     return normalized
 

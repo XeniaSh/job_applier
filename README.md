@@ -201,17 +201,21 @@ Buttons and statuses:
 
 ## Resume Setup
 
-Expected local files:
+Resume variants are configured in `resume_profiles.yaml`. Each profile has an
+identifier, a short description used by the resume selector, and the path to
+its local PDF. Add another profile by adding another YAML entry; no code change
+is required.
+
+The default configuration expects:
 
 - `resumes/java-backend.pdf`
-- `resumes/kotlin-backend.pdf`
-- `resumes/fintech-backend.pdf`
 - `resumes/ai-adjacent-backend.pdf`
 
 Notes:
 
 - Resume files stay local.
-- Resume identifiers map to these filenames.
+- The LLM selects a configured profile after vacancy analysis and before cover-letter generation.
+- Invalid model selections fall back to the `java` profile.
 - Missing PDF does not block cover-letter generation.
 - PDFs may include personal data and should be ignored by git.
 - Keep optional placeholder file: `resumes/.gitkeep`.

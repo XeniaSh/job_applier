@@ -32,6 +32,7 @@ def _create_service(tmp_path: Path):
         resumes_dir=resumes_dir,
         storage=storage,
         telegram_client=fake_client,  # type: ignore[arg-type]
+        resume_paths={"java": resumes_dir / "java-backend.pdf"},
     )
     return service, storage, resumes_dir, fake_client
 
@@ -41,12 +42,12 @@ def test_first_use_uploads_and_saves_cache(tmp_path: Path) -> None:
     pdf = resumes_dir / "java-backend.pdf"
     pdf.write_bytes(b"%PDF one")
 
-    result = service.get_or_upload(resume_name="java-backend", chat_id="123")
+    result = service.get_or_upload(resume_name="java", chat_id="123")
     assert result.uploaded is True
     assert result.cache_hit is False
     assert result.missing is False
     assert len(fake.calls) == 1
-    cached = storage.get_resume_cache("java-backend")
+    cached = storage.get_resume_cache("java")
     assert cached is not None
     assert cached.telegram_file_id == result.telegram_file_id
 
@@ -55,8 +56,8 @@ def test_second_use_reuses_file_id_cache_hit(tmp_path: Path) -> None:
     service, _storage, resumes_dir, fake = _create_service(tmp_path)
     pdf = resumes_dir / "java-backend.pdf"
     pdf.write_bytes(b"%PDF one")
-    first = service.get_or_upload(resume_name="java-backend", chat_id="123")
-    second = service.get_or_upload(resume_name="java-backend", chat_id="123")
+    first = service.get_or_upload(resume_name="java", chat_id="123")
+    second = service.get_or_upload(resume_name="java", chat_id="123")
     assert first.telegram_file_id == second.telegram_file_id
     assert second.cache_hit is True
     assert second.uploaded is False
@@ -67,10 +68,10 @@ def test_changed_mtime_invalidates_cache(tmp_path: Path) -> None:
     service, _storage, resumes_dir, fake = _create_service(tmp_path)
     pdf = resumes_dir / "java-backend.pdf"
     pdf.write_bytes(b"%PDF one")
-    service.get_or_upload(resume_name="java-backend", chat_id="123")
+    service.get_or_upload(resume_name="java", chat_id="123")
     st = pdf.stat()
     os.utime(pdf, ns=(st.st_atime_ns, st.st_mtime_ns + 1000))
-    result = service.get_or_upload(resume_name="java-backend", chat_id="123")
+    result = service.get_or_upload(resume_name="java", chat_id="123")
     assert result.uploaded is True
     assert len(fake.calls) == 2
 
@@ -79,20 +80,20 @@ def test_changed_file_size_invalidates_cache(tmp_path: Path) -> None:
     service, storage, resumes_dir, fake = _create_service(tmp_path)
     pdf = resumes_dir / "java-backend.pdf"
     pdf.write_bytes(b"%PDF one")
-    service.get_or_upload(resume_name="java-backend", chat_id="123")
-    cached = storage.get_resume_cache("java-backend")
+    service.get_or_upload(resume_name="java", chat_id="123")
+    cached = storage.get_resume_cache("java")
     assert cached is not None
 
     pdf.write_bytes(b"%PDF changed and bigger")
     os.utime(pdf, ns=(cached.file_mtime_ns, cached.file_mtime_ns))
-    result = service.get_or_upload(resume_name="java-backend", chat_id="123")
+    result = service.get_or_upload(resume_name="java", chat_id="123")
     assert result.uploaded is True
     assert len(fake.calls) == 2
 
 
 def test_missing_pdf_returns_missing_without_failure(tmp_path: Path) -> None:
     service, _storage, _resumes_dir, fake = _create_service(tmp_path)
-    result = service.get_or_upload(resume_name="java-backend", chat_id="123")
+    result = service.get_or_upload(resume_name="java", chat_id="123")
     assert result.missing is True
     assert result.telegram_file_id is None
     assert len(fake.calls) == 0
@@ -103,3 +104,24 @@ def test_path_traversal_rejected(tmp_path: Path) -> None:
     resumes_dir.mkdir()
     with pytest.raises(ValueError):
         _resolve_resume_path(resumes_dir, "../secrets")
+
+
+def test_configured_profile_id_uses_configured_pdf_path(tmp_path: Path) -> None:
+    resumes_dir = tmp_path / "resumes"
+    resumes_dir.mkdir()
+    pdf = resumes_dir / "java_backend_ai.pdf"
+    pdf.write_bytes(b"%PDF")
+    storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    fake_client = _FakeTelegramClient(calls=[])
+    service = ResumeCacheService(
+        resumes_dir=resumes_dir,
+        storage=storage,
+        telegram_client=fake_client,  # type: ignore[arg-type]
+        resume_paths={"java_ai": pdf},
+    )
+
+    result = service.get_or_upload(resume_name="java_ai", chat_id="123")
+
+    assert result.uploaded is True
+    assert result.resume_name == "java_ai"
+    assert result.resume_path == str(pdf.resolve())

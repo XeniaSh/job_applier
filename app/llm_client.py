@@ -92,6 +92,15 @@ class LLMClient:
             "LLM returned an invalid response twice."
         ) from last_error
 
+    def select_resume_profile(self, *, prompt: str) -> str:
+        return self._request_content(
+            prompt=prompt,
+            vacancy="Select the best resume profile using the supplied job description.",
+            temperature=0.0,
+            max_tokens=250,
+            operation="resume_selection",
+        )
+
     def create_cover_letter(
         self,
         *,
@@ -109,7 +118,9 @@ class LLMClient:
             {
                 "candidate_profile": candidate_profile,
                 "vacancy_text": vacancy_text,
-                "analysis": analysis.model_dump(),
+                # Resume Selector is authoritative; omit the analyzer's compatibility
+                # recommendation so the model receives exactly one resume profile ID.
+                "analysis": analysis.model_dump(exclude={"recommended_resume"}),
                 "recommended_resume": recommended_resume,
             },
             ensure_ascii=False,
@@ -136,6 +147,7 @@ class LLMClient:
                     candidate_profile=candidate_profile,
                     preferred_language=preferred_language,
                     grammatical_gender=grammatical_gender,
+                    recommended_resume=recommended_resume,
                 )
                 return result
             except (
@@ -380,12 +392,6 @@ _FORBIDDEN_OWNERSHIP_TERMS = (
     "architecture ownership",
     "owned architecture",
 )
-_ALLOWED_RESUME_IDS = {
-    "java-backend",
-    "kotlin-backend",
-    "fintech-backend",
-    "ai-adjacent-backend",
-}
 _TECH_AREAS: dict[str, tuple[str, ...]] = {
     "jvm_language": ("java", "kotlin"),
     "spring_boot": ("spring boot",),
@@ -410,6 +416,7 @@ def _validate_cover_letter(
     candidate_profile: str,
     preferred_language: str,
     grammatical_gender: str,
+    recommended_resume: str,
 ) -> None:
     letter = " ".join(result.cover_letter.strip().split())
     lower = letter.lower()
@@ -506,8 +513,10 @@ def _validate_cover_letter(
         grammatical_gender=grammatical_gender,
     )
     _validate_technology_origin(letter=lower, candidate_profile=candidate_profile.lower(), vacancy_text=vacancy_text.lower())
-    if result.used_resume not in _ALLOWED_RESUME_IDS:
-        raise CoverLetterValidationError("Unsupported resume identifier in cover letter.")
+    if result.used_resume != recommended_resume:
+        raise CoverLetterValidationError(
+            f"Cover letter used resume '{result.used_resume}' instead of '{recommended_resume}'."
+        )
 
 
 def _count_complete_sentences(text: str) -> int:

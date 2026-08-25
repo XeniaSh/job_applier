@@ -11,10 +11,18 @@ class Decision(str, Enum):
 
 
 class RecommendedResume(str, Enum):
-    JAVA_BACKEND = "java-backend"
-    KOTLIN_BACKEND = "kotlin-backend"
-    FINTECH_BACKEND = "fintech-backend"
-    AI_ADJACENT_BACKEND = "ai-adjacent-backend"
+    JAVA = "java"
+    JAVA_AI = "java_ai"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "RecommendedResume | None":
+        legacy_mapping = {
+            "java-backend": cls.JAVA,
+            "kotlin-backend": cls.JAVA,
+            "fintech-backend": cls.JAVA,
+            "ai-adjacent-backend": cls.JAVA_AI,
+        }
+        return legacy_mapping.get(value)
 
 
 class RecommendedCoverTemplate(str, Enum):

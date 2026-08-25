@@ -1,0 +1,35 @@
+You are selecting the most appropriate resume profile for a job application.
+
+You will receive:
+
+1. A list of available resume profiles.
+2. A job description.
+
+The candidate has multiple resume versions describing the same professional experience, with different areas of emphasis.
+
+Available resume profiles:
+
+{{ resume_profiles }}
+
+Job description:
+
+{{ job_description }}
+
+Task:
+
+Analyze the job description and select the resume profile that would create the strongest application.
+
+Guidelines:
+
+- Choose the profile that best matches the overall focus of the role and the company's domain.
+- If AI, LLMs, GenAI, OpenAI APIs, AI-powered products, AI-assisted engineering, developer productivity, or workflow automation are a meaningful part of the role or company, prefer the profile highlighting AI experience.
+- If the role is primarily a general backend or Java position and the AI-focused profile does not provide a meaningful advantage, prefer the standard backend profile.
+- Do not select an AI-focused profile solely because AI is mentioned once. Consider the overall emphasis of the job description.
+- When in doubt, prefer the profile that showcases additional relevant experience without misrepresenting the candidate's background.
+
+Return JSON only.
+
+{
+  "selected_profile": "<profile_id>",
+  "reason": "One or two concise sentences explaining the choice."
+}

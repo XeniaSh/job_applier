@@ -1,0 +1,12 @@
+profiles:
+  - id: java
+    description: |
+      General Java backend profile.
+      Emphasizes banking, distributed systems, microservices and backend engineering.
+    pdf: resumes/java-backend.pdf
+
+  - id: java_ai
+    description: |
+      Same backend experience plus an AI-powered workflow automation project.
+      Best suited for positions where AI, LLMs, GenAI or engineering automation are relevant.
+    pdf: resumes/java-backend-ai.pdf

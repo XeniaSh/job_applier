@@ -155,7 +155,7 @@ def test_cover_letter_timing_uses_cover_letter_operation(caplog: pytest.LogCaptu
                 {
                     "language": "en",
                     "cover_letter": _VALID_EN_SUMMARY,
-                    "used_resume": "java-backend",
+                    "used_resume": "java",
                 }
             )
         )
@@ -167,7 +167,7 @@ def test_cover_letter_timing_uses_cover_letter_operation(caplog: pytest.LogCaptu
             candidate_profile="Java Backend Engineer with around seven years of commercial backend experience.",
             vacancy_text="Title: Java Backend Engineer\nResponsibilities: Build backend services for payments.",
             analysis=_evaluation(),
-            recommended_resume="java-backend",
+            recommended_resume="java",
         )
     log_text = "\n".join(record.getMessage() for record in caplog.records)
     assert "START cover_letter" in log_text
@@ -206,7 +206,7 @@ def _evaluation() -> VacancyEvaluation:
         total_possible_score=0.0,
         explicit_skill_count=2,
         evidence_sufficient=False,
-        recommended_resume=RecommendedResume.JAVA_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
     )
 
@@ -221,7 +221,7 @@ def test_cover_letter_malformed_json_retry_and_payload() -> None:
                     {
                         "language": "en",
                         "cover_letter": _VALID_EN_SUMMARY,
-                        "used_resume": "java-backend",
+                        "used_resume": "java",
                     }
                 )
             ),
@@ -233,7 +233,7 @@ def test_cover_letter_malformed_json_retry_and_payload() -> None:
         candidate_profile="Java Backend Engineer with around seven years of commercial backend experience.",
         vacancy_text="vacancy",
         analysis=_evaluation(),
-        recommended_resume="java-backend",
+        recommended_resume="java",
     )
     assert route.call_count == 2
     assert result.language == "en"
@@ -242,6 +242,9 @@ def test_cover_letter_malformed_json_retry_and_payload() -> None:
     request_payload = json.loads(route.calls.last.request.content)
     assert request_payload["temperature"] == 0.2
     assert request_payload["max_tokens"] == 500
+    user_content = request_payload["messages"][1]["content"]
+    assert user_content.count('"recommended_resume"') == 1
+    assert '"recommended_resume": "java"' in user_content
 
 
 @respx.mock
@@ -909,6 +912,7 @@ def test_validate_rejects_duplicated_backend_backend() -> None:
             candidate_profile="Java Backend Engineer with around seven years of experience.",
             preferred_language="en",
             grammatical_gender="neutral",
+            recommended_resume="java-backend",
         )
 
 
@@ -968,6 +972,7 @@ def test_validate_rejects_how_my_experience_sentence() -> None:
             candidate_profile="Java Backend Engineer with around seven years of experience.",
             preferred_language="en",
             grammatical_gender="neutral",
+            recommended_resume="java-backend",
         )
 
 

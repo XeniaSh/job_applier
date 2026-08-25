@@ -40,7 +40,7 @@ def _evaluation(
         total_possible_score=0.0,
         explicit_skill_count=2,
         evidence_sufficient=True,
-        recommended_resume=RecommendedResume.JAVA_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
         warning_signals=warning_signals or [],
     )

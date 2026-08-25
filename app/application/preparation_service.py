@@ -16,6 +16,7 @@ from app.llm_client import LLMClient
 from app.models import CoverLetterResult, VacancyEvaluation
 from app.profile_loader import CandidateProfileContext, load_candidate_profile_context
 from app.prompt_loader import load_cover_letter_prompt
+from app.resume_selector import ResumeSelector
 from app.vacancy_analyzer import VacancyAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ PREPARE_PHASE_ORDER = (
     "application_answers",
     "imap_fetch",
     "analysis",
+    "resume_selection",
     "cover_letter",
     "validation",
     "serialization",
@@ -92,6 +94,7 @@ class PreparationService:
         grammatical_gender: str = "neutral",
         prepare_cache: PrepareCacheStore | None = None,
         allow_imap_fallback: bool = True,
+        resume_selector: ResumeSelector | None = None,
     ) -> None:
         self._analyzer = analyzer
         self._llm_client = llm_client
@@ -101,6 +104,7 @@ class PreparationService:
         self._grammatical_gender = grammatical_gender
         self._prepare_cache = prepare_cache
         self._allow_imap_fallback = allow_imap_fallback
+        self._resume_selector = resume_selector
         self._profile_context: CandidateProfileContext | None = None
 
     def prepare(self, source: str, external_id: str) -> PreparedApplication:
@@ -205,8 +209,18 @@ class PreparationService:
             phase_ms["analysis"] = int((perf_counter() - analysis_started) * 1000)
             logger.info("END analysis +%dms", phase_ms["analysis"])
 
-        recommended_resume = analysis.recommended_resume.value
-        resume_path, resume_warning = resolve_resume_path(self._resumes_dir, recommended_resume)
+        logger.info("START resume_selection")
+        selection_started = perf_counter()
+        if self._resume_selector is not None:
+            selection = self._resume_selector.select(analysis_text)
+            selected_profile = self._resume_selector.selected_profile(selection)
+            recommended_resume = selected_profile.id
+            resume_path, resume_warning = resolve_configured_resume_path(selected_profile.pdf)
+        else:
+            recommended_resume = analysis.recommended_resume.value
+            resume_path, resume_warning = resolve_resume_path(self._resumes_dir, recommended_resume)
+        phase_ms["resume_selection"] = int((perf_counter() - selection_started) * 1000)
+        logger.info("END resume_selection +%dms", phase_ms["resume_selection"])
 
         logger.info("START cover_letter")
         cover_started = perf_counter()
@@ -261,7 +275,7 @@ class PreparationService:
         logger.info(
             "Prepare timing breakdown llm_calls=%d model=%s analysis_cached=%s imap_fallback=%s "
             "resume_generation=%dms application_answers=%dms imap_fetch=%dms analysis=%dms "
-            "cover_letter=%dms validation=%dms serialization=%dms total=%dms",
+            "resume_selection=%dms cover_letter=%dms validation=%dms serialization=%dms total=%dms",
             timing_breakdown["llm_calls"],
             model,
             analysis_cached,
@@ -270,6 +284,7 @@ class PreparationService:
             phase_ms.get("application_answers", 0),
             phase_ms.get("imap_fetch", 0),
             phase_ms.get("analysis", 0),
+            phase_ms.get("resume_selection", 0),
             phase_ms.get("cover_letter", 0),
             phase_ms.get("validation", 0),
             phase_ms.get("serialization", 0),
@@ -428,6 +443,13 @@ def resolve_resume_path(resumes_dir: Path, resume_name: str) -> tuple[Path | Non
     if candidate.exists() and candidate.is_file():
         return candidate, None
     return None, f"Resume file missing: {resumes_dir.as_posix()}/{safe_name}.pdf"
+
+
+def resolve_configured_resume_path(pdf_path: Path) -> tuple[Path | None, str | None]:
+    candidate = pdf_path.resolve()
+    if candidate.exists() and candidate.is_file():
+        return candidate, None
+    return None, f"Resume file missing: {pdf_path.as_posix()}"
 
 
 def _cache_has_usable_vacancy(cached: dict | None) -> bool:

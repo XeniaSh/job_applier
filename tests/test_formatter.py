@@ -14,7 +14,7 @@ def test_formatter_omits_empty_gaps_and_nuances_sections() -> None:
         matched_points=["java", "spring boot"],
         gaps=[],
         nuances=[],
-        recommended_resume=RecommendedResume.JAVA_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
     )
 
@@ -32,7 +32,7 @@ def test_formatter_shows_no_matches_text() -> None:
         matched_points=[],
         gaps=["redis"],
         nuances=[],
-        recommended_resume=RecommendedResume.JAVA_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
     )
 
@@ -52,7 +52,7 @@ def test_formatter_applies_output_limits_and_is_stable() -> None:
         gaps=["redis", "oracle", "elasticsearch", "mongodb"],
         nuances=["проектный формат", "удаленная работа не указана", "нужен timezone overlap", "еще один нюанс"],
         match_percentage=88.9,
-        recommended_resume=RecommendedResume.FINTECH_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.FINTECH,
     )
 

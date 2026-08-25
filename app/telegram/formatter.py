@@ -268,9 +268,13 @@ def _escape(value: str) -> str:
 
 def _human_resume_name(value: str) -> str:
     mapping = {
+        "java": "Java Backend",
+        "java_ai": "Java Backend + AI",
+        # Persisted records created before resume profiles used profile IDs.
         "java-backend": "Java Backend",
         "kotlin-backend": "Kotlin Backend",
         "fintech-backend": "FinTech Backend",
+        "ai-adjacent-backend": "Java Backend + AI",
         "generic-backend": "Backend General",
     }
     if value in mapping:

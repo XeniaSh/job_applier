@@ -40,7 +40,7 @@ def _evaluation(decision: Decision = Decision.POTENTIAL_MATCH) -> VacancyEvaluat
         total_possible_score=0.0,
         explicit_skill_count=2,
         evidence_sufficient=False,
-        recommended_resume=RecommendedResume.JAVA_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
     )
 
@@ -1081,7 +1081,21 @@ def test_telegram_cache_resumes_warmup_and_force(monkeypatch, tmp_path) -> None:
     resumes_dir = tmp_path / "resumes"
     resumes_dir.mkdir(parents=True, exist_ok=True)
     (resumes_dir / "java-backend.pdf").write_bytes(b"%PDF one")
-    (resumes_dir / "kotlin-backend.pdf").write_bytes(b"%PDF two")
+    (resumes_dir / "java-backend-ai.pdf").write_bytes(b"%PDF two")
+    profiles_path = tmp_path / "resume_profiles.yaml"
+    profiles_path.write_text(
+        """
+profiles:
+  - id: java
+    description: General Java backend profile.
+    pdf: resumes/java-backend.pdf
+  - id: java_ai
+    description: Java backend profile with AI experience.
+    pdf: resumes/java-backend-ai.pdf
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RESUME_PROFILES_PATH", str(profiles_path))
     db_path = tmp_path / "jobs.db"
 
     class FakeClient:
@@ -1109,18 +1123,17 @@ def test_telegram_cache_resumes_warmup_and_force(monkeypatch, tmp_path) -> None:
 
     first = CliRunner().invoke(cli_module.app, ["telegram-cache-resumes"])
     assert first.exit_code == 0
-    assert "java-backend: uploaded" in first.output
-    assert "kotlin-backend: uploaded" in first.output
-    assert "fintech-backend: missing" in first.output
+    assert "java: uploaded" in first.output
+    assert "java_ai: uploaded" in first.output
 
     second = CliRunner().invoke(cli_module.app, ["telegram-cache-resumes"])
     assert second.exit_code == 0
-    assert "java-backend: cached" in second.output
-    assert "kotlin-backend: cached" in second.output
+    assert "java: cached" in second.output
+    assert "java_ai: cached" in second.output
 
-    forced = CliRunner().invoke(cli_module.app, ["telegram-cache-resumes", "--resume", "java-backend", "--force"])
+    forced = CliRunner().invoke(cli_module.app, ["telegram-cache-resumes", "--resume", "java", "--force"])
     assert forced.exit_code == 0
-    assert "java-backend: uploaded" in forced.output
+    assert "java: uploaded" in forced.output
 
 
 def test_prepare_callback_sets_loading_state(monkeypatch) -> None:

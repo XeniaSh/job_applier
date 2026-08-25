@@ -64,7 +64,7 @@ def test_vacancy_analyzer_uses_loaders_and_client() -> None:
     assert result.nuances == ["full-time", "не указаны часы пересечения по таймзоне"]
     assert "design services" not in result.nuances
     assert "code review" not in result.nuances
-    assert result.recommended_resume == RecommendedResume.JAVA_BACKEND
+    assert result.recommended_resume == RecommendedResume.JAVA
     assert result.recommended_cover_template == RecommendedCoverTemplate.GENERIC
     assert fake_client.called_with == {
         "prompt": "PROMPT_CONTENT",
@@ -503,7 +503,7 @@ def test_partial_generic_backend_developer_becomes_potential_not_ignore() -> Non
     assert result.decision == Decision.POTENTIAL_MATCH
     assert result.match_percentage is None
     assert result.gaps == []
-    assert result.recommended_resume == RecommendedResume.JAVA_BACKEND
+    assert result.recommended_resume == RecommendedResume.JAVA
     assert any("нет полного описания и стека" in nuance for nuance in result.nuances)
 
 

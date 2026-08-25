@@ -50,7 +50,7 @@ class _FakeAnalyzer:
             match_percentage=None,
             matched_score=0.0,
             total_possible_score=0.0,
-            recommended_resume=RecommendedResume.JAVA_BACKEND,
+            recommended_resume=RecommendedResume.JAVA,
             recommended_cover_template=RecommendedCoverTemplate.GENERIC,
         )
 

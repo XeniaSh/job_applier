@@ -189,7 +189,7 @@ class VacancyAnalyzer:
                 decision = Decision.POTENTIAL_MATCH
                 match_percentage = None
                 gaps = []
-                recommended_resume = RecommendedResume.JAVA_BACKEND
+                recommended_resume = RecommendedResume.JAVA
             if incomplete_title_class == "hard_negative":
                 decision = Decision.IGNORE
             if incomplete_title_class in {"java_qa", "java_android"}:
@@ -292,7 +292,7 @@ def _build_deterministic_evaluation(
         Decision.IGNORE: f"Ignored from title: {title}",
     }[decision]
 
-    recommended = RecommendedResume.KOTLIN_BACKEND if "kotlin" in classification.jvm_hits else RecommendedResume.JAVA_BACKEND
+    recommended = RecommendedResume.JAVA
     return VacancyEvaluation(
         decision=decision,
         summary=summary,
@@ -460,13 +460,9 @@ def _select_gaps_for_output(
 
 def _recommend_resume(role_type: str) -> RecommendedResume:
     role = role_type.lower()
-    if "kotlin" in role:
-        return RecommendedResume.KOTLIN_BACKEND
     if "ai" in role:
-        return RecommendedResume.AI_ADJACENT_BACKEND
-    if "fintech" in role:
-        return RecommendedResume.FINTECH_BACKEND
-    return RecommendedResume.JAVA_BACKEND
+        return RecommendedResume.JAVA_AI
+    return RecommendedResume.JAVA
 
 
 def _recommend_cover_template(role_type: str, summary: str) -> RecommendedCoverTemplate:

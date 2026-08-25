@@ -30,7 +30,7 @@ def _evaluation(decision: Decision = Decision.POTENTIAL_MATCH) -> VacancyEvaluat
         total_possible_score=0.0,
         explicit_skill_count=1,
         evidence_sufficient=True,
-        recommended_resume=RecommendedResume.JAVA_BACKEND,
+        recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
     )
 
