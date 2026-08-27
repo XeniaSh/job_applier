@@ -2,6 +2,7 @@ from pathlib import Path
 import inspect
 import re
 import threading
+import time
 
 from typer.testing import CliRunner
 
@@ -795,10 +796,17 @@ def test_run_counters_use_current_cycle_items_only(monkeypatch, tmp_path: Path) 
 def test_run_repeated_cycles_produce_stable_logs(monkeypatch, tmp_path: Path) -> None:
     _set_env(monkeypatch, tmp_path, interval=1)
     _bootstrap_common(monkeypatch)
+    cycles = {"count": 0}
+
+    def collect_and_count(self):
+        _ = self
+        cycles["count"] += 1
+        return [_vacancy(source="linkedin-email", external_id="1", title="Role")]
+
     monkeypatch.setattr(
         cli_module,
         "LinkedInEmailCollector",
-        lambda **kwargs: type("L", (), {"SOURCE": "linkedin-email", "collect": lambda self: [_vacancy(source="linkedin-email", external_id="1", title="Role")]})(),
+        lambda **kwargs: type("L", (), {"SOURCE": "linkedin-email", "collect": collect_and_count})(),
     )
     monkeypatch.setattr(cli_module, "GreenhouseCollector", lambda **kwargs: type("G", (), {"SOURCE": "greenhouse", "collect": lambda self: []})())
     monkeypatch.setattr(
@@ -807,23 +815,14 @@ def test_run_repeated_cycles_produce_stable_logs(monkeypatch, tmp_path: Path) ->
         lambda: type("S", (), {"is_seen": lambda self, source, external_id: True, "mark_seen": lambda self, source, external_id: None})(),
     )
     monkeypatch.setattr(cli_module, "TelegramClient", lambda *args, **kwargs: type("T", (), {"send_vacancy_card": lambda self, card: None})())
-    monotonic_values = {"i": 0.0}
 
-    def fake_monotonic():
-        monotonic_values["i"] += 1.0
-        return monotonic_values["i"]
-
-    monkeypatch.setattr(cli_module.time, "monotonic", fake_monotonic)
-
-    calls = {"count": 0}
-
+    # Cycles run on the pipeline thread now, so shutdown is driven by cycle count
+    # instead of by the number of polls the main loop performed.
     def fake_poll(**kwargs):
-        if int(kwargs.get("timeout", 0) or 0) == 0:
-            return kwargs.get("offset"), 0
-        calls["count"] += 1
-        if calls["count"] >= 4:
+        if cycles["count"] >= 2:
             raise KeyboardInterrupt()
-        return None, 0
+        time.sleep(0.01)
+        return kwargs.get("offset"), 0
 
     monkeypatch.setattr(cli_module, "_poll_telegram_actions_once", fake_poll)
     result = CliRunner().invoke(cli_module.app, ["run"])

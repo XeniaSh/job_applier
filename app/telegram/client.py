@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import threading
 from pathlib import Path
 
 from app.telegram.formatter import (
@@ -10,6 +11,9 @@ from app.telegram.formatter import (
     format_telegram_card_html,
 )
 from app.telegram.models import TelegramDocumentRef, TelegramInlineButton, TelegramMessageRef, TelegramVacancyCard
+
+
+_DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
 
 
 class TelegramRequestError(Exception):
@@ -40,6 +44,25 @@ class TelegramClient:
         self._bot_token = bot_token
         self._chat_id = str(chat_id)
         self._base_url = f"https://api.telegram.org/bot{bot_token}"
+        self._client: httpx.Client | None = None
+        self._client_lock = threading.Lock()
+
+    def _http_client(self) -> httpx.Client:
+        """Return the shared connection pool, created on first use."""
+        with self._client_lock:
+            if self._client is None:
+                self._client = httpx.Client(timeout=_DEFAULT_TIMEOUT)
+            return self._client
+
+    def close(self) -> None:
+        with self._client_lock:
+            client = self._client
+            self._client = None
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
     def send_vacancy_card(self, card: TelegramVacancyCard) -> TelegramMessageRef:
         text = format_telegram_card_html(card)
@@ -180,15 +203,15 @@ class TelegramClient:
         url = f"{self._base_url}/sendDocument"
         try:
             with open(file_path, "rb") as handle:
-                with httpx.Client(timeout=timeout) as client:
-                    data: dict[str, object] = {"chat_id": str(chat_id or self._chat_id), "caption": caption}
-                    if reply_to_message_id is not None and reply_to_message_id > 0:
-                        data["reply_to_message_id"] = int(reply_to_message_id)
-                    response = client.post(
-                        url,
-                        data=data,
-                        files={"document": (Path(file_path).name, handle, content_type)},
-                    )
+                data: dict[str, object] = {"chat_id": str(chat_id or self._chat_id), "caption": caption}
+                if reply_to_message_id is not None and reply_to_message_id > 0:
+                    data["reply_to_message_id"] = int(reply_to_message_id)
+                response = self._http_client().post(
+                    url,
+                    data=data,
+                    files={"document": (Path(file_path).name, handle, content_type)},
+                    timeout=timeout,
+                )
         except OSError as exc:
             raise TelegramRequestError(
                 "Telegram API request failed.",
@@ -236,8 +259,7 @@ class TelegramClient:
         timeout = httpx.Timeout(connect=5.0, read=read_timeout, write=10.0, pool=5.0)
         url = f"{self._base_url}/{endpoint}"
         try:
-            with httpx.Client(timeout=timeout) as client:
-                response = client.post(url, json=payload)
+            response = self._http_client().post(url, json=payload, timeout=timeout)
         except httpx.TimeoutException as exc:
             raise TelegramRequestError(
                 "Telegram API request failed.",

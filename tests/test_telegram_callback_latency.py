@@ -282,15 +282,18 @@ def test_applied_callback_processed_during_delivery_batch(tmp_path: Path) -> Non
     assert sent_count == 8
 
 
-def test_run_pipeline_source_interleaves_timeout_zero_polls() -> None:
+def test_run_pipeline_polls_callbacks_off_the_pipeline_thread() -> None:
     import inspect
 
     source = inspect.getsource(cli_module.run_pipeline)
-    assert "_poll_callbacks_now(timeout=0)" in source
-    assert source.count("_poll_callbacks_now(timeout=0)") >= 3
-    assert "poll_callbacks=lambda: _poll_callbacks_now(timeout=0)" in source
+    # Cycles run on their own thread, so the callback loop never waits for them.
+    assert 'name="pipeline"' in source
+    assert "target=_pipeline_worker_loop" in source
     assert "_poll_callbacks_now(timeout=poll_interval)" in source
-    # Delivery must not poll after every card; interval is shared via helper constant.
+    # Polling is no longer interleaved into the cycle; it is continuous instead.
+    assert "_poll_callbacks_now(timeout=0)" not in source
+    assert "poll_callbacks=" not in source
+    # Delivery keeps the opt-in hook for callers that still drive polling themselves.
     assert "poll_every_n_sent" in inspect.getsource(cli_module._deliver_pipeline_items)
     assert cli_module._TELEGRAM_POLL_EVERY_N_SENT_CARDS >= 3
     assert cli_module._TELEGRAM_POLL_EVERY_N_SENT_CARDS <= 5

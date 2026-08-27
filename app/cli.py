@@ -789,7 +789,6 @@ def run_pipeline(
 
     interval = max(1, int(settings.pipeline_interval_seconds))
     poll_interval = max(1, int(settings.telegram_poll_interval_seconds))
-    next_cycle_monotonic = 0.0
     offset_raw = deliveries.get_state("telegram_update_offset")
     offset = int(offset_raw) if offset_raw and offset_raw.isdigit() else None
     prepare_stop_event = threading.Event()
@@ -839,7 +838,11 @@ def run_pipeline(
             if timeout > 0:
                 time.sleep(poll_interval)
 
-    try:
+    def _pipeline_worker_loop() -> None:
+        # Cycles run on their own thread so collect/analyze/deliver never delays
+        # the Telegram callback loop. The first cycle always completes before the
+        # stop event is checked, mirroring the previous inline behaviour.
+        next_cycle_monotonic = 0.0
         while True:
             now = time.monotonic()
             if now >= next_cycle_monotonic:
@@ -856,7 +859,6 @@ def run_pipeline(
                         ),
                     )
                     collect_ms = max(0, int((time.monotonic() - collect_start) * 1000))
-                    _poll_callbacks_now(timeout=0)
                     analyze_start = time.monotonic()
                     _analyze_pipeline_items(
                         analyzer=analyzer,
@@ -868,16 +870,13 @@ def run_pipeline(
                         verbose=verbose,
                     )
                     analyze_ms = max(0, int((time.monotonic() - analyze_start) * 1000))
-                    _poll_callbacks_now(timeout=0)
                     telegram_start = time.monotonic()
                     _deliver_pipeline_items(
                         pipeline=pipeline_result,
                         deliveries=deliveries,
                         telegram_client=telegram_client,
                         chat_id=settings.telegram_chat_id,
-                        poll_callbacks=lambda: _poll_callbacks_now(timeout=0),
                     )
-                    _poll_callbacks_now(timeout=0)
                     telegram_ms = max(0, int((time.monotonic() - telegram_start) * 1000))
                     cycle_ms = max(0, int((time.monotonic() - cycle_start) * 1000))
 
@@ -990,7 +989,8 @@ def run_pipeline(
                         _run_log(f"No vacancies analyzed: {no_work_reason}", component="main")
                     _run_log(
                         f"Timing: collect={collect_ms}ms analyze={analyze_ms}ms "
-                        f"telegram={telegram_ms}ms cycle={cycle_ms}ms",
+                        f"telegram={telegram_ms}ms cycle={cycle_ms}ms "
+                        f"thread={threading.current_thread().name}",
                         component="main",
                     )
                     if verbose:
@@ -1002,13 +1002,38 @@ def run_pipeline(
                     _run_log(f"Pipeline cycle failed: {exc}", component="main")
                 next_cycle_monotonic = time.monotonic() + interval
 
+            if pipeline_stop_event.wait(timeout=_PIPELINE_STOP_CHECK_SECONDS):
+                break
+
+    pipeline_stop_event = threading.Event()
+    pipeline_thread = threading.Thread(target=_pipeline_worker_loop, name="pipeline", daemon=True)
+    if verbose:
+        _run_log(f"Pipeline thread daemon={pipeline_thread.daemon}", component="main")
+    pipeline_thread.start()
+
+    main_thread = threading.current_thread()
+    previous_thread_name = main_thread.name
+    main_thread.name = "callback-poller"
+    try:
+        while True:
             _poll_callbacks_now(timeout=poll_interval)
     except KeyboardInterrupt:
         _run_log("Shutdown requested (KeyboardInterrupt)", component="main")
     finally:
+        main_thread.name = previous_thread_name
         _run_log("Shutdown finally block entered", component="main")
         _run_log("Stopping Telegram poller", component="main")
         _run_log("Poller exiting", component="poller")
+        _run_log("Signaling pipeline thread", component="main")
+        pipeline_stop_event.set()
+        try:
+            pipeline_thread.join(timeout=_PIPELINE_JOIN_TIMEOUT_SECONDS)
+            if pipeline_thread.is_alive():
+                _run_log("Pipeline thread still running; leaving it to the daemon exit", component="main")
+            else:
+                _run_log("Pipeline thread joined", component="main")
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Pipeline join failed: {exc}", component="main")
         _run_log("Signaling prepare worker", component="main")
         try:
             prepare_stop_event.set()
@@ -1026,6 +1051,12 @@ def run_pipeline(
         except BaseException as exc:  # noqa: BLE001
             _run_log(f"BaseException during worker join: {type(exc).__name__}: {exc}", component="main")
             raise
+        try:
+            close_telegram_client = getattr(telegram_client, "close", None)
+            if callable(close_telegram_client):
+                close_telegram_client()
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Telegram client close failed: {exc}", component="main")
         _run_log("Releasing singleton lock", component="main")
         try:
             lock.release()
@@ -1642,7 +1673,15 @@ def _analyze_pipeline_items(
 
 
 # How often to drain Telegram callbacks while sending a vacancy batch.
+# Only used when a caller passes an explicit poll_callbacks hook; `run` now polls
+# on its own thread and does not interleave polls into delivery.
 _TELEGRAM_POLL_EVERY_N_SENT_CARDS = 4
+
+# How often the pipeline thread checks for shutdown between cycles.
+_PIPELINE_STOP_CHECK_SECONDS = 0.2
+
+# How long shutdown waits for an in-flight pipeline cycle before giving up on it.
+_PIPELINE_JOIN_TIMEOUT_SECONDS = 60.0
 
 
 def _deliver_pipeline_items(
@@ -2375,8 +2414,20 @@ def _process_callback_update(
     resume_cache_service: ResumeCacheService | None = None,
     timing_logger: Callable[[str], None] | None = None,
     undo_window_seconds: int | None = None,
+    received_at: float | None = None,
 ) -> None:
-    received_at = time.monotonic()
+    handler_started_at = time.monotonic()
+    database_ms = 0.0
+    ui_update_ms = 0.0
+
+    def run_db(operation: Callable[[], object]) -> object:
+        nonlocal database_ms
+        started_at = time.monotonic()
+        try:
+            return operation()
+        finally:
+            database_ms += (time.monotonic() - started_at) * 1000
+
     callback = update.get("callback_query")
     if not isinstance(callback, dict):
         return
@@ -2404,15 +2455,17 @@ def _process_callback_update(
         return
 
     message_id = int(message.get("message_id", 0))
-    title, company, url = _resolve_card_context(
-        storage=storage,
-        message=message,
-        source=source,
-        external_id=external_id,
+    title, company, url = run_db(  # type: ignore[assignment]
+        lambda: _resolve_card_context(
+            storage=storage,
+            message=message,
+            source=source,
+            external_id=external_id,
+        )
     )
 
     get_delivery = getattr(storage, "get_delivery", None)
-    current = get_delivery(source, external_id) if callable(get_delivery) else None
+    current = run_db(lambda: get_delivery(source, external_id)) if callable(get_delivery) else None
     current_status = current.status if current is not None else None
     window_seconds = undo_window_seconds
     if window_seconds is None:
@@ -2470,6 +2523,7 @@ def _process_callback_update(
                 timing_logger=timing_logger,
                 already_text="Вакансия уже пропущена",
                 success_text="Вакансия пропущена",
+                db_timer=run_db,
             )
         elif action == "applied":
             _handle_terminal_action(
@@ -2491,6 +2545,7 @@ def _process_callback_update(
                 timing_logger=timing_logger,
                 already_text="Отклик уже отмечен",
                 success_text="Отклик отмечен как отправленный",
+                db_timer=run_db,
             )
         elif action == "undo":
             _handle_undo_action(
@@ -2689,6 +2744,7 @@ def _process_callback_update(
             answer_once("Не удалось обновить статус")
     finally:
         if should_reconcile:
+            reconcile_started_at = time.monotonic()
             try:
                 _reconcile_vacancy_message(
                     storage=storage,
@@ -2709,11 +2765,22 @@ def _process_callback_update(
                     external_id,
                     exc,
                 )
+            ui_update_ms += (time.monotonic() - reconcile_started_at) * 1000
         if timing_logger is not None:
-            ack_ms = int((answer_at - received_at) * 1000) if answer_at is not None else -1
-            total_ms = int((time.monotonic() - received_at) * 1000)
+            finished_at = time.monotonic()
+            started_at = received_at if received_at is not None else handler_started_at
+            dispatch_delay_ms = int((handler_started_at - started_at) * 1000)
+            ack_ms = int((answer_at - handler_started_at) * 1000) if answer_at is not None else -1
             timing_logger(
-                f"Callback {action}:{source}:{external_id} ack_ms={ack_ms} total_ms={total_ms} answered={answer_state}"
+                f"Callback {action}:{source}:{external_id} "
+                f"thread={threading.current_thread().name} "
+                f"callback_dispatch_delay_ms={dispatch_delay_ms} "
+                f"callback_processing_ms={int((finished_at - handler_started_at) * 1000)} "
+                f"database_ms={int(database_ms)} "
+                f"ui_update_ms={int(ui_update_ms)} "
+                f"ack_ms={ack_ms} "
+                f"total_ms={int((finished_at - started_at) * 1000)} "
+                f"answered={answer_state}"
             )
 
 
@@ -2737,7 +2804,9 @@ def _handle_terminal_action(
     timing_logger: Callable[[str], None] | None,
     already_text: str,
     success_text: str,
+    db_timer: Callable[[Callable[[], object]], object] | None = None,
 ) -> None:
+    run_db = db_timer if db_timer is not None else (lambda operation: operation())
     logger.info("Callback %s received vacancy=%s:%s", action.lower(), source, external_id)
     if current_status == new_status:
         answer_once(already_text)
@@ -2755,25 +2824,29 @@ def _handle_terminal_action(
     apply_fn = getattr(storage, "apply_terminal_action", None)
     if callable(apply_fn):
         try:
-            action_id = apply_fn(
-                source=source,
-                external_id=external_id,
-                chat_id=configured_chat_id,
-                new_status=new_status,
-                previous_status=previous_status,
-                action=action,
+            action_id = run_db(
+                lambda: apply_fn(
+                    source=source,
+                    external_id=external_id,
+                    chat_id=configured_chat_id,
+                    new_status=new_status,
+                    previous_status=previous_status,
+                    action=action,
+                )
             )
         except KeyError:
             logger.info("Action rejected vacancy=%s:%s reason=unknown_vacancy", source, external_id)
             return
     else:
-        storage.update_delivery_and_history(
-            source=source,
-            external_id=external_id,
-            chat_id=configured_chat_id,
-            delivery_status=new_status,
-            history_status=new_status,
-            timestamp_field="applied_at" if new_status == STATUS_APPLIED else "skipped_at",
+        run_db(
+            lambda: storage.update_delivery_and_history(
+                source=source,
+                external_id=external_id,
+                chat_id=configured_chat_id,
+                delivery_status=new_status,
+                history_status=new_status,
+                timestamp_field="applied_at" if new_status == STATUS_APPLIED else "skipped_at",
+            )
         )
         action_id = None
 
@@ -4361,6 +4434,9 @@ def _poll_telegram_actions_once(
     undo_window_seconds: int | None = None,
 ) -> tuple[int | None, int]:
     updates = client.get_updates(offset=offset, timeout=timeout)
+    # Stamped once per batch: measures how long an update waited behind the
+    # updates ahead of it in the same getUpdates response.
+    received_at = time.monotonic()
     next_offset = offset
     prepare_requests = 0
     for update in updates:
@@ -4385,6 +4461,7 @@ def _poll_telegram_actions_once(
                 resume_cache_service=resume_cache_service,
                 timing_logger=timing_logger,
                 undo_window_seconds=undo_window_seconds,
+                received_at=received_at,
             )
         except Exception as exc:  # noqa: BLE001
             if timing_logger is not None:
