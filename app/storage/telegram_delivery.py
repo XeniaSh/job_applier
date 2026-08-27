@@ -33,6 +33,15 @@ ALLOWED_STATUSES = {
 }
 HISTORY_STATUS_FOUND = "FOUND"
 
+# Auxiliary Telegram messages created by the Prepare workflow. A non-null column
+# means the message still has to be deleted.
+_AUX_MESSAGE_COLUMNS = {
+    "resume": "resume_message_id",
+    "cover": "cover_letter_message_id",
+    "txt": "cover_letter_txt_message_id",
+    "pdf": "cover_letter_pdf_message_id",
+}
+
 
 class TelegramDeliveryStorage:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
@@ -1141,6 +1150,44 @@ class TelegramDeliveryStorage:
                 ),
             )
             conn.commit()
+
+    def clear_preparation_aux_message_id(self, *, source: str, external_id: str, kind: str) -> None:
+        column = _AUX_MESSAGE_COLUMNS.get(kind)
+        if column is None:
+            raise ValueError(f"Unknown auxiliary message kind: {kind}")
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                update application_preparations
+                set {column} = null
+                where source = ? and external_id = ?
+                """,
+                (source, external_id),
+            )
+            conn.commit()
+
+    def list_pending_aux_cleanups(self, *, limit: int = 50) -> list[tuple[str, str, str]]:
+        """Terminal deliveries whose preparation still holds undeleted message ids."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select d.source, d.external_id, d.chat_id
+                from application_preparations p
+                join telegram_deliveries d
+                    on d.source = p.source and d.external_id = p.external_id
+                where d.status in (?, ?)
+                  and (
+                        p.resume_message_id is not null
+                     or p.cover_letter_message_id is not null
+                     or p.cover_letter_txt_message_id is not null
+                     or p.cover_letter_pdf_message_id is not null
+                  )
+                order by d.source, d.external_id
+                limit ?
+                """,
+                (STATUS_APPLIED, STATUS_SKIPPED, int(limit)),
+            ).fetchall()
+        return [(str(row[0]), str(row[1]), str(row[2])) for row in rows]
 
     def clear_preparation_aux_message_ids(self, *, source: str, external_id: str) -> None:
         with self._connect() as conn:

@@ -1,7 +1,8 @@
 from pathlib import Path
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
+import heapq
 import html
 import inspect
 import json
@@ -810,6 +811,20 @@ def run_pipeline(
         _run_log(f"Worker thread daemon={prepare_thread.daemon}", component="main")
     prepare_thread.start()
 
+    cleanup_scheduler = _CleanupScheduler()
+    cleanup_stop_event = threading.Event()
+    cleanup_thread = threading.Thread(
+        target=_cleanup_worker_loop,
+        kwargs={
+            "telegram_client": telegram_client,
+            "scheduler": cleanup_scheduler,
+            "stop_event": cleanup_stop_event,
+        },
+        name="cleanup-worker",
+        daemon=True,
+    )
+    cleanup_thread.start()
+
     _run_log("Job Applier started.", component="main")
     _run_log("Press Ctrl+C to stop.", component="main")
     _run_log("Poller started.", component="poller")
@@ -828,6 +843,7 @@ def run_pipeline(
                 resume_cache_service=callback_resume_cache,
                 timing_logger=_component_log("poller") if verbose else None,
                 undo_window_seconds=settings.undo_window_seconds,
+                cleanup_scheduler=cleanup_scheduler,
             )
             if prepare_requests > 0:
                 _run_log("Prepare request received", component="poller")
@@ -1051,6 +1067,20 @@ def run_pipeline(
         except BaseException as exc:  # noqa: BLE001
             _run_log(f"BaseException during worker join: {type(exc).__name__}: {exc}", component="main")
             raise
+        _run_log("Signaling cleanup worker", component="main")
+        try:
+            cleanup_stop_event.set()
+            cleanup_scheduler.wakeup()
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Failed signaling cleanup worker: {exc}", component="main")
+        try:
+            cleanup_thread.join(timeout=_CLEANUP_JOIN_TIMEOUT_SECONDS)
+            if cleanup_thread.is_alive():
+                _run_log("Cleanup thread still running; leaving it to the daemon exit", component="main")
+            else:
+                _run_log("Cleanup worker joined", component="main")
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Cleanup join failed: {exc}", component="main")
         try:
             close_telegram_client = getattr(telegram_client, "close", None)
             if callable(close_telegram_client):
@@ -2415,10 +2445,12 @@ def _process_callback_update(
     timing_logger: Callable[[str], None] | None = None,
     undo_window_seconds: int | None = None,
     received_at: float | None = None,
+    cleanup_scheduler: "_CleanupScheduler | None" = None,
 ) -> None:
     handler_started_at = time.monotonic()
     database_ms = 0.0
     ui_update_ms = 0.0
+    cleanup_queue_ms = 0.0
 
     def run_db(operation: Callable[[], object]) -> object:
         nonlocal database_ms
@@ -2427,6 +2459,14 @@ def _process_callback_update(
             return operation()
         finally:
             database_ms += (time.monotonic() - started_at) * 1000
+
+    def run_cleanup(operation: Callable[[], object]) -> object:
+        nonlocal cleanup_queue_ms
+        started_at = time.monotonic()
+        try:
+            return operation()
+        finally:
+            cleanup_queue_ms += (time.monotonic() - started_at) * 1000
 
     callback = update.get("callback_query")
     if not isinstance(callback, dict):
@@ -2524,6 +2564,8 @@ def _process_callback_update(
                 already_text="Вакансия уже пропущена",
                 success_text="Вакансия пропущена",
                 db_timer=run_db,
+                cleanup_scheduler=cleanup_scheduler,
+                cleanup_timer=run_cleanup,
             )
         elif action == "applied":
             _handle_terminal_action(
@@ -2546,6 +2588,8 @@ def _process_callback_update(
                 already_text="Отклик уже отмечен",
                 success_text="Отклик отмечен как отправленный",
                 db_timer=run_db,
+                cleanup_scheduler=cleanup_scheduler,
+                cleanup_timer=run_cleanup,
             )
         elif action == "undo":
             _handle_undo_action(
@@ -2778,6 +2822,7 @@ def _process_callback_update(
                 f"callback_processing_ms={int((finished_at - handler_started_at) * 1000)} "
                 f"database_ms={int(database_ms)} "
                 f"ui_update_ms={int(ui_update_ms)} "
+                f"cleanup_queue_ms={int(cleanup_queue_ms)} "
                 f"ack_ms={ack_ms} "
                 f"total_ms={int((finished_at - started_at) * 1000)} "
                 f"answered={answer_state}"
@@ -2805,8 +2850,11 @@ def _handle_terminal_action(
     already_text: str,
     success_text: str,
     db_timer: Callable[[Callable[[], object]], object] | None = None,
+    cleanup_scheduler: "_CleanupScheduler | None" = None,
+    cleanup_timer: Callable[[Callable[[], object]], object] | None = None,
 ) -> None:
     run_db = db_timer if db_timer is not None else (lambda operation: operation())
+    run_cleanup = cleanup_timer if cleanup_timer is not None else (lambda operation: operation())
     logger.info("Callback %s received vacancy=%s:%s", action.lower(), source, external_id)
     if current_status == new_status:
         answer_once(already_text)
@@ -2865,14 +2913,31 @@ def _handle_terminal_action(
             external_id,
             window_seconds,
         )
-    _cleanup_aux_messages(
-        storage=storage,
-        client=client,
-        source=source,
-        external_id=external_id,
-        chat_id=configured_chat_id,
-    )
-    _ = message_id, url, title, company, timing_logger
+    if cleanup_scheduler is not None:
+        queued = run_cleanup(
+            lambda: cleanup_scheduler.enqueue(
+                source=source,
+                external_id=external_id,
+                chat_id=configured_chat_id,
+            )
+        )
+        if timing_logger is not None:
+            timing_logger(
+                f"Cleanup QUEUED {source}:{external_id} "
+                f"thread={threading.current_thread().name} "
+                f"accepted={'yes' if queued else 'already-tracked'}"
+            )
+    else:
+        # poll-telegram-actions has no worker thread, so cleanup stays inline there.
+        _cleanup_aux_messages(
+            storage=storage,
+            client=client,
+            source=source,
+            external_id=external_id,
+            chat_id=configured_chat_id,
+            log=timing_logger,
+        )
+    _ = message_id, url, title, company
 
 
 def _handle_undo_action(
@@ -3224,6 +3289,45 @@ def _resolve_cover_letter_artifact_path(
     return None
 
 
+# Artifact messages created by the Prepare workflow, in deletion order.
+_CLEANUP_MESSAGE_KINDS: tuple[tuple[str, str], ...] = (
+    ("resume", "resume_message_id"),
+    ("cover", "cover_letter_message_id"),
+    ("txt", "cover_letter_txt_message_id"),
+    ("pdf", "cover_letter_pdf_message_id"),
+)
+
+# Telegram answers that prove the message can never be deleted again. Retrying
+# them would loop forever, so they count as cleanup being done.
+_CLEANUP_PERMANENT_MARKERS = (
+    "message to delete not found",
+    "message can't be deleted",
+    "message identifier is not specified",
+    "message_id_invalid",
+)
+
+
+def _classify_delete_failure(exc: Exception) -> str:
+    if not isinstance(exc, TelegramRequestError):
+        return "failure"
+    haystack = f"{getattr(exc, 'description', '') or ''} {exc}".lower()
+    if any(marker in haystack for marker in _CLEANUP_PERMANENT_MARKERS):
+        return "permanent success"
+    return "retry"
+
+
+def _clear_aux_message_id(
+    *,
+    storage: TelegramDeliveryStorage,
+    source: str,
+    external_id: str,
+    kind: str,
+) -> None:
+    clear_one = getattr(storage, "clear_preparation_aux_message_id", None)
+    if callable(clear_one):
+        clear_one(source=source, external_id=external_id, kind=kind)
+
+
 def _cleanup_aux_messages(
     *,
     storage: TelegramDeliveryStorage,
@@ -3231,25 +3335,83 @@ def _cleanup_aux_messages(
     source: str,
     external_id: str,
     chat_id: str,
-) -> None:
+    attempt: int = 1,
+    log: Callable[[str], None] | None = None,
+) -> bool:
+    """Delete leftover artifact messages. Returns True when nothing is left to do.
+
+    A message id is cleared only once Telegram confirms the message is gone, so an
+    interrupted run simply repeats the delete on the next attempt.
+    """
+    thread = threading.current_thread().name
+    started_at = time.monotonic()
+    if log is not None:
+        log(f"Cleanup START {source}:{external_id} attempt={attempt} thread={thread}")
+
     get_preparation = getattr(storage, "get_preparation", None)
     prep = get_preparation(source, external_id) if callable(get_preparation) else None
     if prep is None:
-        return
-    resume_message_id = getattr(prep, "resume_message_id", None)
-    cover_message_id = getattr(prep, "cover_letter_message_id", None)
-    cover_txt_message_id = getattr(prep, "cover_letter_txt_message_id", None)
-    cover_pdf_message_id = getattr(prep, "cover_letter_pdf_message_id", None)
-    for message_id in [resume_message_id, cover_message_id, cover_txt_message_id, cover_pdf_message_id]:
+        if log is not None:
+            log(
+                f"Cleanup FINISH {source}:{external_id} attempt={attempt} thread={thread} "
+                f"pending=0 cleanup_execution_ms={int((time.monotonic() - started_at) * 1000)}"
+            )
+        return True
+
+    pending = 0
+    deleted = 0
+    for kind, attribute in _CLEANUP_MESSAGE_KINDS:
+        message_id = getattr(prep, attribute, None)
         if not isinstance(message_id, int) or message_id <= 0:
             continue
+        delete_started_at = time.monotonic()
         try:
             client.delete_message(chat_id=chat_id, message_id=message_id)
-        except TelegramRequestError as exc:
-            logger.warning("Auxiliary Telegram message cleanup failed for %s:%s: %s", source, external_id, exc)
-    clear_aux = getattr(storage, "clear_preparation_aux_message_ids", None)
-    if callable(clear_aux):
-        clear_aux(source=source, external_id=external_id)
+            result = "success"
+        except Exception as exc:  # noqa: BLE001
+            result = _classify_delete_failure(exc)
+            if result == "retry":
+                logger.warning(
+                    "Auxiliary Telegram message cleanup failed for %s:%s kind=%s: %s",
+                    source,
+                    external_id,
+                    kind,
+                    exc,
+                )
+            elif result == "failure":
+                logger.exception(
+                    "Auxiliary Telegram message cleanup crashed for %s:%s kind=%s",
+                    source,
+                    external_id,
+                    kind,
+                )
+        delete_ms = int((time.monotonic() - delete_started_at) * 1000)
+        if result in {"success", "permanent success"}:
+            _clear_aux_message_id(storage=storage, source=source, external_id=external_id, kind=kind)
+            deleted += 1
+        else:
+            pending += 1
+        if log is not None:
+            log(
+                f"Cleanup delete {kind} {source}:{external_id} thread={thread} "
+                f"message_id={message_id} attempt={attempt} result={result} "
+                f"cleanup_execution_ms={delete_ms}"
+            )
+
+    # Legacy storages without per-kind clearing only get the bulk reset, and only
+    # when every message was confirmed gone.
+    if pending == 0 and deleted > 0 and not callable(getattr(storage, "clear_preparation_aux_message_id", None)):
+        clear_all = getattr(storage, "clear_preparation_aux_message_ids", None)
+        if callable(clear_all):
+            clear_all(source=source, external_id=external_id)
+
+    if log is not None:
+        log(
+            f"Cleanup FINISH {source}:{external_id} attempt={attempt} thread={thread} "
+            f"deleted={deleted} pending={pending} "
+            f"cleanup_execution_ms={int((time.monotonic() - started_at) * 1000)}"
+        )
+    return pending == 0
 
 
 def _resolve_card_context(
@@ -4202,6 +4364,199 @@ def _drain_prepare_priorities(
     return pairs
 
 
+# Fixed retry schedule for a queued cleanup, then the periodic sweep takes over.
+_CLEANUP_RETRY_DELAYS_SECONDS: tuple[float, ...] = (5.0, 30.0, 300.0)
+
+# How often the worker rescans the database for cleanups nobody is tracking.
+_CLEANUP_SWEEP_INTERVAL_SECONDS = 60.0
+
+# Upper bound on how long the worker sleeps while waiting for the next due job.
+_CLEANUP_IDLE_WAIT_SECONDS = 1.0
+
+# How long shutdown waits for an in-flight cleanup before giving up on it.
+_CLEANUP_JOIN_TIMEOUT_SECONDS = 15.0
+
+
+@dataclass(order=True)
+class _CleanupJob:
+    due_at: float
+    sequence: int
+    source: str = field(compare=False)
+    external_id: str = field(compare=False)
+    chat_id: str = field(compare=False)
+    attempt: int = field(compare=False, default=1)
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.source, self.external_id)
+
+
+class _CleanupScheduler:
+    """Deduplicating due-time queue of pending auxiliary-message cleanups.
+
+    A key stays tracked from the moment it is queued until cleanup succeeds or the
+    retry schedule is exhausted, which is what stops the same preparation from
+    being worked on twice at the same time.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._queue: list[_CleanupJob] = []
+        self._tracked: set[tuple[str, str]] = set()
+        self._sequence = 0
+        self._wakeup = threading.Event()
+
+    def enqueue(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        chat_id: str,
+        delay_seconds: float = 0.0,
+        attempt: int = 1,
+    ) -> bool:
+        """Queue a cleanup. Returns False when the key is already tracked."""
+        key = (source, external_id)
+        with self._lock:
+            if key in self._tracked:
+                return False
+            self._tracked.add(key)
+            self._sequence += 1
+            heapq.heappush(
+                self._queue,
+                _CleanupJob(
+                    due_at=time.monotonic() + max(0.0, delay_seconds),
+                    sequence=self._sequence,
+                    source=source,
+                    external_id=external_id,
+                    chat_id=chat_id,
+                    attempt=attempt,
+                ),
+            )
+        self._wakeup.set()
+        return True
+
+    def take_due(self) -> _CleanupJob | None:
+        with self._lock:
+            if not self._queue or self._queue[0].due_at > time.monotonic():
+                return None
+            return heapq.heappop(self._queue)
+
+    def reschedule(self, job: _CleanupJob) -> bool:
+        """Re-queue a failed job. Returns False when the schedule is exhausted."""
+        delay_index = job.attempt - 1
+        if delay_index >= len(_CLEANUP_RETRY_DELAYS_SECONDS):
+            self.release(job)
+            return False
+        with self._lock:
+            self._sequence += 1
+            heapq.heappush(
+                self._queue,
+                _CleanupJob(
+                    due_at=time.monotonic() + _CLEANUP_RETRY_DELAYS_SECONDS[delay_index],
+                    sequence=self._sequence,
+                    source=job.source,
+                    external_id=job.external_id,
+                    chat_id=job.chat_id,
+                    attempt=job.attempt + 1,
+                ),
+            )
+        self._wakeup.set()
+        return True
+
+    def release(self, job: _CleanupJob) -> None:
+        with self._lock:
+            self._tracked.discard(job.key)
+
+    def is_tracked(self, source: str, external_id: str) -> bool:
+        with self._lock:
+            return (source, external_id) in self._tracked
+
+    def wait_for_work(self, timeout: float) -> None:
+        self._wakeup.wait(timeout=timeout)
+        self._wakeup.clear()
+
+    def wakeup(self) -> None:
+        self._wakeup.set()
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._queue)
+
+
+def _sweep_pending_aux_cleanups(
+    *,
+    storage: TelegramDeliveryStorage,
+    scheduler: _CleanupScheduler,
+    log: Callable[[str], None] | None = None,
+) -> int:
+    """Re-queue cleanups that survived a restart or ran out of retries."""
+    list_pending = getattr(storage, "list_pending_aux_cleanups", None)
+    if not callable(list_pending):
+        return 0
+    try:
+        pending = list_pending(limit=50)
+    except Exception as exc:  # noqa: BLE001
+        if log is not None:
+            log(f"Cleanup sweep failed: {exc}")
+        return 0
+    queued = 0
+    for entry in pending:
+        try:
+            source, external_id, chat_id = entry
+        except (TypeError, ValueError):
+            continue
+        if scheduler.enqueue(source=str(source), external_id=str(external_id), chat_id=str(chat_id)):
+            queued += 1
+    if queued and log is not None:
+        log(f"Cleanup sweep queued={queued} pending_rows={len(pending)}")
+    return queued
+
+
+def _cleanup_worker_loop(
+    *,
+    telegram_client: TelegramClient,
+    scheduler: _CleanupScheduler,
+    stop_event: threading.Event,
+    storage: TelegramDeliveryStorage | None = None,
+    sweep_interval_seconds: float = _CLEANUP_SWEEP_INTERVAL_SECONDS,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    worker_storage = storage if storage is not None else TelegramDeliveryStorage()
+    cleanup_log = log if log is not None else _component_log("cleanup")
+    cleanup_log(f"Cleanup worker started thread={threading.current_thread().name}")
+    next_sweep_at = 0.0
+    while not stop_event.is_set():
+        try:
+            if time.monotonic() >= next_sweep_at:
+                _sweep_pending_aux_cleanups(storage=worker_storage, scheduler=scheduler, log=cleanup_log)
+                next_sweep_at = time.monotonic() + sweep_interval_seconds
+            job = scheduler.take_due()
+            if job is None:
+                scheduler.wait_for_work(_CLEANUP_IDLE_WAIT_SECONDS)
+                continue
+            done = _cleanup_aux_messages(
+                storage=worker_storage,
+                client=telegram_client,
+                source=job.source,
+                external_id=job.external_id,
+                chat_id=job.chat_id,
+                attempt=job.attempt,
+                log=cleanup_log,
+            )
+            if done:
+                scheduler.release(job)
+            elif not scheduler.reschedule(job):
+                cleanup_log(
+                    f"Cleanup retries exhausted {job.source}:{job.external_id} "
+                    f"attempt={job.attempt}; deferred to sweep"
+                )
+        except Exception as exc:  # noqa: BLE001
+            cleanup_log(f"Cleanup worker error: {exc}")
+            stop_event.wait(timeout=_CLEANUP_IDLE_WAIT_SECONDS)
+    cleanup_log("Cleanup worker stopped")
+
+
 def _prepare_worker_loop(
     *,
     settings: Settings,
@@ -4432,6 +4787,7 @@ def _poll_telegram_actions_once(
     resume_cache_service: ResumeCacheService | None = None,
     timing_logger: Callable[[str], None] | None = None,
     undo_window_seconds: int | None = None,
+    cleanup_scheduler: "_CleanupScheduler | None" = None,
 ) -> tuple[int | None, int]:
     updates = client.get_updates(offset=offset, timeout=timeout)
     # Stamped once per batch: measures how long an update waited behind the
@@ -4462,6 +4818,7 @@ def _poll_telegram_actions_once(
                 timing_logger=timing_logger,
                 undo_window_seconds=undo_window_seconds,
                 received_at=received_at,
+                cleanup_scheduler=cleanup_scheduler,
             )
         except Exception as exc:  # noqa: BLE001
             if timing_logger is not None:

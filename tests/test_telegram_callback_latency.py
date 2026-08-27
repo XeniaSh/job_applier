@@ -101,11 +101,12 @@ class _OrderClient:
         _ = kwargs
 
 
-def test_applied_answers_before_db_and_cleanup(tmp_path: Path, monkeypatch) -> None:
+def test_applied_answers_before_db_and_cleanup_enqueue(tmp_path: Path, monkeypatch) -> None:
     storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
     _seed_sent(storage, external_id="100", message_id=10)
     events: list[str] = []
     client = _OrderClient(events)
+    scheduler = cli_module._CleanupScheduler()
 
     original_apply = storage.apply_terminal_action
 
@@ -125,9 +126,14 @@ def test_applied_answers_before_db_and_cleanup(tmp_path: Path, monkeypatch) -> N
         client=client,
         storage=storage,
         configured_chat_id="123",
+        cleanup_scheduler=scheduler,
     )
 
-    assert events[:3] == ["answer", "apply", "cleanup"]
+    assert events.index("answer") < events.index("apply")
+    assert "cleanup" not in events
+    assert "edit" in events
+    assert scheduler.pending_count() == 1
+    assert scheduler.is_tracked("linkedin-email", "100")
     assert ("cb-applied", "Отклик отмечен как отправленный") in client.answers
     assert storage.get_delivery("linkedin-email", "100").status == STATUS_APPLIED
 
@@ -289,6 +295,8 @@ def test_run_pipeline_polls_callbacks_off_the_pipeline_thread() -> None:
     # Cycles run on their own thread, so the callback loop never waits for them.
     assert 'name="pipeline"' in source
     assert "target=_pipeline_worker_loop" in source
+    assert 'name="cleanup-worker"' in source
+    assert "cleanup_scheduler=cleanup_scheduler" in source
     assert "_poll_callbacks_now(timeout=poll_interval)" in source
     # Polling is no longer interleaved into the cycle; it is continuous instead.
     assert "_poll_callbacks_now(timeout=0)" not in source

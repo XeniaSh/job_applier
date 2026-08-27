@@ -442,3 +442,65 @@ def test_preparation_table_migrates_artifact_columns(tmp_path: Path) -> None:
     assert prep is not None
     assert prep.cover_letter_pdf_path
     assert prep.cover_letter_pdf_message_id == 9002
+
+
+def test_clear_preparation_aux_message_id_clears_one_kind(tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    storage.save_sent(source="linkedin-email", external_id="7", chat_id="123", message_id=1)
+    storage.save_preparation(
+        source="linkedin-email",
+        external_id="7",
+        status=STATUS_PREPARED,
+        resume_name="java",
+        language="en",
+        error_message=None,
+        resume_message_id=11,
+        cover_letter_message_id=12,
+        cover_letter_txt_message_id=13,
+        cover_letter_pdf_message_id=14,
+    )
+    storage.clear_preparation_aux_message_id(source="linkedin-email", external_id="7", kind="cover")
+    prep = storage.get_preparation("linkedin-email", "7")
+    assert prep is not None
+    assert prep.resume_message_id == 11
+    assert prep.cover_letter_message_id is None
+    assert prep.cover_letter_txt_message_id == 13
+    assert prep.cover_letter_pdf_message_id == 14
+
+
+def test_list_pending_aux_cleanups_only_terminal_rows(tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    storage.save_sent(source="linkedin-email", external_id="applied", chat_id="123", message_id=1)
+    storage.update_status(
+        source="linkedin-email",
+        external_id="applied",
+        chat_id="123",
+        status=STATUS_APPLIED,
+    )
+    storage.save_preparation(
+        source="linkedin-email",
+        external_id="applied",
+        status=STATUS_PREPARED,
+        resume_name="java",
+        language="en",
+        error_message=None,
+        resume_message_id=21,
+    )
+    storage.save_sent(source="linkedin-email", external_id="prepared", chat_id="123", message_id=2)
+    storage.update_status(
+        source="linkedin-email",
+        external_id="prepared",
+        chat_id="123",
+        status=STATUS_PREPARED,
+    )
+    storage.save_preparation(
+        source="linkedin-email",
+        external_id="prepared",
+        status=STATUS_PREPARED,
+        resume_name="java",
+        language="en",
+        error_message=None,
+        resume_message_id=22,
+    )
+    pending = storage.list_pending_aux_cleanups()
+    assert pending == [("linkedin-email", "applied", "123")]
