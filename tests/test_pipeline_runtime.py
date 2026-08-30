@@ -277,3 +277,105 @@ def test_identity_drives_dedupe_and_seen_lookup(monkeypatch) -> None:
     )
     assert calls == [("url", "https://jobs.example.com/777")]
     assert pipeline.already_seen("linkedin-email") == 1
+
+
+def test_telegram_eligibility_uses_min_match_without_dropping_analysis(monkeypatch) -> None:
+    assert cli_module._meets_telegram_min_match("STRONG_MATCH", "STRONG") is True
+    assert cli_module._meets_telegram_min_match("POTENTIAL_MATCH", "STRONG") is False
+    assert cli_module._meets_telegram_min_match("IGNORE", "STRONG") is False
+    assert cli_module._meets_telegram_min_match("POTENTIAL_MATCH", "POTENTIAL") is True
+    assert cli_module._meets_telegram_min_match("STRONG_MATCH", "POTENTIAL") is True
+
+    pipeline = cli_module._collect_pipeline_items(
+        collectors=[
+            cli_module.RuntimeCollector(
+                name="linkedin-email",
+                collect_fn=lambda: [
+                    _vacancy(source="linkedin-email", external_id="p", title="Potential Java", url="https://jobs.example.com/p"),
+                    _vacancy(source="linkedin-email", external_id="s", title="Strong Java", url="https://jobs.example.com/s"),
+                ],
+            )
+        ],
+        safe_error_formatter=lambda source, exc: f"{source}:{exc}",
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "evaluate_title",
+        lambda title: type(
+            "Gate",
+            (),
+            {
+                "accepted": True,
+                "reason": "allowed",
+                "normalized_title": title.lower(),
+                "positive_rules": ["java"],
+                "negative_rules": [],
+                "decision": "PASS",
+            },
+        )(),
+    )
+
+    class Analyzer:
+        def analyze(self, analysis_text, **kwargs):
+            _ = kwargs
+            if "Potential Java" in analysis_text:
+                return _evaluation(Decision.POTENTIAL_MATCH)
+            return _evaluation(Decision.STRONG_MATCH)
+
+    seen_jobs = type(
+        "S",
+        (),
+        {"is_seen": lambda self, source, external_id: False, "mark_seen": lambda self, source, external_id: None},
+    )()
+    cli_module._analyze_pipeline_items(
+        analyzer=Analyzer(),
+        seen_jobs=seen_jobs,
+        pipeline=pipeline,
+        limit=20,
+        skip_seen=True,
+        mark_seen=True,
+        telegram_min_match="STRONG",
+    )
+    by_id = {item.vacancy.external_id: item for item in pipeline.items if item.vacancy is not None}
+    assert by_id["p"].analysis_result.decision == Decision.POTENTIAL_MATCH
+    assert by_id["p"].telegram_eligible is False
+    assert by_id["s"].analysis_result.decision == Decision.STRONG_MATCH
+    assert by_id["s"].telegram_eligible is True
+    assert pipeline.potential_total() == 1
+    assert pipeline.strong_total() == 1
+    assert pipeline.eligible() == 1
+
+    history: list[str] = []
+    sent: list[str] = []
+
+    class Storage:
+        def upsert_application_history(self, **kwargs):
+            history.append(kwargs["external_id"])
+
+        def save_prepare_cache(self, **kwargs):
+            _ = kwargs
+
+        def was_sent(self, source, external_id, chat_id):
+            _ = source, external_id, chat_id
+            return False
+
+        def save_sent(self, **kwargs):
+            sent.append(kwargs["external_id"])
+
+        def mark_history_status(self, **kwargs):
+            _ = kwargs
+
+    monkeypatch.setattr(cli_module, "TelegramDeliveryStorage", lambda: Storage())
+    client = type(
+        "T",
+        (),
+        {"send_vacancy_card": lambda self, card: type("R", (), {"message_id": 1})()},
+    )()
+    cli_module._deliver_pipeline_items(
+        pipeline=pipeline,
+        deliveries=Storage(),
+        telegram_client=client,
+        chat_id="123",
+    )
+    assert history == ["p", "s"]
+    assert sent == ["s"]

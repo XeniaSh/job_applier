@@ -22,11 +22,11 @@ def _set_base_env(monkeypatch, *, with_telegram: bool = True) -> None:
     monkeypatch.setenv("LINKEDIN_EMAIL_IMAP_USERNAME", "mail@example.com")
     monkeypatch.setenv("LINKEDIN_EMAIL_IMAP_PASSWORD", "mail-password")
     if with_telegram:
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
-        monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
+        monkeypatch.setenv("TELEGRAM__BOT_TOKEN", "telegram-token")
+        monkeypatch.setenv("TELEGRAM__CHAT_ID", "123")
     else:
-        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-        monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+        monkeypatch.delenv("TELEGRAM__BOT_TOKEN", raising=False)
+        monkeypatch.delenv("TELEGRAM__CHAT_ID", raising=False)
 
 
 def _evaluation(decision: Decision = Decision.POTENTIAL_MATCH) -> VacancyEvaluation:
@@ -65,10 +65,10 @@ def test_send_linkedin_telegram_dry_run_no_telegram_and_no_delivery(monkeypatch)
                     title="Java Backend",
                     company="ACME",
                     location="Remote",
-                    url="https://www.linkedin.com/jobs/view/1/",
-                    content_completeness="PARTIAL",
-                    evaluation=_evaluation(),
-                )
+                        url="https://www.linkedin.com/jobs/view/1/",
+                        content_completeness="PARTIAL",
+                        evaluation=_evaluation(Decision.STRONG_MATCH),
+                    )
             ]
             return report
 
@@ -138,7 +138,7 @@ def test_send_linkedin_telegram_continue_on_failure_and_deduplicate(monkeypatch)
                     location="Remote",
                     url="https://www.linkedin.com/jobs/view/1/",
                     content_completeness="PARTIAL",
-                    evaluation=_evaluation(),
+                    evaluation=_evaluation(Decision.STRONG_MATCH),
                 ),
                 LinkedInProcessedVacancy(
                     external_id="2",
@@ -147,7 +147,7 @@ def test_send_linkedin_telegram_continue_on_failure_and_deduplicate(monkeypatch)
                     location="Remote",
                     url="https://www.linkedin.com/jobs/view/2/",
                     content_completeness="PARTIAL",
-                    evaluation=_evaluation(),
+                    evaluation=_evaluation(Decision.STRONG_MATCH),
                 ),
                 LinkedInProcessedVacancy(
                     external_id="3",
@@ -156,7 +156,7 @@ def test_send_linkedin_telegram_continue_on_failure_and_deduplicate(monkeypatch)
                     location="Remote",
                     url="https://www.linkedin.com/jobs/view/3/",
                     content_completeness="PARTIAL",
-                    evaluation=_evaluation(),
+                    evaluation=_evaluation(Decision.STRONG_MATCH),
                 ),
             ]
             return report
@@ -289,9 +289,9 @@ def test_send_dry_run_ignores_seen_and_delivered_but_reports_info(monkeypatch) -
     assert result.exit_code == 0
     assert "INFO ALREADY_SEEN Senior Java Engineer" in result.output
     assert "INFO ALREADY_DELIVERED Kotlin Backend Developer" in result.output
-    assert "WOULD_SEND POTENTIAL_MATCH Senior Java Engineer" in result.output
+    assert "SKIP POTENTIAL_MATCH Senior Java Engineer" in result.output
     assert "WOULD_SEND STRONG_MATCH Kotlin Backend Developer" in result.output
-    assert "Подготовлено карточек: 2" in result.output
+    assert "Подготовлено карточек: 1" in result.output
     assert "Отправлено в Telegram: 0" in result.output
     assert storage.saved == 0
 
@@ -314,7 +314,7 @@ def test_send_real_allows_seen_jobs_but_skips_already_delivered(monkeypatch) -> 
                     location="Remote",
                     url="https://www.linkedin.com/jobs/view/20/",
                     content_completeness="PARTIAL",
-                    evaluation=_evaluation(Decision.POTENTIAL_MATCH),
+                    evaluation=_evaluation(Decision.STRONG_MATCH),
                 ),
                 LinkedInProcessedVacancy(
                     external_id="21",
@@ -323,7 +323,7 @@ def test_send_real_allows_seen_jobs_but_skips_already_delivered(monkeypatch) -> 
                     location="Remote",
                     url="https://www.linkedin.com/jobs/view/21/",
                     content_completeness="PARTIAL",
-                    evaluation=_evaluation(Decision.POTENTIAL_MATCH),
+                    evaluation=_evaluation(Decision.STRONG_MATCH),
                 ),
             ]
             return report
@@ -397,7 +397,7 @@ def test_send_with_backfill_includes_seen_jobs_for_analysis(monkeypatch) -> None
                     location="Remote",
                     url="https://www.linkedin.com/jobs/view/55/",
                     content_completeness="PARTIAL",
-                    evaluation=_evaluation(Decision.POTENTIAL_MATCH),
+                    evaluation=_evaluation(Decision.STRONG_MATCH),
                 )
             ]
             return report
@@ -596,9 +596,9 @@ def test_verbose_outcome_and_prepared_cards_counter(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "SKIP IGNORE Ignore role" in result.output
     assert 'SKIP PREFILTERED title="Frontend Engineer" reason=' in result.output
-    assert "WOULD_SEND POTENTIAL_MATCH Potential role" in result.output
+    assert "SKIP POTENTIAL_MATCH Potential role" in result.output
     assert "SKIP STRONG_MATCH Strong role" in result.output
-    assert "Подготовлено карточек: 1" in result.output
+    assert "Подготовлено карточек: 0" in result.output
 
 
 def test_poll_callbacks_skip_prepare_unknown_and_wrong_chat() -> None:
@@ -892,7 +892,7 @@ def test_poll_consumes_expired_callback_and_processes_next_update(monkeypatch) -
 
 def test_telegram_chat_id_output(monkeypatch) -> None:
     _set_base_env(monkeypatch, with_telegram=False)
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setenv("TELEGRAM__BOT_TOKEN", "telegram-token")
 
     class FakeClient:
         def __init__(self, bot_token, chat_id):
@@ -924,8 +924,8 @@ def test_telegram_chat_id_output(monkeypatch) -> None:
 
 def test_missing_telegram_settings_break_only_telegram_commands(monkeypatch) -> None:
     _set_base_env(monkeypatch, with_telegram=False)
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "")
+    monkeypatch.setenv("TELEGRAM__BOT_TOKEN", "")
+    monkeypatch.setenv("TELEGRAM__CHAT_ID", "")
     runner = CliRunner()
     telegram_result = runner.invoke(cli_module.app, ["send-linkedin-telegram", "--limit", "1"])
     assert telegram_result.exit_code != 0

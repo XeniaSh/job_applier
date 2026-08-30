@@ -179,7 +179,7 @@ def test_expire_undo_success_clears_metadata_after_markup_edit(tmp_path: Path) -
     storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
     _seed_applied_with_undo(storage, external_id="3", message_id=30, action_id="exp12345")
     client = _RecordingClient()
-    settings = SimpleNamespace(undo_window_seconds=600, telegram_chat_id="123")
+    settings = SimpleNamespace(undo_window_seconds=600, telegram=SimpleNamespace(chat_id="123"))
     cleared = cli_module._expire_undo_buttons(
         settings=settings,
         storage=storage,
@@ -204,7 +204,7 @@ def test_expire_undo_keeps_metadata_when_telegram_edit_fails(tmp_path: Path) -> 
             raise TelegramRequestError("edit failed", method="editMessageReplyMarkup")
 
     client = FailingClient()
-    settings = SimpleNamespace(undo_window_seconds=600, telegram_chat_id="123")
+    settings = SimpleNamespace(undo_window_seconds=600, telegram=SimpleNamespace(chat_id="123"))
     cleared = cli_module._expire_undo_buttons(
         settings=settings,
         storage=storage,
@@ -231,7 +231,7 @@ def test_expire_undo_not_modified_still_clears_metadata(tmp_path: Path) -> None:
             raise cli_module.TelegramMessageNotModifiedError("message is not modified")
 
     client = NotModifiedClient()
-    settings = SimpleNamespace(undo_window_seconds=600, telegram_chat_id="123")
+    settings = SimpleNamespace(undo_window_seconds=600, telegram=SimpleNamespace(chat_id="123"))
     cleared = cli_module._expire_undo_buttons(
         settings=settings,
         storage=storage,
@@ -292,7 +292,7 @@ def test_expire_undo_stale_snapshot_does_not_clear_new_action(tmp_path: Path) ->
     assert current.last_action_id != snapshot_expected
 
     client = CaptureClient()
-    settings = SimpleNamespace(undo_window_seconds=600, telegram_chat_id="123")
+    settings = SimpleNamespace(undo_window_seconds=600, telegram=SimpleNamespace(chat_id="123"))
     # Monkeypatch list to return stale snapshot while DB already has newtoken2.
     storage.list_expired_undo_deliveries = lambda **kwargs: [  # type: ignore[method-assign]
         type(
@@ -336,7 +336,7 @@ def test_expire_undo_one_failure_does_not_block_others(tmp_path: Path) -> None:
                 raise TelegramRequestError("edit failed", method="editMessageReplyMarkup")
 
     client = PartialFailClient()
-    settings = SimpleNamespace(undo_window_seconds=600, telegram_chat_id="123")
+    settings = SimpleNamespace(undo_window_seconds=600, telegram=SimpleNamespace(chat_id="123"))
     cleared = cli_module._expire_undo_buttons(
         settings=settings,
         storage=storage,
@@ -382,7 +382,7 @@ def test_prepare_unexpected_exception_leaves_failed_not_preparing(tmp_path: Path
 
     client = _RecordingClient()
     settings = SimpleNamespace(
-        telegram_chat_id="123",
+        telegram=SimpleNamespace(chat_id="123"),
         undo_window_seconds=600,
         resumes_dir=tmp_path / "resumes",
     )

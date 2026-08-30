@@ -201,7 +201,7 @@ def test_telegram_card_separates_warnings_and_information() -> None:
         decision_reason=evaluation.decision_reason,
     )
     rendered = format_telegram_card_html(card)
-    assert "<b>🟡 POTENTIAL</b>" in rendered
+    assert "POTENTIAL" not in rendered
     assert "<b>Why:</b>" in rendered
     assert "Backend role detected, but the technology stack is unknown" in rendered
     assert "⚠️ Requires relocation to PH" in rendered

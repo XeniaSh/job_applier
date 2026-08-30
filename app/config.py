@@ -1,8 +1,39 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
-from pydantic import field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import NoDecode
 from typing import Annotated
+
+_TELEGRAM_MIN_MATCH_ALIASES = {
+    "STRONG": "STRONG",
+    "STRONG_MATCH": "STRONG",
+    "POTENTIAL": "POTENTIAL",
+    "POTENTIAL_MATCH": "POTENTIAL",
+}
+
+
+def normalize_telegram_min_match(value: object) -> str:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "STRONG"
+    text = str(value).strip().upper().replace("-", "_")
+    if text not in _TELEGRAM_MIN_MATCH_ALIASES:
+        raise ValueError("telegram min_match must be STRONG or POTENTIAL")
+    return _TELEGRAM_MIN_MATCH_ALIASES[text]
+
+
+class TelegramChannelSettings(BaseModel):
+    min_match: str = "STRONG"
+
+    @field_validator("min_match", mode="before")
+    @classmethod
+    def parse_min_match(cls, value: object) -> str:
+        return normalize_telegram_min_match(value)
+
+
+class TelegramSettings(BaseModel):
+    bot_token: str = ""
+    chat_id: str = ""
+    job_feed: TelegramChannelSettings = Field(default_factory=TelegramChannelSettings)
 
 
 class Settings(BaseSettings):
@@ -21,8 +52,7 @@ class Settings(BaseSettings):
     linkedin_email_bootstrap_message_limit: int = 500
     linkedin_email_bootstrap_lookback_days: int = 7
     linkedin_email_batch_size: int = 200
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
+    telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     resumes_dir: Path = Path("resumes")
     resume_profiles_path: Path = Path(__file__).resolve().parent.parent / "resume_profiles.yaml"
     prepared_artifacts_dir: Path = Path("data/prepared")
@@ -57,4 +87,5 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        env_nested_delimiter="__",
     )

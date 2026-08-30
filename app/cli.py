@@ -477,8 +477,8 @@ def send_linkedin_telegram(
     if not dry_run:
         _require_telegram_settings(settings)
         telegram_client = TelegramClient(
-            bot_token=settings.telegram_bot_token,
-            chat_id=settings.telegram_chat_id,
+            bot_token=settings.telegram.bot_token,
+            chat_id=settings.telegram.chat_id,
         )
     else:
         telegram_client = None
@@ -531,7 +531,7 @@ def send_linkedin_telegram(
                 typer.echo(f'SKIP PREFILTERED title="{_quote_log_text(item.title)}" reason="{reason}"')
             continue
         seen_info = seen_jobs.is_seen("linkedin-email", item.external_id)
-        delivered_info = deliveries.was_sent("linkedin-email", item.external_id, settings.telegram_chat_id)
+        delivered_info = deliveries.was_sent("linkedin-email", item.external_id, settings.telegram.chat_id)
         if seen_info:
             report.already_seen += 1
             if dry_run and verbose:
@@ -550,7 +550,7 @@ def send_linkedin_telegram(
             if verbose:
                 typer.echo(f"SKIP {decision} {item.title}")
             continue
-        if decision not in {"STRONG_MATCH", "POTENTIAL_MATCH"}:
+        if not _meets_telegram_min_match(decision, settings.telegram.job_feed.min_match):
             if verbose:
                 typer.echo(f"SKIP {decision} {item.title}")
             continue
@@ -606,7 +606,7 @@ def send_linkedin_telegram(
         deliveries.save_sent(
             source="linkedin-email",
             external_id=item.external_id,
-            chat_id=settings.telegram_chat_id,
+            chat_id=settings.telegram.chat_id,
             message_id=message_ref.message_id,
         )
         deliveries.mark_history_status(
@@ -642,8 +642,8 @@ def prepare_telegram_applications(
     if not dry_run:
         _require_telegram_settings(settings)
         telegram_client = TelegramClient(
-            bot_token=settings.telegram_bot_token,
-            chat_id=settings.telegram_chat_id,
+            bot_token=settings.telegram.bot_token,
+            chat_id=settings.telegram.chat_id,
         )
     else:
         telegram_client = None
@@ -762,7 +762,7 @@ def run_pipeline(
         greenhouse_collector = GreenhouseCollector(boards=settings.greenhouse_boards)
         runtime_collectors.append(RuntimeCollector(name="greenhouse", collect_fn=greenhouse_collector.collect))
     collectors: list[Collector] = runtime_collectors
-    telegram_client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    telegram_client = TelegramClient(settings.telegram.bot_token, settings.telegram.chat_id)
     _recover_and_requeue_abandoned_preparations(
         settings=settings,
         storage=deliveries,
@@ -835,7 +835,7 @@ def run_pipeline(
             offset, prepare_requests = _poll_telegram_actions_once(
                 client=telegram_client,
                 storage=deliveries,
-                configured_chat_id=str(settings.telegram_chat_id),
+                configured_chat_id=str(settings.telegram.chat_id),
                 offset=offset,
                 timeout=timeout,
                 resumes_dir=settings.resumes_dir,
@@ -884,6 +884,7 @@ def run_pipeline(
                         skip_seen=True,
                         mark_seen=True,
                         verbose=verbose,
+                        telegram_min_match=settings.telegram.job_feed.min_match,
                     )
                     analyze_ms = max(0, int((time.monotonic() - analyze_start) * 1000))
                     telegram_start = time.monotonic()
@@ -891,7 +892,7 @@ def run_pipeline(
                         pipeline=pipeline_result,
                         deliveries=deliveries,
                         telegram_client=telegram_client,
-                        chat_id=settings.telegram_chat_id,
+                        chat_id=settings.telegram.chat_id,
                     )
                     telegram_ms = max(0, int((time.monotonic() - telegram_start) * 1000))
                     cycle_ms = max(0, int((time.monotonic() - cycle_start) * 1000))
@@ -1110,7 +1111,7 @@ def poll_telegram_actions(
         raise typer.Exit(code=2) from exc
     _require_telegram_settings(settings)
 
-    client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    client = TelegramClient(settings.telegram.bot_token, settings.telegram.chat_id)
     storage = TelegramDeliveryStorage()
     offset_raw = storage.get_state("telegram_update_offset")
     offset = int(offset_raw) if offset_raw and offset_raw.isdigit() else None
@@ -1121,7 +1122,7 @@ def poll_telegram_actions(
                 offset, _ = _poll_telegram_actions_once(
                     client=client,
                     storage=storage,
-                    configured_chat_id=str(settings.telegram_chat_id),
+                    configured_chat_id=str(settings.telegram.chat_id),
                     offset=offset,
                     timeout=timeout,
                     resumes_dir=settings.resumes_dir,
@@ -1148,11 +1149,11 @@ def telegram_chat_id() -> None:
         typer.secho(f"Ошибка конфигурации: {exc}", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=2) from exc
 
-    if not settings.telegram_bot_token:
-        typer.secho("TELEGRAM_BOT_TOKEN не задан.", err=True, fg=typer.colors.RED)
+    if not settings.telegram.bot_token:
+        typer.secho("TELEGRAM__BOT_TOKEN не задан.", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=2)
 
-    client = TelegramClient(settings.telegram_bot_token, chat_id="0")
+    client = TelegramClient(settings.telegram.bot_token, chat_id="0")
     try:
         updates = client.get_updates(offset=None, timeout=1)
     except TelegramRequestError as exc:
@@ -1333,7 +1334,7 @@ def telegram_cache_resumes(
     _require_telegram_settings(settings)
 
     storage = TelegramDeliveryStorage()
-    client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    client = TelegramClient(settings.telegram.bot_token, settings.telegram.chat_id)
     resume_profiles = _load_configured_resume_profiles(settings)
     configured_resume_names = resume_profiles.ids
     cache_service = ResumeCacheService(
@@ -1359,7 +1360,7 @@ def telegram_cache_resumes(
         try:
             result = cache_service.get_or_upload(
                 resume_name=resume_name,
-                chat_id=settings.telegram_chat_id,
+                chat_id=settings.telegram.chat_id,
                 force_upload=force,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1627,6 +1628,21 @@ def _collect_pipeline_items(
     return PipelineResult(items=items)
 
 
+_TELEGRAM_MIN_MATCH_RANK = {
+    "IGNORE": 0,
+    "POTENTIAL": 1,
+    "POTENTIAL_MATCH": 1,
+    "STRONG": 2,
+    "STRONG_MATCH": 2,
+}
+
+
+def _meets_telegram_min_match(decision: str, min_match: str = "STRONG") -> bool:
+    required = _TELEGRAM_MIN_MATCH_RANK.get(str(min_match).strip().upper(), 2)
+    actual = _TELEGRAM_MIN_MATCH_RANK.get(str(decision).strip().upper(), -1)
+    return actual >= required
+
+
 def _analyze_pipeline_items(
     *,
     analyzer: VacancyAnalyzer,
@@ -1636,6 +1652,7 @@ def _analyze_pipeline_items(
     skip_seen: bool,
     mark_seen: bool,
     verbose: bool = False,
+    telegram_min_match: str = "STRONG",
 ) -> None:
     for item in pipeline.items:
         if item.vacancy is None or item.duplicate:
@@ -1698,8 +1715,10 @@ def _analyze_pipeline_items(
         item.analysis_result = evaluation
         if mark_seen:
             seen_jobs.mark_seen(item.storage_source or vacancy.source, item.storage_external_id or vacancy.external_id)
-        decision = evaluation.decision.value
-        item.telegram_eligible = decision in {"STRONG_MATCH", "POTENTIAL_MATCH"}
+        item.telegram_eligible = _meets_telegram_min_match(
+            evaluation.decision.value,
+            telegram_min_match,
+        )
 
 
 # How often to drain Telegram callbacks while sending a vacancy batch.
@@ -2210,7 +2229,7 @@ def _runtime_secrets(settings: Settings) -> list[str]:
     return [
         settings.llm_api_key,
         settings.linkedin_email_password,
-        settings.telegram_bot_token,
+        settings.telegram.bot_token,
     ]
 
 
@@ -3499,10 +3518,10 @@ def _extract_url_button(message: dict) -> str | None:
 
 
 def _require_telegram_settings(settings: Settings) -> None:
-    if settings.telegram_bot_token and settings.telegram_chat_id:
+    if settings.telegram.bot_token and settings.telegram.chat_id:
         return
     typer.secho(
-        "Для этой команды требуются TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID.",
+        "Для этой команды требуются TELEGRAM__BOT_TOKEN и TELEGRAM__CHAT_ID.",
         err=True,
         fg=typer.colors.RED,
     )
@@ -4216,7 +4235,7 @@ def _recover_and_requeue_abandoned_preparations(
         _reconcile_recovered_preparation_message(
             storage=storage,
             client=telegram_client,
-            chat_id=str(settings.telegram_chat_id),
+            chat_id=str(settings.telegram.chat_id),
             source=source,
             external_id=external_id,
             auto_retry=True,
@@ -4627,13 +4646,13 @@ def _prepare_worker_loop(
             if callable(count_by_status):
                 pending_count = int(
                     count_by_status(
-                        chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
+                        chat_id=settings.telegram.chat_id if settings.telegram.chat_id else "0",
                         status=STATUS_PREPARE_REQUESTED,
                     )
                 )
             else:
                 pending = worker_storage.list_by_status(
-                    chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
+                    chat_id=settings.telegram.chat_id if settings.telegram.chat_id else "0",
                     status=STATUS_PREPARE_REQUESTED,
                     limit=1000,
                 )
@@ -4667,7 +4686,7 @@ def _runtime_recover_abandoned_preparations(
         _reconcile_recovered_preparation_message(
             storage=storage,
             client=telegram_client,
-            chat_id=str(settings.telegram_chat_id),
+            chat_id=str(settings.telegram.chat_id),
             source=source,
             external_id=external_id,
             auto_retry=True,
@@ -4846,7 +4865,7 @@ def _prepare_requested_applications(
     stop_requested: Callable[[], bool] | None = None,
 ) -> PreparationRunResult:
     queue = storage.list_by_status(
-        chat_id=settings.telegram_chat_id if settings.telegram_chat_id else "0",
+        chat_id=settings.telegram.chat_id if settings.telegram.chat_id else "0",
         status=STATUS_PREPARE_REQUESTED,
         limit=limit,
     )
@@ -4966,7 +4985,7 @@ def _prepare_one_application(
                     claim(
                         source=source,
                         external_id=external_id,
-                        chat_id=settings.telegram_chat_id,
+                        chat_id=settings.telegram.chat_id,
                     )
                 )
                 if not claimed:
@@ -5061,7 +5080,7 @@ def _prepare_one_application(
         message_ref = storage.get_message_ref(
             source=source,
             external_id=external_id,
-            chat_id=settings.telegram_chat_id,
+            chat_id=settings.telegram.chat_id,
         )
         if message_ref is None:
             _mark_preparation_failed(
@@ -5137,7 +5156,7 @@ def _prepare_one_application(
         storage.update_status(
             source=source,
             external_id=external_id,
-            chat_id=settings.telegram_chat_id,
+            chat_id=settings.telegram.chat_id,
             status=STATUS_PREPARED,
         )
         storage.save_preparation(
@@ -5208,7 +5227,7 @@ def _mark_preparation_failed(
     storage.update_status(
         source=source,
         external_id=external_id,
-        chat_id=settings.telegram_chat_id,
+        chat_id=settings.telegram.chat_id,
         status=STATUS_PREPARATION_FAILED,
     )
     storage.save_preparation(
@@ -5244,7 +5263,7 @@ def _mark_preparation_failed(
             client=telegram_client,
             source=source,
             external_id=external_id,
-            chat_id=str(settings.telegram_chat_id),
+            chat_id=str(settings.telegram.chat_id),
             undo_window_seconds=int(settings.undo_window_seconds),
         )
     except Exception as exc:  # noqa: BLE001
@@ -5333,7 +5352,7 @@ def _send_processed_to_telegram_detailed(
         if item.evaluation is None:
             continue
         decision = item.evaluation.decision.value
-        if decision not in {"STRONG_MATCH", "POTENTIAL_MATCH"}:
+        if not _meets_telegram_min_match(decision):
             continue
         eligible += 1
         already_delivered = deliveries.was_sent(item.source, item.external_id, chat_id)

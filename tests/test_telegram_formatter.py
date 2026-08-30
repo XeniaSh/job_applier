@@ -21,7 +21,8 @@ def test_formatter_escapes_html_and_limits_lists() -> None:
     )
 
     rendered = format_telegram_card_html(card)
-    assert "<b>🟡 POTENTIAL</b>" in rendered
+    assert "POTENTIAL" not in rendered
+    assert "STRONG" not in rendered
     assert "Java &lt;Lead&gt; &amp; &quot;Kotlin&quot;" in rendered
     assert "ACME &lt;Corp&gt;" in rendered
     assert "<b>Why:</b>" in rendered
@@ -52,7 +53,7 @@ def test_strong_partial_card_shows_why_and_info_not_warning() -> None:
         decision_reason="Explicit Java + backend signals in title",
     )
     rendered = format_telegram_card_html(card)
-    assert "<b>🟢 STRONG</b>" in rendered
+    assert "STRONG" not in rendered
     assert "Senior Java Backend Engineer" in rendered
     assert "Nexthink" in rendered
     assert "Lausanne, Vaud, Switzerland" in rendered

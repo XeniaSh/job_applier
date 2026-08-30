@@ -14,8 +14,8 @@ def _set_env(monkeypatch) -> None:
     monkeypatch.setenv("LLM_MODEL", "test-model")
     monkeypatch.setenv("LINKEDIN_EMAIL_IMAP_USERNAME", "mail@example.com")
     monkeypatch.setenv("LINKEDIN_EMAIL_IMAP_PASSWORD", "mail-password")
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setenv("TELEGRAM__BOT_TOKEN", "telegram-token")
+    monkeypatch.setenv("TELEGRAM__CHAT_ID", "123")
 
 
 def _prepared(external_id: str, resume_path: str | None) -> PreparedApplication:

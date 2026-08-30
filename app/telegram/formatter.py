@@ -36,8 +36,7 @@ def card_display_sections(evaluation) -> tuple[list[str], list[str]]:
 
 
 def format_telegram_card_html(card: TelegramVacancyCard) -> str:
-    strength = _match_strength_label(card.decision)
-    lines = [f"<b>{_escape(strength)}</b>", "", _escape(card.title)]
+    lines = [_escape(card.title)]
 
     if card.company:
         lines.append(_escape(card.company))
@@ -83,17 +82,6 @@ def format_telegram_card_html(card: TelegramVacancyCard) -> str:
     if len(rendered) <= MAX_MESSAGE_LEN:
         return rendered
     return rendered[: MAX_MESSAGE_LEN - 1].rstrip() + "…"
-
-
-def _match_strength_label(decision: str) -> str:
-    normalized = (decision or "").strip().upper()
-    if normalized in {"STRONG_MATCH", "STRONG"}:
-        return "🟢 STRONG"
-    if normalized in {"POTENTIAL_MATCH", "POTENTIAL"}:
-        return "🟡 POTENTIAL"
-    if normalized in {"IGNORE"}:
-        return "⚪ IGNORE"
-    return decision
 
 
 def _normalize_info_items(items: list[str]) -> list[str]:

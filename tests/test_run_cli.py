@@ -18,8 +18,8 @@ def _set_env(monkeypatch, tmp_path: Path, *, interval: int = 300, poll_interval:
     monkeypatch.setenv("LLM_MODEL", "test-model")
     monkeypatch.setenv("LINKEDIN_EMAIL_IMAP_USERNAME", "mail@example.com")
     monkeypatch.setenv("LINKEDIN_EMAIL_IMAP_PASSWORD", "mail-password")
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setenv("TELEGRAM__BOT_TOKEN", "telegram-token")
+    monkeypatch.setenv("TELEGRAM__CHAT_ID", "123")
     monkeypatch.setenv("PIPELINE_INTERVAL_SECONDS", str(interval))
     monkeypatch.setenv("TELEGRAM_POLL_INTERVAL_SECONDS", str(poll_interval))
 
@@ -308,7 +308,7 @@ def test_run_verbose_mode_prints_per_vacancy_outcomes(monkeypatch, tmp_path: Pat
     assert 'PREFILTERED linkedin-email:2 title="Filtered Role" reason="Frontend title"' in result.output
     assert 'POTENTIAL linkedin-email:3 title="Potential Role" score=' in result.output
     assert 'reason="Role is partially aligned with Java backend profile."' in result.output
-    assert "ALREADY_DELIVERED linkedin-email:3 Potential Role" in result.output
+    assert "ALREADY_DELIVERED linkedin-email:3 Potential Role" not in result.output
 
 
 def test_run_non_verbose_does_not_print_parsed_blocks(monkeypatch, tmp_path: Path) -> None:
@@ -832,7 +832,7 @@ def test_run_repeated_cycles_produce_stable_logs(monkeypatch, tmp_path: Path) ->
 
 def test_run_logs_do_not_leak_secrets(monkeypatch, tmp_path: Path) -> None:
     _set_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "very-secret-token")
+    monkeypatch.setenv("TELEGRAM__BOT_TOKEN", "very-secret-token")
     monkeypatch.setenv("LINKEDIN_EMAIL_IMAP_PASSWORD", "very-secret-password")
     _bootstrap_common(monkeypatch)
     _run_single_cycle(monkeypatch)
