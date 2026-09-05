@@ -25,7 +25,12 @@ from app.company_watch.config_loader import (
     TargetCompaniesConfigLoadError,
     load_target_companies_config,
 )
-from app.company_watch.watchers.greenhouse import GreenhouseTargetWatcher, is_greenhouse_target
+from app.company_watch.models import TargetCompany
+from app.company_watch.watchers.greenhouse import (
+    GreenhouseCompanyError,
+    GreenhouseTargetWatcher,
+    is_greenhouse_target,
+)
 from app.collectors.email_imap_client import (
     EmailAuthenticationError,
     EmailConnectionError,
@@ -469,6 +474,39 @@ def collect_target_companies_greenhouse(
         "--output",
         help="Write all vacancies to a UTF-8 JSONL file.",
     ),
+    titles_by_company: bool = typer.Option(
+        False,
+        "--titles-by-company",
+        help="Print grouped vacancy titles by company.",
+    ),
+    titles_limit_per_company: int = typer.Option(
+        30,
+        "--titles-limit-per-company",
+        min=1,
+        help="Max titles to print per company.",
+    ),
+    company: list[str] | None = typer.Option(
+        None,
+        "--company",
+        help="Run only these company names. Repeatable.",
+    ),
+    debug_errors: bool = typer.Option(
+        False,
+        "--debug-errors",
+        help="Print detailed Greenhouse error diagnostics.",
+    ),
+    max_attempts: int = typer.Option(
+        3,
+        "--max-attempts",
+        min=1,
+        help="Max Greenhouse board request attempts per company.",
+    ),
+    delay_seconds: float = typer.Option(
+        1.0,
+        "--delay-seconds",
+        min=0.0,
+        help="Delay in seconds between Greenhouse companies.",
+    ),
 ) -> None:
     try:
         loaded = load_target_companies_config(config)
@@ -476,10 +514,21 @@ def collect_target_companies_greenhouse(
         typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
 
-    greenhouse_count = sum(1 for company in loaded.companies if is_greenhouse_target(company))
-    result = GreenhouseTargetWatcher().watch(loaded.companies)
+    try:
+        selected_companies = _select_target_companies(loaded.companies, company)
+    except ValueError as exc:
+        typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    greenhouse_count = sum(1 for item in selected_companies if is_greenhouse_target(item))
+    result = GreenhouseTargetWatcher(
+        max_attempts=max_attempts,
+        delay_between_companies_seconds=delay_seconds,
+    ).watch(selected_companies)
 
     _safe_echo(f"Companies in config: {len(loaded.companies)}")
+    if company:
+        _safe_echo(f"Selected companies: {len(selected_companies)}")
     _safe_echo(f"Greenhouse companies: {greenhouse_count}")
     _safe_echo(f"Raw vacancies fetched: {result.raw_fetched}")
     _safe_echo(f"Vacancies after filtering: {len(result.vacancies)}")
@@ -500,11 +549,14 @@ def collect_target_companies_greenhouse(
 
     _safe_echo("")
     _safe_echo("Errors by company:")
-    if result.errors:
-        for error in result.errors:
-            _safe_echo(f"  {error.company_name}: {error.message}")
-    else:
-        _safe_echo("  (none)")
+    _print_company_errors(result.errors, debug=debug_errors)
+
+    if titles_by_company:
+        _print_titles_by_company(
+            vacancies=result.vacancies,
+            vacancy_counts=vacancy_counts,
+            limit=titles_limit_per_company,
+        )
 
     if show_vacancies:
         visible = result.vacancies[:limit]
@@ -546,6 +598,98 @@ def collect_target_companies_greenhouse(
             raise typer.Exit(code=1) from exc
         _safe_echo("")
         _safe_echo(f"Wrote {len(result.vacancies)} vacancies to {output}")
+
+
+def _select_target_companies(
+    companies: list[TargetCompany],
+    names: list[str] | None,
+) -> list[TargetCompany]:
+    if not names:
+        return companies
+    requested = [name.strip() for name in names if name.strip()]
+    if not requested:
+        return companies
+
+    by_key = {item.name.casefold(): item for item in companies}
+    selected: list[TargetCompany] = []
+    missing: list[str] = []
+    seen: set[str] = set()
+    for name in requested:
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        match = by_key.get(key)
+        if match is None:
+            missing.append(name)
+        else:
+            selected.append(match)
+    if missing:
+        raise ValueError("Unknown company: " + ", ".join(missing))
+    return selected
+
+
+def _print_company_errors(errors: list[GreenhouseCompanyError], *, debug: bool) -> None:
+    if not errors:
+        _safe_echo("  (none)")
+        return
+    if not debug:
+        for error in errors:
+            _safe_echo(f"  {error.company_name}: {error.message}")
+        return
+    for error in errors:
+        _safe_echo(f"  {error.company_name}:")
+        if error.slug:
+            _safe_echo(f"    slug: {error.slug}")
+        if error.endpoint:
+            _safe_echo(f"    endpoint: {error.endpoint}")
+        if error.status_code is not None:
+            _safe_echo(f"    status_code: {error.status_code}")
+        if error.error_type:
+            _safe_echo(f"    error_type: {error.error_type}")
+        if error.attempts is not None:
+            _safe_echo(f"    attempts: {error.attempts}")
+        _safe_echo(f"    message: {error.message}")
+        if error.response_snippet:
+            _safe_echo(f"    response_snippet: {error.response_snippet}")
+
+
+def _print_titles_by_company(
+    *,
+    vacancies: list[NormalizedVacancy],
+    vacancy_counts: dict[str, int],
+    limit: int,
+) -> None:
+    grouped: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
+    for vacancy in vacancies:
+        name = vacancy.company or "unknown"
+        title = vacancy.title
+        if name not in grouped:
+            grouped[name] = []
+            seen[name] = set()
+        if title in seen[name]:
+            continue
+        seen[name].add(title)
+        grouped[name].append(title)
+
+    _safe_echo("")
+    if not grouped:
+        _safe_echo("Titles by company:")
+        _safe_echo("  (none)")
+        return
+
+    for name in sorted(grouped):
+        titles = grouped[name]
+        count = vacancy_counts.get(name, len(titles))
+        _safe_echo("")
+        _safe_echo(f"Company: {name} ({count})")
+        visible = titles[:limit]
+        for title in visible:
+            _safe_echo(f"  - {title}")
+        remaining = len(titles) - len(visible)
+        if remaining > 0:
+            _safe_echo(f"  ... and {remaining} more")
 
 
 @app.command("reset-imap-checkpoint")

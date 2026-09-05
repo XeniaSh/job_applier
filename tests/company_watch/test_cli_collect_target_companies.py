@@ -27,6 +27,14 @@ companies:
     ats: lever
     job_board_url: https://jobs.lever.co/qonto
     role_keywords: [backend]
+  - name: Canonical
+    priority: A
+    language: english
+    relocation_status: remote_global
+    watcher_type: greenhouse
+    ats: greenhouse
+    job_board_url: https://job-boards.greenhouse.io/canonical
+    role_keywords: [backend]
 """
 
 
@@ -92,9 +100,9 @@ def test_default_output_prints_summary_not_vacancies(tmp_path: Path, monkeypatch
     assert result.exit_code == 0
     companies = captured["companies"]
     assert isinstance(companies, list)
-    assert [company.name for company in companies] == ["Agoda", "Qonto"]
-    assert "Companies in config: 2" in result.output
-    assert "Greenhouse companies: 1" in result.output
+    assert [company.name for company in companies] == ["Agoda", "Qonto", "Canonical"]
+    assert "Companies in config: 3" in result.output
+    assert "Greenhouse companies: 2" in result.output
     assert "Raw vacancies fetched: 0" in result.output
     assert "Vacancies after filtering: 1" in result.output
     assert "Vacancies found: 1" in result.output
@@ -105,6 +113,8 @@ def test_default_output_prints_summary_not_vacancies(tmp_path: Path, monkeypatch
     assert "title: Java Backend Engineer" not in result.output
     assert "external_id: 101" not in result.output
     assert "url: https://job-boards.greenhouse.io/agoda/jobs/101" not in result.output
+    assert "Company: Agoda" not in result.output
+    assert "- Java Backend Engineer" not in result.output
 
 
 def test_show_vacancies_prints_vacancy_details(tmp_path: Path, monkeypatch) -> None:
@@ -295,3 +305,261 @@ def test_invalid_yaml_returns_nonzero_exit(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "invalid" in result.output.lower()
+
+
+def test_titles_by_company_prints_grouped_titles(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", title="Java Backend Engineer", company="Agoda"),
+        _vacancy(external_id="202", title="Platform Engineer", company="Agoda"),
+        _vacancy(external_id="303", title="Java Backend Engineer", company="Agoda"),
+        _vacancy(external_id="404", title="Backend Engineer, Create", company="GitLab"),
+    ]
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(GreenhouseWatchResult(vacancies=vacancies, errors=[]), {}),
+    )
+
+    result = _invoke(config_file, "--titles-by-company")
+
+    assert result.exit_code == 0
+    assert "Vacancies found: 4" in result.output
+    assert "Company: Agoda (3)" in result.output
+    assert "  - Java Backend Engineer" in result.output
+    assert "  - Platform Engineer" in result.output
+    assert "Company: GitLab (1)" in result.output
+    assert "  - Backend Engineer, Create" in result.output
+    assert result.output.count("  - Java Backend Engineer") == 1
+
+
+def test_titles_limit_per_company_truncates_list(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", title="Java Backend Engineer"),
+        _vacancy(external_id="202", title="Platform Engineer"),
+        _vacancy(external_id="303", title="Payments Engineer"),
+    ]
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(GreenhouseWatchResult(vacancies=vacancies, errors=[]), {}),
+    )
+
+    result = _invoke(config_file, "--titles-by-company", "--titles-limit-per-company", "1")
+
+    assert result.exit_code == 0
+    assert "Company: Agoda (3)" in result.output
+    assert "  - Java Backend Engineer" in result.output
+    assert "  - Platform Engineer" not in result.output
+    assert "  - Payments Engineer" not in result.output
+    assert "  ... and 2 more" in result.output
+
+
+def test_titles_by_company_unicode_does_not_crash(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(
+            GreenhouseWatchResult(
+                vacancies=[_vacancy(title="Senior Java \u6c49 Backend")],
+                errors=[],
+            ),
+            {},
+        ),
+    )
+
+    result = _invoke(config_file, "--titles-by-company")
+
+    assert result.exit_code == 0
+    assert "Company: Agoda (1)" in result.output
+    assert "Vacancies found: 1" in result.output
+
+
+def test_company_option_runs_only_selected_company(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(GreenhouseWatchResult(vacancies=[_vacancy()], errors=[]), captured),
+    )
+
+    result = _invoke(config_file, "--company", "agoda")
+
+    assert result.exit_code == 0
+    companies = captured["companies"]
+    assert isinstance(companies, list)
+    assert [item.name for item in companies] == ["Agoda"]
+    assert "Selected companies: 1" in result.output
+    assert "Greenhouse companies: 1" in result.output
+    assert "Companies in config: 3" in result.output
+
+
+def test_company_option_can_be_repeated(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(GreenhouseWatchResult(vacancies=[], errors=[]), captured),
+    )
+
+    result = _invoke(config_file, "--company", "Canonical", "--company", "Agoda")
+
+    assert result.exit_code == 0
+    companies = captured["companies"]
+    assert isinstance(companies, list)
+    assert [item.name for item in companies] == ["Canonical", "Agoda"]
+    assert "Selected companies: 2" in result.output
+    assert "Greenhouse companies: 2" in result.output
+
+
+def test_unknown_company_returns_nonzero_exit(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(GreenhouseWatchResult(vacancies=[], errors=[]), {}),
+    )
+
+    result = _invoke(config_file, "--company", "NoSuchCorp")
+
+    assert result.exit_code != 0
+    assert "Unknown company: NoSuchCorp" in result.output
+
+
+def test_compact_errors_without_debug_flag(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(
+            GreenhouseWatchResult(
+                vacancies=[],
+                errors=[
+                    GreenhouseCompanyError(
+                        company_name="Agoda",
+                        message="Greenhouse board 'agoda' request failed (429).",
+                        slug="agoda",
+                        endpoint="https://boards-api.greenhouse.io/v1/boards/agoda/jobs?content=true",
+                        status_code=429,
+                        response_snippet="rate limited",
+                        error_type="HTTPStatusError",
+                    )
+                ],
+            ),
+            {},
+        ),
+    )
+
+    result = _invoke(config_file)
+
+    assert result.exit_code == 0
+    assert "Agoda: Greenhouse board 'agoda' request failed (429)." in result.output
+    assert "slug: agoda" not in result.output
+    assert "status_code: 429" not in result.output
+    assert "response_snippet:" not in result.output
+
+
+def test_debug_errors_prints_status_and_endpoint(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(
+            GreenhouseWatchResult(
+                vacancies=[],
+                errors=[
+                    GreenhouseCompanyError(
+                        company_name="Agoda",
+                        message="Greenhouse board 'agoda' request failed (429).",
+                        slug="agoda",
+                        endpoint="https://boards-api.greenhouse.io/v1/boards/agoda/jobs?content=true",
+                        status_code=429,
+                        response_snippet="rate limited please retry",
+                        error_type="HTTPStatusError",
+                        attempts=3,
+                    )
+                ],
+            ),
+            {},
+        ),
+    )
+
+    result = _invoke(config_file, "--debug-errors")
+
+    assert result.exit_code == 0
+    assert "Agoda:" in result.output
+    assert "slug: agoda" in result.output
+    assert "endpoint: https://boards-api.greenhouse.io/v1/boards/agoda/jobs?content=true" in result.output
+    assert "status_code: 429" in result.output
+    assert "error_type: HTTPStatusError" in result.output
+    assert "message: Greenhouse board 'agoda' request failed (429)." in result.output
+    assert "attempts: 3" in result.output
+    assert "response_snippet: rate limited please retry" in result.output
+
+
+def test_debug_errors_unicode_does_not_crash(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(
+            GreenhouseWatchResult(
+                vacancies=[],
+                errors=[
+                    GreenhouseCompanyError(
+                        company_name="Agoda",
+                        message="Unexpected symbol \u6c49 in payload",
+                        slug="agoda",
+                        error_type="HTTPStatusError",
+                    )
+                ],
+            ),
+            {},
+        ),
+    )
+
+    result = _invoke(config_file, "--debug-errors")
+
+    assert result.exit_code == 0
+    assert "Agoda:" in result.output
+    assert "message:" in result.output
+
+
+def test_cli_passes_max_attempts_and_delay_seconds(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(GreenhouseWatchResult(vacancies=[], errors=[]), captured),
+    )
+
+    result = _invoke(config_file, "--max-attempts", "5", "--delay-seconds", "2.5")
+
+    assert result.exit_code == 0
+    assert captured["init_kwargs"] == {
+        "max_attempts": 5,
+        "delay_between_companies_seconds": 2.5,
+    }
+
+
+def test_cli_default_retry_options(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(GreenhouseWatchResult(vacancies=[], errors=[]), captured),
+    )
+
+    result = _invoke(config_file)
+
+    assert result.exit_code == 0
+    assert captured["init_kwargs"] == {
+        "max_attempts": 3,
+        "delay_between_companies_seconds": 1.0,
+    }

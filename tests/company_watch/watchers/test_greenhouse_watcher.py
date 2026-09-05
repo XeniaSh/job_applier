@@ -8,6 +8,14 @@ from app.company_watch.models import TargetCompany
 from app.company_watch.watchers.greenhouse import GreenhouseTargetWatcher
 
 
+def _watcher(**overrides):
+    return GreenhouseTargetWatcher(
+        delay_between_companies_seconds=overrides.pop("delay_between_companies_seconds", 0.0),
+        retry_backoff_seconds=overrides.pop("retry_backoff_seconds", 0.0),
+        **overrides,
+    )
+
+
 def _company(**overrides: object) -> TargetCompany:
     payload: dict[str, object] = {
         "name": "Agoda",
@@ -52,7 +60,7 @@ def test_skips_non_greenhouse_companies() -> None:
         job_board_url="https://jobs.lever.co/qonto",
     )
 
-    result = GreenhouseTargetWatcher().watch(company)
+    result = _watcher().watch(company)
 
     assert result.vacancies == []
     assert result.errors == []
@@ -65,7 +73,7 @@ def test_fetches_and_maps_greenhouse_jobs() -> None:
         return_value=httpx.Response(status_code=200, json={"jobs": [_job()]})
     )
 
-    result = GreenhouseTargetWatcher().watch(_company())
+    result = _watcher().watch(_company())
 
     assert len(result.vacancies) == 1
     vacancy = result.vacancies[0]
@@ -98,7 +106,7 @@ def test_role_keywords_filter_irrelevant_jobs() -> None:
         )
     )
 
-    result = GreenhouseTargetWatcher().watch(_company(role_keywords=["java", "backend"]))
+    result = _watcher().watch(_company(role_keywords=["java", "backend"]))
 
     assert [item.external_id for item in result.vacancies] == ["101"]
 
@@ -122,7 +130,7 @@ def test_empty_role_keywords_do_not_filter() -> None:
         )
     )
 
-    result = GreenhouseTargetWatcher().watch(_company(role_keywords=[]))
+    result = _watcher().watch(_company(role_keywords=[]))
 
     assert [item.external_id for item in result.vacancies] == ["101", "202"]
 
@@ -144,12 +152,16 @@ def test_one_company_error_does_not_stop_other_companies() -> None:
         ),
     ]
 
-    result = GreenhouseTargetWatcher().watch(companies)
+    result = _watcher().watch(companies)
 
     assert [item.company for item in result.vacancies] == ["Adyen"]
     assert len(result.errors) == 1
     assert result.errors[0].company_name == "Agoda"
     assert "agoda" in result.errors[0].message.lower()
+    assert result.errors[0].status_code == 500
+    assert result.errors[0].endpoint == greenhouse_jobs_endpoint("agoda")
+    assert result.errors[0].slug == "agoda"
+    assert result.errors[0].error_type == "HTTPStatusError"
 
 
 @respx.mock
@@ -171,8 +183,8 @@ def test_source_and_external_id_are_stable() -> None:
         )
     )
 
-    first = GreenhouseTargetWatcher().watch(_company(role_keywords=[], role_title_keywords=[]))
-    second = GreenhouseTargetWatcher().watch(_company(role_keywords=[], role_title_keywords=[]))
+    first = _watcher().watch(_company(role_keywords=[], role_title_keywords=[]))
+    second = _watcher().watch(_company(role_keywords=[], role_title_keywords=[]))
 
     assert [item.source for item in first.vacancies] == [
         "target_company:greenhouse:agoda",
@@ -196,7 +208,7 @@ def test_ats_greenhouse_is_watched_even_if_watcher_type_differs() -> None:
         role_keywords=[],
     )
 
-    result = GreenhouseTargetWatcher().watch(company)
+    result = _watcher().watch(company)
 
     assert len(result.vacancies) == 1
     assert result.vacancies[0].source == "target_company:greenhouse:elastic"
@@ -204,7 +216,7 @@ def test_ats_greenhouse_is_watched_even_if_watcher_type_differs() -> None:
 
 def test_watch_accepts_a_single_company_without_treating_model_as_sequence() -> None:
     company = _company(watcher_type="lever", ats="lever")
-    result = GreenhouseTargetWatcher().watch(company)
+    result = _watcher().watch(company)
     assert result.vacancies == []
     assert result.errors == []
 
@@ -227,7 +239,7 @@ def test_description_only_keyword_is_ignored() -> None:
         )
     )
 
-    result = GreenhouseTargetWatcher().watch(_company(role_keywords=["java", "backend"]))
+    result = _watcher().watch(_company(role_keywords=["java", "backend"]))
 
     assert result.raw_fetched == 1
     assert result.vacancies == []
@@ -251,7 +263,7 @@ def test_exclude_title_keywords_drop_matching_jobs() -> None:
         )
     )
 
-    result = GreenhouseTargetWatcher().watch(
+    result = _watcher().watch(
         _company(
             role_title_keywords=["java", "backend"],
             exclude_title_keywords=["staff"],
@@ -260,3 +272,144 @@ def test_exclude_title_keywords_drop_matching_jobs() -> None:
 
     assert result.raw_fetched == 2
     assert [item.external_id for item in result.vacancies] == ["101"]
+
+
+@respx.mock
+def test_http_error_includes_status_endpoint_and_snippet() -> None:
+    respx.get(greenhouse_jobs_endpoint("agoda")).mock(
+        return_value=httpx.Response(status_code=429, text="rate limited please retry")
+    )
+
+    result = _watcher().watch(_company())
+
+    assert result.vacancies == []
+    assert len(result.errors) == 1
+    error = result.errors[0]
+    assert error.company_name == "Agoda"
+    assert error.slug == "agoda"
+    assert error.endpoint == greenhouse_jobs_endpoint("agoda")
+    assert error.status_code == 429
+    assert error.error_type == "HTTPStatusError"
+    assert "429" in error.message
+    assert error.response_snippet == "rate limited please retry"
+    assert error.attempts == 3
+
+
+@respx.mock
+def test_retries_429_then_succeeds_on_second_attempt() -> None:
+    route = respx.get(greenhouse_jobs_endpoint("agoda")).mock(
+        side_effect=[
+            httpx.Response(status_code=429, text="rate limited"),
+            httpx.Response(status_code=200, json={"jobs": [_job()]}),
+        ]
+    )
+    sleeps: list[float] = []
+
+    result = _watcher(sleep=sleeps.append, retry_backoff_seconds=1.0).watch(_company())
+
+    assert route.call_count == 2
+    assert sleeps == [1.0]
+    assert result.errors == []
+    assert len(result.vacancies) == 1
+
+
+@respx.mock
+def test_retries_500_then_succeeds() -> None:
+    route = respx.get(greenhouse_jobs_endpoint("agoda")).mock(
+        side_effect=[
+            httpx.Response(status_code=500, text="upstream error"),
+            httpx.Response(status_code=200, json={"jobs": [_job()]}),
+        ]
+    )
+    sleeps: list[float] = []
+
+    result = _watcher(sleep=sleeps.append, retry_backoff_seconds=1.0).watch(_company())
+
+    assert route.call_count == 2
+    assert sleeps == [1.0]
+    assert result.errors == []
+    assert len(result.vacancies) == 1
+
+
+@respx.mock
+def test_does_not_retry_404() -> None:
+    route = respx.get(greenhouse_jobs_endpoint("agoda")).mock(
+        return_value=httpx.Response(status_code=404, text="not found")
+    )
+    sleeps: list[float] = []
+
+    result = _watcher(sleep=sleeps.append, retry_backoff_seconds=1.0).watch(_company())
+
+    assert route.call_count == 1
+    assert sleeps == []
+    assert len(result.errors) == 1
+    assert result.errors[0].status_code == 404
+    assert result.errors[0].attempts == 1
+
+
+@respx.mock
+def test_retries_timeout_then_succeeds() -> None:
+    route = respx.get(greenhouse_jobs_endpoint("agoda")).mock(
+        side_effect=[
+            httpx.ConnectTimeout("Connection timed out"),
+            httpx.Response(status_code=200, json={"jobs": [_job()]}),
+        ]
+    )
+    sleeps: list[float] = []
+
+    result = _watcher(sleep=sleeps.append, retry_backoff_seconds=1.0).watch(_company())
+
+    assert route.call_count == 2
+    assert sleeps == [1.0]
+    assert result.errors == []
+    assert len(result.vacancies) == 1
+
+
+@respx.mock
+def test_final_transient_error_includes_attempts_count() -> None:
+    route = respx.get(greenhouse_jobs_endpoint("agoda")).mock(
+        return_value=httpx.Response(status_code=429, text="rate limited")
+    )
+    sleeps: list[float] = []
+
+    result = _watcher(
+        sleep=sleeps.append,
+        retry_backoff_seconds=1.0,
+        max_attempts=3,
+    ).watch(_company())
+
+    assert route.call_count == 3
+    assert sleeps == [1.0, 2.0]
+    assert len(result.errors) == 1
+    assert result.errors[0].attempts == 3
+    assert result.errors[0].status_code == 429
+
+
+@respx.mock
+def test_delay_between_companies_is_called_without_real_sleep() -> None:
+    respx.get(greenhouse_jobs_endpoint("agoda")).mock(
+        return_value=httpx.Response(status_code=200, json={"jobs": [_job()]})
+    )
+    respx.get(greenhouse_jobs_endpoint("adyen")).mock(
+        return_value=httpx.Response(status_code=200, json={"jobs": [_job()]})
+    )
+    sleeps: list[float] = []
+    companies = [
+        _company(name="Agoda", job_board_url="https://job-boards.greenhouse.io/agoda"),
+        _company(
+            name="Qonto",
+            watcher_type="lever",
+            ats="lever",
+            job_board_url="https://jobs.lever.co/qonto",
+        ),
+        _company(name="Adyen", job_board_url="https://job-boards.greenhouse.io/adyen"),
+    ]
+
+    result = _watcher(
+        delay_between_companies_seconds=1.5,
+        sleep=sleeps.append,
+    ).watch(companies)
+
+    assert sleeps == [1.5]
+    assert {item.company for item in result.vacancies} == {"Agoda", "Adyen"}
+    assert result.errors == []

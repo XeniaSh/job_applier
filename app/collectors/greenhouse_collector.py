@@ -13,9 +13,28 @@ from app.collectors.vacancy_collector import NormalizedVacancy, VacancyCollector
 
 logger = logging.getLogger(__name__)
 
+_RESPONSE_SNIPPET_LIMIT = 400
+
 
 class GreenhouseCollectionError(Exception):
     """Raised when Greenhouse board collection fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        board: str | None = None,
+        endpoint: str | None = None,
+        status_code: int | None = None,
+        response_snippet: str | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.board = board
+        self.endpoint = endpoint
+        self.status_code = status_code
+        self.response_snippet = response_snippet
+        self.error_type = error_type
 
 
 class _HTMLToTextParser(HTMLParser):
@@ -67,18 +86,58 @@ def build_greenhouse_http_client(
 
 def fetch_greenhouse_board_jobs(board: str, *, client: httpx.Client) -> list[Any]:
     endpoint = greenhouse_jobs_endpoint(board)
+    response: httpx.Response | None = None
     try:
         response = client.get(endpoint)
         response.raise_for_status()
         payload = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise GreenhouseCollectionError(f"Greenhouse board '{board}' request failed.") from exc
+    except httpx.HTTPStatusError as exc:
+        raise _greenhouse_request_error(board, endpoint, exc, response=exc.response) from exc
+    except httpx.HTTPError as exc:
+        raise _greenhouse_request_error(board, endpoint, exc, response=response) from exc
+    except ValueError as exc:
+        raise _greenhouse_request_error(board, endpoint, exc, response=response) from exc
 
     jobs = payload.get("jobs", [])
     if not isinstance(jobs, list):
         logger.warning("Unexpected Greenhouse payload for board '%s'", board)
         return []
     return jobs
+
+
+def _greenhouse_request_error(
+    board: str,
+    endpoint: str,
+    exc: Exception,
+    *,
+    response: httpx.Response | None,
+) -> GreenhouseCollectionError:
+    status_code = getattr(response, "status_code", None)
+    error_type = type(exc).__name__
+    if status_code is not None:
+        message = f"Greenhouse board '{board}' request failed ({status_code})."
+    else:
+        message = f"Greenhouse board '{board}' request failed ({error_type})."
+    return GreenhouseCollectionError(
+        message,
+        board=board,
+        endpoint=endpoint,
+        status_code=status_code if isinstance(status_code, int) else None,
+        response_snippet=_response_snippet(response),
+        error_type=error_type,
+    )
+
+
+def _response_snippet(response: httpx.Response | None) -> str | None:
+    if response is None:
+        return None
+    raw_text = getattr(response, "text", "") or ""
+    snippet = " ".join(raw_text.split())
+    if not snippet:
+        return None
+    if len(snippet) > _RESPONSE_SNIPPET_LIMIT:
+        return snippet[:_RESPONSE_SNIPPET_LIMIT] + "..."
+    return snippet
 
 
 def normalize_greenhouse_board(value: str) -> str:
