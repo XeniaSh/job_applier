@@ -5,7 +5,7 @@ import logging
 import re
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import httpx
 
@@ -50,6 +50,37 @@ def clean_html_to_text(value: str | None) -> str:
     return parser.get_text()
 
 
+def greenhouse_jobs_endpoint(board: str) -> str:
+    return f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true"
+
+
+def build_greenhouse_http_client(
+    *,
+    timeout_seconds: float,
+    user_agent: str,
+) -> httpx.Client:
+    return httpx.Client(
+        timeout=httpx.Timeout(connect=5.0, read=timeout_seconds, write=10.0, pool=5.0),
+        headers={"User-Agent": user_agent},
+    )
+
+
+def fetch_greenhouse_board_jobs(board: str, *, client: httpx.Client) -> list[Any]:
+    endpoint = greenhouse_jobs_endpoint(board)
+    try:
+        response = client.get(endpoint)
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise GreenhouseCollectionError(f"Greenhouse board '{board}' request failed.") from exc
+
+    jobs = payload.get("jobs", [])
+    if not isinstance(jobs, list):
+        logger.warning("Unexpected Greenhouse payload for board '%s'", board)
+        return []
+    return jobs
+
+
 def normalize_greenhouse_board(value: str) -> str:
     cleaned = value.strip().rstrip("/")
     if not cleaned:
@@ -82,25 +113,14 @@ class GreenhouseCollector(VacancyCollector):
 
     def collect(self) -> list[NormalizedVacancy]:
         collected: list[NormalizedVacancy] = []
-        with httpx.Client(
-            timeout=httpx.Timeout(connect=5.0, read=self._timeout_seconds, write=10.0, pool=5.0),
-            headers={"User-Agent": self._user_agent},
+        with build_greenhouse_http_client(
+            timeout_seconds=self._timeout_seconds,
+            user_agent=self._user_agent,
         ) as client:
             for board in self._boards:
-                endpoint = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true"
-                try:
-                    response = client.get(endpoint)
-                    response.raise_for_status()
-                    payload = response.json()
-                except (httpx.HTTPError, ValueError) as exc:
-                    raise GreenhouseCollectionError(f"Greenhouse board '{board}' request failed.") from exc
-
-                jobs = payload.get("jobs", [])
-                if not isinstance(jobs, list):
-                    logger.warning("Unexpected Greenhouse payload for board '%s'", board)
-                    continue
+                jobs = fetch_greenhouse_board_jobs(board, client=client)
                 for item in jobs:
-                    normalized = _job_to_normalized(item=item)
+                    normalized = greenhouse_job_to_normalized(item)
                     if normalized is None:
                         continue
                     collected.append(normalized)
@@ -108,13 +128,17 @@ class GreenhouseCollector(VacancyCollector):
         return collected
 
 
-def _job_to_normalized(item: Any) -> NormalizedVacancy | None:
+def greenhouse_job_to_normalized(
+    item: Any,
+    *,
+    source: str = GreenhouseCollector.SOURCE,
+    company: str | None = None,
+) -> NormalizedVacancy | None:
     if not isinstance(item, dict):
         return None
-    raw_id = item.get("id")
-    external_id = str(raw_id).strip() if raw_id is not None else ""
     title = str(item.get("title") or "").strip()
     absolute_url = str(item.get("absolute_url") or "").strip()
+    external_id = _greenhouse_external_id(item, absolute_url)
     if not external_id or not title or not absolute_url:
         return None
     location = ((item.get("location") or {}).get("name") or None) if isinstance(item.get("location"), dict) else None
@@ -135,25 +159,36 @@ def _job_to_normalized(item: Any) -> NormalizedVacancy | None:
     if not cleaned_description:
         cleaned_description = title
 
-    company = None
-    data_compliance = item.get("data_compliance")
-    if isinstance(data_compliance, list):
-        for row in data_compliance:
-            if not isinstance(row, dict):
-                continue
-            text = str(row.get("text") or "").strip()
-            if text:
-                company = text
-                break
+    resolved_company = company.strip() if isinstance(company, str) and company.strip() else None
+    if resolved_company is None:
+        data_compliance = item.get("data_compliance")
+        if isinstance(data_compliance, list):
+            for row in data_compliance:
+                if not isinstance(row, dict):
+                    continue
+                text = str(row.get("text") or "").strip()
+                if text:
+                    resolved_company = text
+                    break
 
     return NormalizedVacancy(
-        source=GreenhouseCollector.SOURCE,
+        source=source,
         external_id=external_id,
         title=title,
-        company=company,
+        company=resolved_company,
         location=str(location).strip() if isinstance(location, str) and location.strip() else None,
         employment=employment,
         description=cleaned_description,
         url=absolute_url,
         published_at=str(item.get("updated_at") or item.get("first_published") or "") or None,
     )
+
+
+def _greenhouse_external_id(item: dict[str, Any], url: str) -> str:
+    raw_id = item.get("id")
+    if raw_id is not None and str(raw_id).strip():
+        return str(raw_id).strip()
+    path = urlsplit(url).path.rstrip("/")
+    if not path:
+        return ""
+    return path.rsplit("/", 1)[-1].strip()
