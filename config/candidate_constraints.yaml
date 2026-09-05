@@ -1,0 +1,10 @@
+# Candidate constraints for Target Companies dry-run recommendations.
+# These are hard constraints, not a country wishlist.
+
+known_languages:
+  - english
+  - russian
+
+requires_visa_sponsorship: true
+open_to_relocation: true
+open_to_remote_worldwide: true

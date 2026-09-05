@@ -20,6 +20,16 @@ from pydantic import ValidationError
 from app.collectors.hh_client import HHClient
 from app.collectors.hh_collector import DEFAULT_HH_QUERIES, HHCollector, HHCollectReport
 from app.collectors.greenhouse_collector import GreenhouseCollectionError, GreenhouseCollector
+from app.company_watch.application_recommendation import (
+    RECOMMENDATION_LABELS,
+    ApplicationRecommendation,
+    recommend_application,
+)
+from app.company_watch.candidate_constraints import (
+    DEFAULT_CANDIDATE_CONSTRAINTS_PATH,
+    CandidateConstraintsLoadError,
+    load_candidate_constraints,
+)
 from app.company_watch.config_loader import (
     DEFAULT_TARGET_COMPANIES_PATH,
     TargetCompaniesConfigLoadError,
@@ -608,6 +618,7 @@ def collect_target_companies_greenhouse(
 _ANALYZE_SORT_CHOICES = ("source-order", "score")
 _ANALYZE_DECISION_CHOICES = tuple(item.value for item in Decision)
 _ANALYZE_FEASIBILITY_CHOICES = FEASIBILITY_LABELS
+_ANALYZE_RECOMMENDATION_CHOICES = RECOMMENDATION_LABELS
 
 
 @app.command("analyze-target-companies-greenhouse")
@@ -649,6 +660,11 @@ def analyze_target_companies_greenhouse(
         "--feasibility",
         help="Show only these application feasibility values. Repeatable.",
     ),
+    recommendation: list[str] | None = typer.Option(
+        None,
+        "--recommendation",
+        help="Show only these application recommendations. Repeatable.",
+    ),
     output: Path | None = typer.Option(
         None,
         "--output",
@@ -659,6 +675,7 @@ def analyze_target_companies_greenhouse(
         sort_by_normalized = _normalize_analyze_sort_by(sort_by)
         selected_decisions = _normalize_analyze_decisions(decision)
         selected_feasibilities = _normalize_analyze_feasibilities(feasibility)
+        selected_recommendations = _normalize_analyze_recommendations(recommendation)
     except ValueError as exc:
         typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
@@ -672,6 +689,12 @@ def analyze_target_companies_greenhouse(
     try:
         selected_companies = _select_target_companies(loaded.companies, company)
     except ValueError as exc:
+        typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    try:
+        constraints = load_candidate_constraints(DEFAULT_CANDIDATE_CONSTRAINTS_PATH)
+    except CandidateConstraintsLoadError as exc:
         typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
 
@@ -708,6 +731,7 @@ def analyze_target_companies_greenhouse(
     decision_counts_before: dict[str, int] = {name: 0 for name in _ANALYZE_DECISION_CHOICES}
     analyzed_by_company: dict[str, int] = {}
     analysis_errors = 0
+    companies_by_name = {item.name.casefold(): item for item in selected_companies}
 
     for vacancy in to_analyze:
         if analyzer is None:
@@ -732,6 +756,14 @@ def analyze_target_companies_greenhouse(
             language_requirements=evaluation.language_requirements,
             location_restrictions=evaluation.location_restrictions,
         )
+        target_company = companies_by_name.get((vacancy.company or "").casefold())
+        recommendation_result = recommend_application(
+            decision=evaluation.decision,
+            feasibility=assessment,
+            constraints=constraints,
+            company=target_company,
+            location=vacancy.location,
+        )
         decision_counts_before[evaluation.decision.value] = (
             decision_counts_before.get(evaluation.decision.value, 0) + 1
         )
@@ -742,36 +774,51 @@ def analyze_target_companies_greenhouse(
                 vacancy=vacancy,
                 evaluation=evaluation,
                 feasibility=assessment,
+                recommendation=recommendation_result,
             )
         )
 
-    filters_applied = min_score is not None or bool(selected_decisions) or bool(selected_feasibilities)
+    filters_applied = (
+        min_score is not None
+        or bool(selected_decisions)
+        or bool(selected_feasibilities)
+        or bool(selected_recommendations)
+    )
     shown_items = _filter_target_company_analysis_items(
         _sort_target_company_analysis_items(analyzed_items, sort_by=sort_by_normalized),
         min_score=min_score,
         decisions=selected_decisions,
         feasibilities=selected_feasibilities,
+        recommendations=selected_recommendations,
     )
     decision_counts_after = {name: 0 for name in _ANALYZE_DECISION_CHOICES}
     feasibility_counts_before = {name: 0 for name in _ANALYZE_FEASIBILITY_CHOICES}
     feasibility_counts_after = {name: 0 for name in _ANALYZE_FEASIBILITY_CHOICES}
+    recommendation_counts_before = {name: 0 for name in _ANALYZE_RECOMMENDATION_CHOICES}
+    recommendation_counts_after = {name: 0 for name in _ANALYZE_RECOMMENDATION_CHOICES}
     for item in analyzed_items:
-        if item.feasibility is None:
-            continue
-        feasibility_counts_before[item.feasibility.label] = (
-            feasibility_counts_before.get(item.feasibility.label, 0) + 1
-        )
+        if item.feasibility is not None:
+            feasibility_counts_before[item.feasibility.label] = (
+                feasibility_counts_before.get(item.feasibility.label, 0) + 1
+            )
+        if item.recommendation is not None:
+            recommendation_counts_before[item.recommendation.label] = (
+                recommendation_counts_before.get(item.recommendation.label, 0) + 1
+            )
     for item in shown_items:
         if item.evaluation is None:
             continue
         decision_counts_after[item.evaluation.decision.value] = (
             decision_counts_after.get(item.evaluation.decision.value, 0) + 1
         )
-        if item.feasibility is None:
-            continue
-        feasibility_counts_after[item.feasibility.label] = (
-            feasibility_counts_after.get(item.feasibility.label, 0) + 1
-        )
+        if item.feasibility is not None:
+            feasibility_counts_after[item.feasibility.label] = (
+                feasibility_counts_after.get(item.feasibility.label, 0) + 1
+            )
+        if item.recommendation is not None:
+            recommendation_counts_after[item.recommendation.label] = (
+                recommendation_counts_after.get(item.recommendation.label, 0) + 1
+            )
 
     for item in shown_items:
         if item.evaluation is None:
@@ -783,6 +830,7 @@ def analyze_target_companies_greenhouse(
             item.vacancy,
             item.evaluation,
             feasibility=item.feasibility,
+            recommendation=item.recommendation,
         )
 
     analyzed_count = sum(decision_counts_before.values())
@@ -807,6 +855,14 @@ def analyze_target_companies_greenhouse(
         _safe_echo("")
         _safe_echo("Feasibility after filters:")
         _print_named_counts(feasibility_counts_after, _ANALYZE_FEASIBILITY_CHOICES)
+
+    _safe_echo("")
+    _safe_echo("Recommendations:")
+    _print_named_counts(recommendation_counts_before, _ANALYZE_RECOMMENDATION_CHOICES)
+    if filters_applied:
+        _safe_echo("")
+        _safe_echo("Recommendations after filters:")
+        _print_named_counts(recommendation_counts_after, _ANALYZE_RECOMMENDATION_CHOICES)
 
     _safe_echo("")
     _safe_echo("Analyzed by company:")
@@ -859,6 +915,7 @@ class _TargetCompanyAnalysisItem:
     evaluation: VacancyEvaluation | None
     error: str | None = None
     feasibility: ApplicationFeasibility | None = None
+    recommendation: ApplicationRecommendation | None = None
 
     @property
     def score(self) -> float | None:
@@ -909,6 +966,23 @@ def _normalize_analyze_feasibilities(values: list[str] | None) -> frozenset[str]
     return frozenset(selected)
 
 
+def _normalize_analyze_recommendations(values: list[str] | None) -> frozenset[str]:
+    if not values:
+        return frozenset()
+    selected: set[str] = set()
+    invalid: list[str] = []
+    for raw in values:
+        normalized = raw.strip().upper()
+        if normalized in _ANALYZE_RECOMMENDATION_CHOICES:
+            selected.add(normalized)
+        else:
+            invalid.append(raw)
+    if invalid:
+        allowed = ", ".join(_ANALYZE_RECOMMENDATION_CHOICES)
+        raise ValueError("Invalid --recommendation: " + ", ".join(invalid) + f". Expected {allowed}.")
+    return frozenset(selected)
+
+
 def _sort_target_company_analysis_items(
     items: list[_TargetCompanyAnalysisItem],
     *,
@@ -935,6 +1009,7 @@ def _filter_target_company_analysis_items(
     min_score: float | None,
     decisions: frozenset[str],
     feasibilities: frozenset[str],
+    recommendations: frozenset[str],
 ) -> list[_TargetCompanyAnalysisItem]:
     shown: list[_TargetCompanyAnalysisItem] = []
     for item in items:
@@ -943,6 +1018,8 @@ def _filter_target_company_analysis_items(
         if min_score is not None and (item.score is None or item.score < min_score):
             continue
         if feasibilities and (item.feasibility is None or item.feasibility.label not in feasibilities):
+            continue
+        if recommendations and (item.recommendation is None or item.recommendation.label not in recommendations):
             continue
         shown.append(item)
     return shown
@@ -980,6 +1057,8 @@ def _target_company_analysis_payload(item: _TargetCompanyAnalysisItem) -> dict[s
         "language_requirements": item.feasibility.language_requirements if item.feasibility else [],
         "location_restrictions": item.feasibility.location_restrictions if item.feasibility else [],
         "feasibility_warnings": item.feasibility.warnings if item.feasibility else [],
+        "application_recommendation": item.recommendation.label if item.recommendation else None,
+        "recommendation_reasons": item.recommendation.reasons if item.recommendation else [],
     }
     if evaluation is not None:
         payload["match_percentage"] = evaluation.match_percentage
@@ -1006,12 +1085,17 @@ def _print_target_company_analysis_vacancy(
     evaluation: VacancyEvaluation,
     *,
     feasibility: ApplicationFeasibility | None = None,
+    recommendation: ApplicationRecommendation | None = None,
 ) -> None:
     score = _format_analysis_score(evaluation.match_percentage)
     company_name = vacancy.company or "unknown"
     feasibility_label = feasibility.label if feasibility is not None else "UNCLEAR"
+    recommendation_label = recommendation.label if recommendation is not None else "CHECK_MANUALLY"
     _safe_echo("")
-    _safe_echo(f"[{evaluation.decision.value}] {score} | [FEASIBILITY: {feasibility_label}]")
+    _safe_echo(
+        f"[{evaluation.decision.value}] {score} | [FEASIBILITY: {feasibility_label}] "
+        f"| [RECOMMENDATION: {recommendation_label}]"
+    )
     _safe_echo(f"{company_name} - {vacancy.title}")
     _safe_echo(f"Location: {vacancy.location or ''}")
     matched = [item.strip() for item in evaluation.matched_points if item.strip()]
@@ -1025,6 +1109,8 @@ def _print_target_company_analysis_vacancy(
         _safe_echo(f"Reasons: {reason}")
     if feasibility is not None and feasibility.warnings:
         _safe_echo(f"Feasibility: {'; '.join(feasibility.warnings)}")
+    if recommendation is not None and recommendation.reasons:
+        _safe_echo(f"Recommendation reasons: {'; '.join(recommendation.reasons)}")
     _safe_echo(f"URL: {vacancy.url}")
 
 

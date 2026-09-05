@@ -72,6 +72,7 @@ def _evaluation(
     matched_points: list[str] | None = None,
     decision_reason: str = "Java backend match",
     summary: str = "Strong Java backend role",
+    language_requirements: list[str] | None = None,
 ) -> VacancyEvaluation:
     return VacancyEvaluation(
         decision=decision,
@@ -85,6 +86,7 @@ def _evaluation(
         total_possible_score=14.0,
         recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
+        language_requirements=language_requirements or [],
     )
 
 
@@ -169,8 +171,9 @@ def test_command_runs_watcher_and_analyzer(tmp_path: Path, monkeypatch) -> None:
     assert captured["texts"]
     assert captured["texts"][0].startswith("Title: Java Backend Engineer")
     assert captured["completeness"] == ["FULL"]
-    assert "[STRONG_MATCH] 86 | [FEASIBILITY: UNCLEAR]" in result.output
+    assert "[STRONG_MATCH] 86 | [FEASIBILITY: UNCLEAR] | [RECOMMENDATION: CHECK_MANUALLY]" in result.output
     assert "Agoda - Java Backend Engineer" in result.output
+    assert "Recommendation reasons: sponsorship/relocation/location is unclear" in result.output
     assert "Location: Bangkok" in result.output
     assert "Matched: java, backend" in result.output
     assert "Reasons: Java backend match" in result.output
@@ -275,6 +278,8 @@ def test_summary_includes_analyzed_and_decision_counts(tmp_path: Path, monkeypat
     assert "IGNORE: 0" in result.output
     assert "Feasibility:" in result.output
     assert "UNCLEAR:" in result.output
+    assert "Recommendations:" in result.output
+    assert "CHECK_MANUALLY:" in result.output
     assert "Agoda: 1" in result.output
     assert "Canonical: 1" in result.output
 
@@ -314,6 +319,8 @@ def test_output_writes_utf8_json_results(tmp_path: Path, monkeypatch) -> None:
     assert payload["vacancies"][0]["decision"] == "STRONG_MATCH"
     assert payload["vacancies"][0]["score"] == 86.0
     assert payload["vacancies"][0]["application_feasibility"] == "UNCLEAR"
+    assert payload["vacancies"][0]["application_recommendation"] == "CHECK_MANUALLY"
+    assert payload["vacancies"][0]["recommendation_reasons"]
     assert payload["vacancies"][0]["visa_sponsorship"] == "unknown"
     assert payload["vacancies"][0]["relocation_support"] == "unknown"
     assert payload["vacancies"][0]["remote_type"] == "unknown"
@@ -475,6 +482,8 @@ def test_output_includes_feasibility_fields(tmp_path: Path, monkeypatch) -> None
     assert item["work_authorization_requirement"] == "unknown"
     assert item["language_requirements"] == []
     assert "feasibility_warnings" in item
+    assert item["application_recommendation"] == "APPLY_NOW"
+    assert item["recommendation_reasons"]
 
 
 def test_unicode_in_feasibility_warnings_does_not_crash(tmp_path: Path, monkeypatch) -> None:
@@ -678,4 +687,76 @@ def test_ignore_prints_rejected_because(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert "Matched: java, postgresql" in result.output
     assert "Rejected because: Primary role is data platform, not Java backend" in result.output
-    assert "[IGNORE] 82 | [FEASIBILITY: UNCLEAR]" in result.output
+    assert "[IGNORE] 82 | [FEASIBILITY: UNCLEAR] | [RECOMMENDATION: SKIP]" in result.output
+
+
+def test_recommendation_filter_shows_only_selected_values(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(
+            external_id="101",
+            title="Sponsored Java Engineer",
+            description="Java backend. Visa sponsorship is available.",
+            location="Amsterdam",
+        ),
+        _vacancy(
+            external_id="202",
+            title="Unclear Java Engineer",
+            description="Java backend services.",
+            location="Chicago",
+        ),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=2),
+        evaluation=[_evaluation(match_percentage=90.0), _evaluation(match_percentage=80.0)],
+    )
+
+    result = _invoke(config_file, "--recommendation", "APPLY_NOW")
+
+    assert result.exit_code == 0
+    assert len(captured["texts"]) == 2
+    assert "Sponsored Java Engineer" in result.output
+    assert "Unclear Java Engineer" not in result.output
+    assert "Vacancies analyzed: 2" in result.output
+    assert "Results shown: 1" in result.output
+    assert "Recommendations after filters:" in result.output
+    assert "APPLY_NOW: 1" in result.output
+
+
+def test_output_contains_recommendation_fields(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    output_file = tmp_path / "analysis.json"
+    _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=[_vacancy()], errors=[], raw_fetched=1),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(config_file, "--output", str(output_file))
+
+    assert result.exit_code == 0
+    payload = json.loads(output_file.read_text(encoding="utf-8"))
+    item = payload["vacancies"][0]
+    assert item["application_recommendation"] == "CHECK_MANUALLY"
+    assert item["recommendation_reasons"] == ["sponsorship/relocation/location is unclear"]
+
+
+def test_unicode_in_recommendation_reasons_does_not_crash(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(
+            vacancies=[_vacancy(title="Java Engineer", location="S\u00e3o Paulo")],
+            errors=[],
+            raw_fetched=1,
+        ),
+        evaluation=_evaluation(language_requirements=["portugu\u00eas"]),
+    )
+
+    result = _invoke(config_file)
+
+    assert result.exit_code == 0
+    assert "Vacancies analyzed: 1" in result.output
+    assert "Recommendation reasons:" in result.output
+    assert "[RECOMMENDATION: SKIP]" in result.output
