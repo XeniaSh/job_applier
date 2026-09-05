@@ -13,7 +13,12 @@ Use exactly this schema:
   "location_restrictions": ["string"],
   "uncertainties": ["string"],
   "role_type": "string",
-  "short_summary": "string"
+  "short_summary": "string",
+  "visa_sponsorship": "yes | no | unknown",
+  "relocation_support": "yes | no | unknown",
+  "remote_type": "worldwide | country_limited | hybrid | onsite | unknown",
+  "work_authorization_requirement": "required | not_required | unknown",
+  "language_requirements": ["string"]
 }
 
 Rules:
@@ -35,6 +40,11 @@ Rules:
 - uncertainties: only real ambiguity that can block application and requires clarification.
 - role_type: short role name from vacancy.
 - short_summary: one short sentence describing the role and context.
+- visa_sponsorship: yes only if the vacancy explicitly offers visa sponsorship; no if it explicitly refuses; otherwise unknown.
+- relocation_support: yes only if the vacancy explicitly offers relocation support/package; no if it explicitly refuses; otherwise unknown.
+- remote_type: worldwide if work-from-anywhere is explicit; country_limited if remote is limited to a country/region; hybrid/onsite if explicit; otherwise unknown.
+- work_authorization_requirement: required if the vacancy explicitly requires existing local work authorization or says it cannot sponsor; not_required if it explicitly says authorization is not needed; otherwise unknown.
+- language_requirements: explicit language requirements only, for example "english", "dutch".
 
 Strict limits:
 - mandatory_skills: maximum 12 items
@@ -43,6 +53,7 @@ Strict limits:
 - employment_conditions: maximum 3 items
 - location_restrictions: maximum 3 items
 - uncertainties: maximum 3 items
+- language_requirements: maximum 5 items
 - short_summary: maximum 20 words
 
 Skill item format:
@@ -80,6 +91,8 @@ Uncertainties must NOT include:
 Do not treat missing salary as uncertainty.
 Do not treat unspecified remote format as uncertainty unless vacancy explicitly creates a location or eligibility conflict.
 All human-readable fields must be in Russian: short_summary, responsibilities, employment_conditions, location_restrictions, uncertainties.
+visa_sponsorship, relocation_support, remote_type, and work_authorization_requirement must use the English coded values above.
+language_requirements may stay in standard English form.
 Technical skill names may stay in standard English form.
 
 Atomic examples:

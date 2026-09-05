@@ -25,6 +25,11 @@ from app.company_watch.config_loader import (
     TargetCompaniesConfigLoadError,
     load_target_companies_config,
 )
+from app.company_watch.feasibility import (
+    FEASIBILITY_LABELS,
+    ApplicationFeasibility,
+    assess_application_feasibility,
+)
 from app.company_watch.models import TargetCompany
 from app.company_watch.watchers.greenhouse import (
     GreenhouseCompanyError,
@@ -600,6 +605,11 @@ def collect_target_companies_greenhouse(
         _safe_echo(f"Wrote {len(result.vacancies)} vacancies to {output}")
 
 
+_ANALYZE_SORT_CHOICES = ("source-order", "score")
+_ANALYZE_DECISION_CHOICES = tuple(item.value for item in Decision)
+_ANALYZE_FEASIBILITY_CHOICES = FEASIBILITY_LABELS
+
+
 @app.command("analyze-target-companies-greenhouse")
 def analyze_target_companies_greenhouse(
     config: Path = typer.Option(
@@ -612,18 +622,47 @@ def analyze_target_companies_greenhouse(
         "--company",
         help="Analyze only these company names. Repeatable.",
     ),
-    limit: int = typer.Option(
+    analyze_limit: int = typer.Option(
         30,
+        "--analyze-limit",
         "--limit",
         min=1,
         help="Max vacancies to analyze. Safety guard against large LLM batches.",
     ),
+    sort_by: str = typer.Option(
+        "source-order",
+        "--sort-by",
+        help="Sort analyzed results by source-order or score.",
+    ),
+    min_score: float | None = typer.Option(
+        None,
+        "--min-score",
+        help="Show only analyzed vacancies with score >= this value.",
+    ),
+    decision: list[str] | None = typer.Option(
+        None,
+        "--decision",
+        help="Show only these decisions. Repeatable.",
+    ),
+    feasibility: list[str] | None = typer.Option(
+        None,
+        "--feasibility",
+        help="Show only these application feasibility values. Repeatable.",
+    ),
     output: Path | None = typer.Option(
         None,
         "--output",
-        help="Write full analysis results to a UTF-8 JSON file.",
+        help="Write filtered analysis results to a UTF-8 JSON file.",
     ),
 ) -> None:
+    try:
+        sort_by_normalized = _normalize_analyze_sort_by(sort_by)
+        selected_decisions = _normalize_analyze_decisions(decision)
+        selected_feasibilities = _normalize_analyze_feasibilities(feasibility)
+    except ValueError as exc:
+        typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
     try:
         loaded = load_target_companies_config(config)
     except TargetCompaniesConfigLoadError as exc:
@@ -638,7 +677,7 @@ def analyze_target_companies_greenhouse(
 
     greenhouse_count = sum(1 for item in selected_companies if is_greenhouse_target(item))
     watch_result = GreenhouseTargetWatcher().watch(selected_companies)
-    to_analyze = watch_result.vacancies[:limit]
+    to_analyze = watch_result.vacancies[:analyze_limit]
 
     _safe_echo(f"Companies in config: {len(loaded.companies)}")
     if company:
@@ -646,7 +685,7 @@ def analyze_target_companies_greenhouse(
     _safe_echo(f"Greenhouse companies: {greenhouse_count}")
     _safe_echo(f"Raw vacancies fetched: {watch_result.raw_fetched}")
     _safe_echo(f"Vacancies after prefilter: {len(watch_result.vacancies)}")
-    _safe_echo(f"Analyzing {len(to_analyze)} vacancies (limit: {limit})")
+    _safe_echo(f"Analyzing {len(to_analyze)} vacancies (analyze-limit: {analyze_limit})")
 
     analyzer = None
     if to_analyze:
@@ -665,12 +704,8 @@ def analyze_target_companies_greenhouse(
             typer.secho(_console_safe_text(f"Failed to load analysis files: {exc}"), err=True, fg=typer.colors.RED)
             raise typer.Exit(code=1) from exc
 
-    analyzed_rows: list[dict[str, object]] = []
-    decision_counts: dict[str, int] = {
-        Decision.STRONG_MATCH.value: 0,
-        Decision.POTENTIAL_MATCH.value: 0,
-        Decision.IGNORE.value: 0,
-    }
+    analyzed_items: list[_TargetCompanyAnalysisItem] = []
+    decision_counts_before: dict[str, int] = {name: 0 for name in _ANALYZE_DECISION_CHOICES}
     analyzed_by_company: dict[str, int] = {}
     analysis_errors = 0
 
@@ -682,30 +717,96 @@ def analyze_target_companies_greenhouse(
         except Exception as exc:  # noqa: BLE001
             analysis_errors += 1
             logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
-            analyzed_rows.append(_target_company_analysis_payload(vacancy, evaluation=None, error=str(exc)))
-            _safe_echo("")
-            _safe_echo(f"[ERROR] {vacancy.company or 'unknown'} - {vacancy.title}")
-            _safe_echo(f"Error: {exc}")
+            analyzed_items.append(
+                _TargetCompanyAnalysisItem(vacancy=vacancy, evaluation=None, error=str(exc))
+            )
             continue
 
-        decision_name = evaluation.decision.value
-        decision_counts[decision_name] = decision_counts.get(decision_name, 0) + 1
+        assessment = assess_application_feasibility(
+            vacancy_text=vacancy.to_analysis_text(),
+            location=vacancy.location,
+            visa_sponsorship=evaluation.visa_sponsorship,
+            relocation_support=evaluation.relocation_support,
+            remote_type=evaluation.remote_type,
+            work_authorization_requirement=evaluation.work_authorization_requirement,
+            language_requirements=evaluation.language_requirements,
+            location_restrictions=evaluation.location_restrictions,
+        )
+        decision_counts_before[evaluation.decision.value] = (
+            decision_counts_before.get(evaluation.decision.value, 0) + 1
+        )
         company_name = vacancy.company or "unknown"
         analyzed_by_company[company_name] = analyzed_by_company.get(company_name, 0) + 1
-        analyzed_rows.append(_target_company_analysis_payload(vacancy, evaluation=evaluation))
-        _print_target_company_analysis_vacancy(vacancy, evaluation)
+        analyzed_items.append(
+            _TargetCompanyAnalysisItem(
+                vacancy=vacancy,
+                evaluation=evaluation,
+                feasibility=assessment,
+            )
+        )
 
-    analyzed_count = sum(decision_counts.values())
+    filters_applied = min_score is not None or bool(selected_decisions) or bool(selected_feasibilities)
+    shown_items = _filter_target_company_analysis_items(
+        _sort_target_company_analysis_items(analyzed_items, sort_by=sort_by_normalized),
+        min_score=min_score,
+        decisions=selected_decisions,
+        feasibilities=selected_feasibilities,
+    )
+    decision_counts_after = {name: 0 for name in _ANALYZE_DECISION_CHOICES}
+    feasibility_counts_before = {name: 0 for name in _ANALYZE_FEASIBILITY_CHOICES}
+    feasibility_counts_after = {name: 0 for name in _ANALYZE_FEASIBILITY_CHOICES}
+    for item in analyzed_items:
+        if item.feasibility is None:
+            continue
+        feasibility_counts_before[item.feasibility.label] = (
+            feasibility_counts_before.get(item.feasibility.label, 0) + 1
+        )
+    for item in shown_items:
+        if item.evaluation is None:
+            continue
+        decision_counts_after[item.evaluation.decision.value] = (
+            decision_counts_after.get(item.evaluation.decision.value, 0) + 1
+        )
+        if item.feasibility is None:
+            continue
+        feasibility_counts_after[item.feasibility.label] = (
+            feasibility_counts_after.get(item.feasibility.label, 0) + 1
+        )
+
+    for item in shown_items:
+        if item.evaluation is None:
+            _safe_echo("")
+            _safe_echo(f"[ERROR] {item.vacancy.company or 'unknown'} - {item.vacancy.title}")
+            _safe_echo(f"Error: {item.error or 'analysis failed'}")
+            continue
+        _print_target_company_analysis_vacancy(
+            item.vacancy,
+            item.evaluation,
+            feasibility=item.feasibility,
+        )
+
+    analyzed_count = sum(decision_counts_before.values())
     _safe_echo("")
+    _safe_echo(f"Vacancies after prefilter: {len(watch_result.vacancies)}")
     _safe_echo(f"Vacancies analyzed: {analyzed_count}")
+    _safe_echo(f"Results shown: {len(shown_items)}")
     _safe_echo(f"Watcher errors: {len(watch_result.errors)}")
     if analysis_errors:
         _safe_echo(f"Analysis errors: {analysis_errors}")
 
     _safe_echo("")
     _safe_echo("Decisions:")
-    for name in (Decision.STRONG_MATCH.value, Decision.POTENTIAL_MATCH.value, Decision.IGNORE.value):
-        _safe_echo(f"  {name}: {decision_counts.get(name, 0)}")
+    _print_decision_counts(decision_counts_before)
+    _safe_echo("")
+    _safe_echo("Feasibility:")
+    _print_named_counts(feasibility_counts_before, _ANALYZE_FEASIBILITY_CHOICES)
+    if filters_applied:
+        _safe_echo("")
+        _safe_echo("Decisions after filters:")
+        _print_decision_counts(decision_counts_after)
+        _safe_echo("")
+        _safe_echo("Feasibility after filters:")
+        _print_named_counts(feasibility_counts_after, _ANALYZE_FEASIBILITY_CHOICES)
 
     _safe_echo("")
     _safe_echo("Analyzed by company:")
@@ -721,7 +822,7 @@ def analyze_target_companies_greenhouse(
 
     if output is not None:
         document = {
-            "vacancies": analyzed_rows,
+            "vacancies": [_target_company_analysis_payload(item) for item in shown_items],
             "errors": [
                 {
                     "company_name": item.company_name,
@@ -749,15 +850,116 @@ def analyze_target_companies_greenhouse(
             )
             raise typer.Exit(code=1) from exc
         _safe_echo("")
-        _safe_echo(f"Wrote {len(analyzed_rows)} analyzed vacancies to {output}")
+        _safe_echo(f"Wrote {len(shown_items)} analyzed vacancies to {output}")
 
 
-def _target_company_analysis_payload(
-    vacancy: NormalizedVacancy,
+@dataclass
+class _TargetCompanyAnalysisItem:
+    vacancy: NormalizedVacancy
+    evaluation: VacancyEvaluation | None
+    error: str | None = None
+    feasibility: ApplicationFeasibility | None = None
+
+    @property
+    def score(self) -> float | None:
+        if self.evaluation is None:
+            return None
+        return self.evaluation.match_percentage
+
+
+def _normalize_analyze_sort_by(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in _ANALYZE_SORT_CHOICES:
+        allowed = ", ".join(_ANALYZE_SORT_CHOICES)
+        raise ValueError(f"Invalid --sort-by: {value}. Expected {allowed}.")
+    return normalized
+
+
+def _normalize_analyze_decisions(values: list[str] | None) -> frozenset[str]:
+    if not values:
+        return frozenset()
+    selected: set[str] = set()
+    invalid: list[str] = []
+    for raw in values:
+        normalized = raw.strip().upper()
+        if normalized in _ANALYZE_DECISION_CHOICES:
+            selected.add(normalized)
+        else:
+            invalid.append(raw)
+    if invalid:
+        allowed = ", ".join(_ANALYZE_DECISION_CHOICES)
+        raise ValueError("Invalid --decision: " + ", ".join(invalid) + f". Expected {allowed}.")
+    return frozenset(selected)
+
+
+def _normalize_analyze_feasibilities(values: list[str] | None) -> frozenset[str]:
+    if not values:
+        return frozenset()
+    selected: set[str] = set()
+    invalid: list[str] = []
+    for raw in values:
+        normalized = raw.strip().upper()
+        if normalized in _ANALYZE_FEASIBILITY_CHOICES:
+            selected.add(normalized)
+        else:
+            invalid.append(raw)
+    if invalid:
+        allowed = ", ".join(_ANALYZE_FEASIBILITY_CHOICES)
+        raise ValueError("Invalid --feasibility: " + ", ".join(invalid) + f". Expected {allowed}.")
+    return frozenset(selected)
+
+
+def _sort_target_company_analysis_items(
+    items: list[_TargetCompanyAnalysisItem],
     *,
-    evaluation: VacancyEvaluation | None,
-    error: str | None = None,
-) -> dict[str, object]:
+    sort_by: str,
+) -> list[_TargetCompanyAnalysisItem]:
+    if sort_by != "score":
+        return list(items)
+    return [
+        item
+        for _, item in sorted(
+            enumerate(items),
+            key=lambda pair: (
+                pair[1].score is None,
+                -(pair[1].score or 0.0),
+                pair[0],
+            ),
+        )
+    ]
+
+
+def _filter_target_company_analysis_items(
+    items: list[_TargetCompanyAnalysisItem],
+    *,
+    min_score: float | None,
+    decisions: frozenset[str],
+    feasibilities: frozenset[str],
+) -> list[_TargetCompanyAnalysisItem]:
+    shown: list[_TargetCompanyAnalysisItem] = []
+    for item in items:
+        if decisions and (item.evaluation is None or item.evaluation.decision.value not in decisions):
+            continue
+        if min_score is not None and (item.score is None or item.score < min_score):
+            continue
+        if feasibilities and (item.feasibility is None or item.feasibility.label not in feasibilities):
+            continue
+        shown.append(item)
+    return shown
+
+
+def _print_decision_counts(counts: dict[str, int]) -> None:
+    _print_named_counts(counts, _ANALYZE_DECISION_CHOICES)
+
+
+def _print_named_counts(counts: dict[str, int], names: tuple[str, ...]) -> None:
+    for name in names:
+        _safe_echo(f"  {name}: {counts.get(name, 0)}")
+
+
+def _target_company_analysis_payload(item: _TargetCompanyAnalysisItem) -> dict[str, object]:
+    vacancy = item.vacancy
+    evaluation = item.evaluation
     payload: dict[str, object] = {
         "company": vacancy.company,
         "title": vacancy.title,
@@ -765,26 +967,64 @@ def _target_company_analysis_payload(
         "url": vacancy.url,
         "source": vacancy.source,
         "external_id": vacancy.external_id,
+        "score": item.score,
+        "decision": evaluation.decision.value if evaluation is not None else None,
+        "reasons": _analysis_reasons_payload(evaluation),
+        "application_feasibility": item.feasibility.label if item.feasibility else None,
+        "visa_sponsorship": item.feasibility.visa_sponsorship if item.feasibility else None,
+        "relocation_support": item.feasibility.relocation_support if item.feasibility else None,
+        "remote_type": item.feasibility.remote_type if item.feasibility else None,
+        "work_authorization_requirement": (
+            item.feasibility.work_authorization_requirement if item.feasibility else None
+        ),
+        "language_requirements": item.feasibility.language_requirements if item.feasibility else [],
+        "location_restrictions": item.feasibility.location_restrictions if item.feasibility else [],
+        "feasibility_warnings": item.feasibility.warnings if item.feasibility else [],
     }
     if evaluation is not None:
-        payload.update(evaluation.model_dump(mode="json"))
-    if error:
-        payload["error"] = error
+        payload["match_percentage"] = evaluation.match_percentage
+        payload["decision_reason"] = evaluation.decision_reason
+        payload["matched_points"] = evaluation.matched_points
+    if item.error:
+        payload["error"] = item.error
     return payload
+
+
+def _analysis_reasons_payload(evaluation: VacancyEvaluation | None) -> dict[str, object]:
+    if evaluation is None:
+        return {"matched": [], "decision_reason": None, "rejected_because": None}
+    rejected = evaluation.decision_reason if evaluation.decision == Decision.IGNORE else None
+    return {
+        "matched": evaluation.matched_points,
+        "decision_reason": evaluation.decision_reason or None,
+        "rejected_because": rejected or None,
+    }
 
 
 def _print_target_company_analysis_vacancy(
     vacancy: NormalizedVacancy,
     evaluation: VacancyEvaluation,
+    *,
+    feasibility: ApplicationFeasibility | None = None,
 ) -> None:
     score = _format_analysis_score(evaluation.match_percentage)
     company_name = vacancy.company or "unknown"
+    feasibility_label = feasibility.label if feasibility is not None else "UNCLEAR"
     _safe_echo("")
-    _safe_echo(f"[{evaluation.decision.value}] {score} - {company_name} - {vacancy.title}")
+    _safe_echo(f"[{evaluation.decision.value}] {score} | [FEASIBILITY: {feasibility_label}]")
+    _safe_echo(f"{company_name} - {vacancy.title}")
     _safe_echo(f"Location: {vacancy.location or ''}")
-    reasons = _compact_analysis_reasons(evaluation)
-    if reasons:
-        _safe_echo(f"Reasons: {reasons}")
+    matched = [item.strip() for item in evaluation.matched_points if item.strip()]
+    if matched:
+        _safe_echo(f"Matched: {', '.join(matched[:4])}")
+    # VacancyEvaluation has no dedicated hard-filter field; IGNORE uses decision_reason.
+    reason = " ".join(evaluation.decision_reason.split()) if evaluation.decision_reason else ""
+    if evaluation.decision == Decision.IGNORE and reason:
+        _safe_echo(f"Rejected because: {reason}")
+    elif reason:
+        _safe_echo(f"Reasons: {reason}")
+    if feasibility is not None and feasibility.warnings:
+        _safe_echo(f"Feasibility: {'; '.join(feasibility.warnings)}")
     _safe_echo(f"URL: {vacancy.url}")
 
 
@@ -794,16 +1034,6 @@ def _format_analysis_score(value: float | None) -> str:
     if float(value).is_integer():
         return str(int(value))
     return f"{value:.1f}"
-
-
-def _compact_analysis_reasons(evaluation: VacancyEvaluation) -> str:
-    points = [item.strip() for item in evaluation.matched_points if item.strip()]
-    if points:
-        return ", ".join(points[:4])
-    reason = " ".join(evaluation.decision_reason.split()) if evaluation.decision_reason else ""
-    if reason:
-        return reason
-    return " ".join(evaluation.summary.split()) if evaluation.summary else ""
 
 
 def _select_target_companies(

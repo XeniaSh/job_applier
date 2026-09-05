@@ -9,7 +9,9 @@ def test_prompt_requests_russian_human_readable_fields() -> None:
     assert "responsibilities" in prompt
     assert "employment_conditions" in prompt
     assert "location_restrictions" in prompt
-    assert "uncertainties" in prompt
+    assert "visa_sponsorship" in prompt
+    assert "relocation_support" in prompt
+    assert "work_authorization_requirement" in prompt
 
 
 def test_cover_letter_prompt_requires_coherent_professional_summary() -> None:

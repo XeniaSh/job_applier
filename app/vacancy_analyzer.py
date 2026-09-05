@@ -260,6 +260,12 @@ class VacancyAnalyzer:
             recommended_resume=recommended_resume,
             recommended_cover_template=_recommend_cover_template(extraction.role_type, extraction.short_summary),
             warning_signals=warning_signals,
+            visa_sponsorship=extraction.visa_sponsorship,
+            relocation_support=extraction.relocation_support,
+            remote_type=extraction.remote_type,
+            work_authorization_requirement=extraction.work_authorization_requirement,
+            language_requirements=list(extraction.language_requirements),
+            location_restrictions=list(extraction.location_restrictions),
         )
 
 

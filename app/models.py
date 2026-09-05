@@ -44,6 +44,11 @@ class VacancyExtraction(BaseModel):
     uncertainties: list[str] = Field(default_factory=list)
     role_type: str
     short_summary: str
+    visa_sponsorship: str = "unknown"
+    relocation_support: str = "unknown"
+    remote_type: str = "unknown"
+    work_authorization_requirement: str = "unknown"
+    language_requirements: list[str] = Field(default_factory=list)
 
     @field_validator(
         "mandatory_skills",
@@ -52,6 +57,7 @@ class VacancyExtraction(BaseModel):
         "employment_conditions",
         "location_restrictions",
         "uncertainties",
+        "language_requirements",
         mode="before",
     )
     @classmethod
@@ -98,6 +104,70 @@ class VacancyExtraction(BaseModel):
             return parsed if parsed >= 0 else None
         return None
 
+    @field_validator("visa_sponsorship", "relocation_support", mode="before")
+    @classmethod
+    def normalize_yes_no_unknown(cls, value: object) -> str:
+        return _normalize_yes_no_unknown(value)
+
+    @field_validator("remote_type", mode="before")
+    @classmethod
+    def normalize_remote_type_field(cls, value: object) -> str:
+        return _normalize_remote_type(value)
+
+    @field_validator("work_authorization_requirement", mode="before")
+    @classmethod
+    def normalize_work_authorization_field(cls, value: object) -> str:
+        return _normalize_work_authorization(value)
+
+
+def _normalize_yes_no_unknown(value: object) -> str:
+    if value is None:
+        return "unknown"
+    text = " ".join(str(value).strip().lower().replace("_", " ").split())
+    if text in {"", "unknown", "null", "none", "n/a", "na", "unspecified"}:
+        return "unknown"
+    if text in {"yes", "y", "true", "available", "provided", "supported"}:
+        return "yes"
+    if text in {"no", "n", "false", "unavailable", "unsupported"}:
+        return "no"
+    if text.startswith("yes"):
+        return "yes"
+    if text.startswith("no"):
+        return "no"
+    return "unknown"
+
+
+def _normalize_remote_type(value: object) -> str:
+    if value is None:
+        return "unknown"
+    text = " ".join(str(value).strip().lower().replace("-", " ").replace("_", " ").split())
+    if text in {"", "unknown", "null", "none", "n/a", "na"}:
+        return "unknown"
+    if "worldwide" in text or "anywhere" in text or text == "global":
+        return "worldwide"
+    if "hybrid" in text:
+        return "hybrid"
+    if "onsite" in text or "on site" in text:
+        return "onsite"
+    if "country" in text or "region" in text:
+        return "country_limited"
+    return "unknown"
+
+
+def _normalize_work_authorization(value: object) -> str:
+    if value is None:
+        return "unknown"
+    text = " ".join(str(value).strip().lower().replace("-", " ").replace("_", " ").split())
+    if text in {"", "unknown", "null", "none", "n/a", "na"}:
+        return "unknown"
+    if text in {"required", "must"}:
+        return "required"
+    if "not required" in text:
+        return "not_required"
+    if "required" in text:
+        return "required"
+    return "unknown"
+
 
 class VacancyEvaluation(BaseModel):
     decision: Decision
@@ -115,6 +185,12 @@ class VacancyEvaluation(BaseModel):
     recommended_resume: RecommendedResume
     recommended_cover_template: RecommendedCoverTemplate
     warning_signals: list[dict[str, str]] = Field(default_factory=list)
+    visa_sponsorship: str = "unknown"
+    relocation_support: str = "unknown"
+    remote_type: str = "unknown"
+    work_authorization_requirement: str = "unknown"
+    language_requirements: list[str] = Field(default_factory=list)
+    location_restrictions: list[str] = Field(default_factory=list)
 
 
 class CoverLetterResult(BaseModel):
