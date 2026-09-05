@@ -5,6 +5,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.company_watch.seniority import SENIORITY_LABELS
+
 DEFAULT_CANDIDATE_CONSTRAINTS_PATH = Path("config/candidate_constraints.yaml")
 
 
@@ -19,10 +21,19 @@ class CandidateConstraints(BaseModel):
     requires_visa_sponsorship: bool
     open_to_relocation: bool
     open_to_remote_worldwide: bool
+    target_seniority: list[str] = Field(default_factory=list)
+    stretch_seniority: list[str] = Field(default_factory=list)
+    excluded_seniority: list[str] = Field(default_factory=list)
 
-    @field_validator("known_languages", mode="before")
+    @field_validator(
+        "known_languages",
+        "target_seniority",
+        "stretch_seniority",
+        "excluded_seniority",
+        mode="before",
+    )
     @classmethod
-    def coerce_languages(cls, value: object) -> object:
+    def coerce_str_lists(cls, value: object) -> object:
         if value is None:
             return []
         if isinstance(value, str):
@@ -41,6 +52,29 @@ class CandidateConstraints(BaseModel):
                 continue
             seen.add(normalized)
             cleaned.append(normalized)
+        return cleaned
+
+    @field_validator("target_seniority", "stretch_seniority", "excluded_seniority")
+    @classmethod
+    def normalize_seniority_labels(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        unknown: list[str] = []
+        allowed = set(SENIORITY_LABELS)
+        for item in value:
+            normalized = " ".join(item.strip().upper().split())
+            if not normalized or normalized in seen:
+                continue
+            if normalized not in allowed:
+                unknown.append(normalized)
+                continue
+            seen.add(normalized)
+            cleaned.append(normalized)
+        if unknown:
+            allowed_text = ", ".join(SENIORITY_LABELS)
+            raise ValueError(
+                "Unknown seniority labels: " + ", ".join(unknown) + f". Expected {allowed_text}."
+            )
         return cleaned
 
 

@@ -41,6 +41,11 @@ from app.company_watch.feasibility import (
     assess_application_feasibility,
 )
 from app.company_watch.models import TargetCompany
+from app.company_watch.seniority import (
+    SENIORITY_LABELS,
+    SeniorityClassification,
+    classify_seniority,
+)
 from app.company_watch.watchers.greenhouse import (
     GreenhouseCompanyError,
     GreenhouseTargetWatcher,
@@ -619,6 +624,7 @@ _ANALYZE_SORT_CHOICES = ("source-order", "score")
 _ANALYZE_DECISION_CHOICES = tuple(item.value for item in Decision)
 _ANALYZE_FEASIBILITY_CHOICES = FEASIBILITY_LABELS
 _ANALYZE_RECOMMENDATION_CHOICES = RECOMMENDATION_LABELS
+_ANALYZE_SENIORITY_CHOICES = SENIORITY_LABELS
 
 
 @app.command("analyze-target-companies-greenhouse")
@@ -665,6 +671,11 @@ def analyze_target_companies_greenhouse(
         "--recommendation",
         help="Show only these application recommendations. Repeatable.",
     ),
+    seniority: list[str] | None = typer.Option(
+        None,
+        "--seniority",
+        help="Show only these seniority labels. Repeatable.",
+    ),
     output: Path | None = typer.Option(
         None,
         "--output",
@@ -676,6 +687,7 @@ def analyze_target_companies_greenhouse(
         selected_decisions = _normalize_analyze_decisions(decision)
         selected_feasibilities = _normalize_analyze_feasibilities(feasibility)
         selected_recommendations = _normalize_analyze_recommendations(recommendation)
+        selected_seniorities = _normalize_analyze_seniorities(seniority)
     except ValueError as exc:
         typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
@@ -757,12 +769,14 @@ def analyze_target_companies_greenhouse(
             location_restrictions=evaluation.location_restrictions,
         )
         target_company = companies_by_name.get((vacancy.company or "").casefold())
+        seniority_result = classify_seniority(vacancy.title)
         recommendation_result = recommend_application(
             decision=evaluation.decision,
             feasibility=assessment,
             constraints=constraints,
             company=target_company,
             location=vacancy.location,
+            seniority=seniority_result,
         )
         decision_counts_before[evaluation.decision.value] = (
             decision_counts_before.get(evaluation.decision.value, 0) + 1
@@ -775,6 +789,7 @@ def analyze_target_companies_greenhouse(
                 evaluation=evaluation,
                 feasibility=assessment,
                 recommendation=recommendation_result,
+                seniority=seniority_result,
             )
         )
 
@@ -783,6 +798,7 @@ def analyze_target_companies_greenhouse(
         or bool(selected_decisions)
         or bool(selected_feasibilities)
         or bool(selected_recommendations)
+        or bool(selected_seniorities)
     )
     shown_items = _filter_target_company_analysis_items(
         _sort_target_company_analysis_items(analyzed_items, sort_by=sort_by_normalized),
@@ -790,12 +806,15 @@ def analyze_target_companies_greenhouse(
         decisions=selected_decisions,
         feasibilities=selected_feasibilities,
         recommendations=selected_recommendations,
+        seniorities=selected_seniorities,
     )
     decision_counts_after = {name: 0 for name in _ANALYZE_DECISION_CHOICES}
     feasibility_counts_before = {name: 0 for name in _ANALYZE_FEASIBILITY_CHOICES}
     feasibility_counts_after = {name: 0 for name in _ANALYZE_FEASIBILITY_CHOICES}
     recommendation_counts_before = {name: 0 for name in _ANALYZE_RECOMMENDATION_CHOICES}
     recommendation_counts_after = {name: 0 for name in _ANALYZE_RECOMMENDATION_CHOICES}
+    seniority_counts_before = {name: 0 for name in _ANALYZE_SENIORITY_CHOICES}
+    seniority_counts_after = {name: 0 for name in _ANALYZE_SENIORITY_CHOICES}
     for item in analyzed_items:
         if item.feasibility is not None:
             feasibility_counts_before[item.feasibility.label] = (
@@ -804,6 +823,10 @@ def analyze_target_companies_greenhouse(
         if item.recommendation is not None:
             recommendation_counts_before[item.recommendation.label] = (
                 recommendation_counts_before.get(item.recommendation.label, 0) + 1
+            )
+        if item.seniority is not None:
+            seniority_counts_before[item.seniority.label] = (
+                seniority_counts_before.get(item.seniority.label, 0) + 1
             )
     for item in shown_items:
         if item.evaluation is None:
@@ -819,6 +842,10 @@ def analyze_target_companies_greenhouse(
             recommendation_counts_after[item.recommendation.label] = (
                 recommendation_counts_after.get(item.recommendation.label, 0) + 1
             )
+        if item.seniority is not None:
+            seniority_counts_after[item.seniority.label] = (
+                seniority_counts_after.get(item.seniority.label, 0) + 1
+            )
 
     for item in shown_items:
         if item.evaluation is None:
@@ -831,6 +858,7 @@ def analyze_target_companies_greenhouse(
             item.evaluation,
             feasibility=item.feasibility,
             recommendation=item.recommendation,
+            seniority=item.seniority,
         )
 
     analyzed_count = sum(decision_counts_before.values())
@@ -863,6 +891,14 @@ def analyze_target_companies_greenhouse(
         _safe_echo("")
         _safe_echo("Recommendations after filters:")
         _print_named_counts(recommendation_counts_after, _ANALYZE_RECOMMENDATION_CHOICES)
+
+    _safe_echo("")
+    _safe_echo("Seniority:")
+    _print_named_counts(seniority_counts_before, _ANALYZE_SENIORITY_CHOICES)
+    if filters_applied:
+        _safe_echo("")
+        _safe_echo("Seniority after filters:")
+        _print_named_counts(seniority_counts_after, _ANALYZE_SENIORITY_CHOICES)
 
     _safe_echo("")
     _safe_echo("Analyzed by company:")
@@ -916,6 +952,7 @@ class _TargetCompanyAnalysisItem:
     error: str | None = None
     feasibility: ApplicationFeasibility | None = None
     recommendation: ApplicationRecommendation | None = None
+    seniority: SeniorityClassification | None = None
 
     @property
     def score(self) -> float | None:
@@ -983,6 +1020,23 @@ def _normalize_analyze_recommendations(values: list[str] | None) -> frozenset[st
     return frozenset(selected)
 
 
+def _normalize_analyze_seniorities(values: list[str] | None) -> frozenset[str]:
+    if not values:
+        return frozenset()
+    selected: set[str] = set()
+    invalid: list[str] = []
+    for raw in values:
+        normalized = raw.strip().upper()
+        if normalized in _ANALYZE_SENIORITY_CHOICES:
+            selected.add(normalized)
+        else:
+            invalid.append(raw)
+    if invalid:
+        allowed = ", ".join(_ANALYZE_SENIORITY_CHOICES)
+        raise ValueError("Invalid --seniority: " + ", ".join(invalid) + f". Expected {allowed}.")
+    return frozenset(selected)
+
+
 def _sort_target_company_analysis_items(
     items: list[_TargetCompanyAnalysisItem],
     *,
@@ -1010,6 +1064,7 @@ def _filter_target_company_analysis_items(
     decisions: frozenset[str],
     feasibilities: frozenset[str],
     recommendations: frozenset[str],
+    seniorities: frozenset[str],
 ) -> list[_TargetCompanyAnalysisItem]:
     shown: list[_TargetCompanyAnalysisItem] = []
     for item in items:
@@ -1020,6 +1075,8 @@ def _filter_target_company_analysis_items(
         if feasibilities and (item.feasibility is None or item.feasibility.label not in feasibilities):
             continue
         if recommendations and (item.recommendation is None or item.recommendation.label not in recommendations):
+            continue
+        if seniorities and (item.seniority is None or item.seniority.label not in seniorities):
             continue
         shown.append(item)
     return shown
@@ -1059,6 +1116,8 @@ def _target_company_analysis_payload(item: _TargetCompanyAnalysisItem) -> dict[s
         "feasibility_warnings": item.feasibility.warnings if item.feasibility else [],
         "application_recommendation": item.recommendation.label if item.recommendation else None,
         "recommendation_reasons": item.recommendation.reasons if item.recommendation else [],
+        "seniority": item.seniority.label if item.seniority else None,
+        "seniority_reasons": item.seniority.reasons if item.seniority else [],
     }
     if evaluation is not None:
         payload["match_percentage"] = evaluation.match_percentage
@@ -1086,11 +1145,13 @@ def _print_target_company_analysis_vacancy(
     *,
     feasibility: ApplicationFeasibility | None = None,
     recommendation: ApplicationRecommendation | None = None,
+    seniority: SeniorityClassification | None = None,
 ) -> None:
     score = _format_analysis_score(evaluation.match_percentage)
     company_name = vacancy.company or "unknown"
     feasibility_label = feasibility.label if feasibility is not None else "UNCLEAR"
     recommendation_label = recommendation.label if recommendation is not None else "CHECK_MANUALLY"
+    seniority_label = seniority.label if seniority is not None else "UNKNOWN"
     _safe_echo("")
     _safe_echo(
         f"[{evaluation.decision.value}] {score} | [FEASIBILITY: {feasibility_label}] "
@@ -1098,6 +1159,7 @@ def _print_target_company_analysis_vacancy(
     )
     _safe_echo(f"{company_name} - {vacancy.title}")
     _safe_echo(f"Location: {vacancy.location or ''}")
+    _safe_echo(f"Seniority: {seniority_label}")
     matched = [item.strip() for item in evaluation.matched_points if item.strip()]
     if matched:
         _safe_echo(f"Matched: {', '.join(matched[:4])}")

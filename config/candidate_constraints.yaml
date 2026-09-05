@@ -8,3 +8,15 @@ known_languages:
 requires_visa_sponsorship: true
 open_to_relocation: true
 open_to_remote_worldwide: true
+
+target_seniority:
+  - MID
+  - SENIOR
+
+stretch_seniority:
+  - STAFF_PLUS
+
+excluded_seniority:
+  - INTERN
+  - JUNIOR
+  - LEAD_MANAGER

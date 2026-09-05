@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from app.company_watch.candidate_constraints import CandidateConstraints
 from app.company_watch.feasibility import ApplicationFeasibility, FEASIBILITY_LIKELY
 from app.company_watch.models import TargetCompany
+from app.company_watch.seniority import (
+    SENIORITY_LEAD_MANAGER,
+    SENIORITY_UNKNOWN,
+    SeniorityClassification,
+)
 from app.models import Decision
 
 RECOMMENDATION_APPLY_NOW = "APPLY_NOW"
@@ -41,6 +46,7 @@ def recommend_application(
     constraints: CandidateConstraints,
     company: TargetCompany | None = None,
     location: str | None = None,
+    seniority: SeniorityClassification | None = None,
 ) -> ApplicationRecommendation:
     decision_value = decision.value if isinstance(decision, Decision) else str(decision).strip().upper()
     visa = feasibility.visa_sponsorship if feasibility is not None else "unknown"
@@ -49,19 +55,36 @@ def recommend_application(
     remote_type = feasibility.remote_type if feasibility is not None else "unknown"
     languages = list(feasibility.language_requirements) if feasibility is not None else []
     feasibility_label = feasibility.label if feasibility is not None else None
+    seniority_label = seniority.label if seniority is not None else SENIORITY_UNKNOWN
+
+    if decision_value == Decision.IGNORE.value:
+        return ApplicationRecommendation(
+            label=RECOMMENDATION_SKIP,
+            reasons=["technical decision is IGNORE"],
+        )
 
     skip_reasons = _hard_blockers(
-        decision_value=decision_value,
         languages=languages,
         known_languages=constraints.known_languages,
         work_auth=work_auth,
         visa=visa,
         relocation=relocation,
+        seniority_label=seniority_label,
+        excluded_seniority=constraints.excluded_seniority,
     )
     if skip_reasons:
         return ApplicationRecommendation(label=RECOMMENDATION_SKIP, reasons=skip_reasons)
 
-    if decision_value == Decision.STRONG_MATCH.value:
+    if seniority_label in constraints.stretch_seniority:
+        return ApplicationRecommendation(
+            label=RECOMMENDATION_CHECK_MANUALLY,
+            reasons=[f"seniority {seniority_label} is stretch level"],
+        )
+
+    if decision_value == Decision.STRONG_MATCH.value and _seniority_allows_apply_now(
+        seniority_label,
+        constraints,
+    ):
         boost_reasons = _apply_now_signals(
             feasibility_label=feasibility_label,
             location=location,
@@ -80,16 +103,17 @@ def recommend_application(
 
 def _hard_blockers(
     *,
-    decision_value: str,
     languages: list[str],
     known_languages: list[str],
     work_auth: str,
     visa: str,
     relocation: str,
+    seniority_label: str,
+    excluded_seniority: list[str],
 ) -> list[str]:
     reasons: list[str] = []
-    if decision_value == Decision.IGNORE.value:
-        reasons.append("technical decision is IGNORE")
+    if seniority_label in excluded_seniority:
+        reasons.append(_excluded_seniority_reason(seniority_label))
     missing_languages = _missing_required_languages(languages, known_languages)
     if missing_languages:
         reasons.append(
@@ -125,6 +149,18 @@ def _apply_now_signals(
     ):
         reasons.append("company metadata suggests international hiring")
     return reasons
+
+
+def _seniority_allows_apply_now(seniority_label: str, constraints: CandidateConstraints) -> bool:
+    if seniority_label == SENIORITY_UNKNOWN:
+        return True
+    return seniority_label in constraints.target_seniority
+
+
+def _excluded_seniority_reason(seniority_label: str) -> str:
+    if seniority_label == SENIORITY_LEAD_MANAGER:
+        return "lead/manager role is not target IC backend role"
+    return f"seniority {seniority_label} is excluded"
 
 
 def _missing_required_languages(required: list[str], known: list[str]) -> list[str]:

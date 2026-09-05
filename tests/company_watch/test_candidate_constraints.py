@@ -28,6 +28,9 @@ def test_load_minimal_candidate_constraints(tmp_path: Path) -> None:
     assert constraints.requires_visa_sponsorship is True
     assert constraints.open_to_relocation is True
     assert constraints.open_to_remote_worldwide is True
+    assert constraints.target_seniority == []
+    assert constraints.stretch_seniority == []
+    assert constraints.excluded_seniority == []
 
 
 def test_load_real_candidate_constraints_yaml() -> None:
@@ -38,6 +41,9 @@ def test_load_real_candidate_constraints_yaml() -> None:
     assert constraints.requires_visa_sponsorship is True
     assert constraints.open_to_relocation is True
     assert constraints.open_to_remote_worldwide is True
+    assert constraints.target_seniority == ["MID", "SENIOR"]
+    assert constraints.stretch_seniority == ["STAFF_PLUS"]
+    assert constraints.excluded_seniority == ["INTERN", "JUNIOR", "LEAD_MANAGER"]
 
 
 def test_missing_constraints_file_raises(tmp_path: Path) -> None:

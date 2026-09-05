@@ -2,6 +2,7 @@ from app.company_watch.application_recommendation import recommend_application
 from app.company_watch.candidate_constraints import CandidateConstraints
 from app.company_watch.feasibility import ApplicationFeasibility
 from app.company_watch.models import TargetCompany
+from app.company_watch.seniority import classify_seniority
 from app.models import Decision
 
 
@@ -11,6 +12,9 @@ def _constraints() -> CandidateConstraints:
         requires_visa_sponsorship=True,
         open_to_relocation=True,
         open_to_remote_worldwide=True,
+        target_seniority=["MID", "SENIOR"],
+        stretch_seniority=["STAFF_PLUS"],
+        excluded_seniority=["INTERN", "JUNIOR", "LEAD_MANAGER"],
     )
 
 
@@ -130,3 +134,55 @@ def test_strong_match_likely_feasibility_is_apply_now() -> None:
     )
     assert result.label == "APPLY_NOW"
     assert "feasibility is LIKELY" in result.reasons
+
+
+def test_excluded_junior_seniority_is_skip() -> None:
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(label="LIKELY", visa_sponsorship="yes"),
+        constraints=_constraints(),
+        company=_company(),
+        location="Amsterdam",
+        seniority=classify_seniority("Software Engineer I (Java)"),
+    )
+    assert result.label == "SKIP"
+    assert "seniority JUNIOR is excluded" in result.reasons
+
+
+def test_excluded_lead_manager_seniority_is_skip() -> None:
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(label="LIKELY", visa_sponsorship="yes"),
+        constraints=_constraints(),
+        company=_company(),
+        location="Amsterdam",
+        seniority=classify_seniority("Engineering Manager"),
+    )
+    assert result.label == "SKIP"
+    assert "lead/manager role is not target IC backend role" in result.reasons
+
+
+def test_stretch_staff_plus_is_check_manually() -> None:
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(label="LIKELY", visa_sponsorship="yes"),
+        constraints=_constraints(),
+        company=_company(),
+        location="Amsterdam",
+        seniority=classify_seniority("Staff Java Engineer"),
+    )
+    assert result.label == "CHECK_MANUALLY"
+    assert "seniority STAFF_PLUS is stretch level" in result.reasons
+
+
+def test_target_senior_seniority_can_be_apply_now() -> None:
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(),
+        constraints=_constraints(),
+        company=_company(),
+        location="Amsterdam",
+        seniority=classify_seniority("Senior Backend Engineer"),
+    )
+    assert result.label == "APPLY_NOW"
+    assert "location matches known hiring locations" in result.reasons

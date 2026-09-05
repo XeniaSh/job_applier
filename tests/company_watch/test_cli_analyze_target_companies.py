@@ -175,6 +175,7 @@ def test_command_runs_watcher_and_analyzer(tmp_path: Path, monkeypatch) -> None:
     assert "Agoda - Java Backend Engineer" in result.output
     assert "Recommendation reasons: sponsorship/relocation/location is unclear" in result.output
     assert "Location: Bangkok" in result.output
+    assert "Seniority: UNKNOWN" in result.output
     assert "Matched: java, backend" in result.output
     assert "Reasons: Java backend match" in result.output
     assert "Feasibility: visa/relocation not mentioned; check manually" in result.output
@@ -280,6 +281,8 @@ def test_summary_includes_analyzed_and_decision_counts(tmp_path: Path, monkeypat
     assert "UNCLEAR:" in result.output
     assert "Recommendations:" in result.output
     assert "CHECK_MANUALLY:" in result.output
+    assert "Seniority:" in result.output
+    assert "UNKNOWN: 2" in result.output
     assert "Agoda: 1" in result.output
     assert "Canonical: 1" in result.output
 
@@ -321,6 +324,8 @@ def test_output_writes_utf8_json_results(tmp_path: Path, monkeypatch) -> None:
     assert payload["vacancies"][0]["application_feasibility"] == "UNCLEAR"
     assert payload["vacancies"][0]["application_recommendation"] == "CHECK_MANUALLY"
     assert payload["vacancies"][0]["recommendation_reasons"]
+    assert payload["vacancies"][0]["seniority"] == "SENIOR"
+    assert payload["vacancies"][0]["seniority_reasons"]
     assert payload["vacancies"][0]["visa_sponsorship"] == "unknown"
     assert payload["vacancies"][0]["relocation_support"] == "unknown"
     assert payload["vacancies"][0]["remote_type"] == "unknown"
@@ -740,6 +745,8 @@ def test_output_contains_recommendation_fields(tmp_path: Path, monkeypatch) -> N
     item = payload["vacancies"][0]
     assert item["application_recommendation"] == "CHECK_MANUALLY"
     assert item["recommendation_reasons"] == ["sponsorship/relocation/location is unclear"]
+    assert item["seniority"] == "UNKNOWN"
+    assert item["seniority_reasons"] == ["title has no explicit seniority"]
 
 
 def test_unicode_in_recommendation_reasons_does_not_crash(tmp_path: Path, monkeypatch) -> None:
@@ -760,3 +767,81 @@ def test_unicode_in_recommendation_reasons_does_not_crash(tmp_path: Path, monkey
     assert "Vacancies analyzed: 1" in result.output
     assert "Recommendation reasons:" in result.output
     assert "[RECOMMENDATION: SKIP]" in result.output
+    assert "Seniority: UNKNOWN" in result.output
+
+
+def test_seniority_filter_shows_only_selected_values(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", title="Senior Backend Engineer"),
+        _vacancy(external_id="202", title="Staff Java Engineer"),
+        _vacancy(external_id="303", title="Java Backend Engineer"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=3),
+        evaluation=[
+            _evaluation(match_percentage=90.0),
+            _evaluation(match_percentage=88.0),
+            _evaluation(match_percentage=80.0),
+        ],
+    )
+
+    result = _invoke(config_file, "--seniority", "SENIOR", "--seniority", "MID")
+
+    assert result.exit_code == 0
+    assert len(captured["texts"]) == 3
+    assert "Senior Backend Engineer" in result.output
+    assert "Staff Java Engineer" not in result.output
+    assert "Java Backend Engineer" not in result.output
+    assert "Vacancies analyzed: 3" in result.output
+    assert "Results shown: 1" in result.output
+    assert "Seniority after filters:" in result.output
+    assert "SENIOR: 1" in result.output
+
+
+def test_output_contains_seniority_fields(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    output_file = tmp_path / "analysis.json"
+    _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(
+            vacancies=[_vacancy(title="Staff Java Engineer")],
+            errors=[],
+            raw_fetched=1,
+        ),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(config_file, "--output", str(output_file))
+
+    assert result.exit_code == 0
+    payload = json.loads(output_file.read_text(encoding="utf-8"))
+    item = payload["vacancies"][0]
+    assert item["seniority"] == "STAFF_PLUS"
+    assert item["seniority_reasons"]
+    assert item["application_recommendation"] == "CHECK_MANUALLY"
+    assert "seniority STAFF_PLUS is stretch level" in item["recommendation_reasons"]
+
+
+def test_unicode_in_seniority_and_recommendation_reasons_does_not_crash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_file = _write_config(tmp_path)
+    _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(
+            vacancies=[_vacancy(title="Staff Java \u6c49 Engineer", location="S\u00e3o Paulo")],
+            errors=[],
+            raw_fetched=1,
+        ),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(config_file)
+
+    assert result.exit_code == 0
+    assert "Vacancies analyzed: 1" in result.output
+    assert "Seniority: STAFF_PLUS" in result.output
+    assert "Recommendation reasons: seniority STAFF_PLUS is stretch level" in result.output
+    assert "[RECOMMENDATION: CHECK_MANUALLY]" in result.output
