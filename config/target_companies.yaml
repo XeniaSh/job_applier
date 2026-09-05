@@ -1,0 +1,588 @@
+# JobApplier target companies: Tier A starter list
+# Generated: 2026-09-05
+# Purpose: monitor companies that are more likely than random LinkedIn jobs to hire internationally
+# and work in English or English/Russian environments.
+#
+# relocation_status values:
+#   confirmed_role_based: company/job posts explicitly mention relocation/visa support for some roles
+#   remote_global: globally distributed / worldwide remote; relocation is not the main path
+#   remote_region_limited: remote/hybrid in specific countries only; check eligibility per role
+#   mixed_check_per_role: company is international, but relocation/visa must be checked on every vacancy
+#
+# language values:
+#   english: English is required/used in international teams or job posts
+#   english_russian_signal: English required, plus Russian-speaking/CIS-friendly signal; not a guarantee that Russian is official working language
+#
+# ats values are best-effort and should be verified before implementing watchers.
+# For MVP: start with watcher_type in [greenhouse, lever, ashby] and leave custom/manual later.
+
+companies:
+  - name: Agoda
+    priority: A
+    category: travel_product
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation]
+    relocation_status: confirmed_role_based
+    target_locations: [Bangkok, Thailand]
+    remote: limited
+    java_backend_relevance: high
+    role_keywords: [backend, java, kotlin, platform, fintech, distributed systems]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://careersatagoda.com/
+    job_board_url: https://job-boards.greenhouse.io/agoda
+    notes:
+      - Bangkok-based engineering roles often explicitly mention relocation provided and visa sponsorship.
+      - Strong match for backend/distributed systems; Java may appear role-by-role.
+
+  - name: Revolut
+    priority: A
+    category: fintech
+    language: english
+    russian_speaking_signal: true
+    hiring_modes: [relocation, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Poland, Spain, Portugal, UAE, Cyprus, UK]
+    remote: limited
+    java_backend_relevance: very_high
+    role_keywords: [java, backend, payments, risk, fraud, credit, kotlin, distributed systems]
+    ats: custom
+    watcher_type: custom
+    career_url: https://www.revolut.com/careers/
+    job_board_url: https://www.revolut.com/careers/
+    notes:
+      - Regular Java backend roles; relocation destinations vary by post.
+      - Strong technical filter; concurrency/database/system design likely important.
+
+  - name: Wise
+    priority: A
+    category: fintech
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Tallinn, London, Budapest, Singapore]
+    remote: limited
+    java_backend_relevance: very_high
+    role_keywords: [backend, java, kotlin, payments, financial crime, platform]
+    ats: smartrecruiters_attrax
+    watcher_type: custom
+    career_url: https://wise.jobs/
+    job_board_url: https://wise.jobs/Jobs
+    notes:
+      - Tallinn is especially interesting because some roles mention relocation support.
+      - London/Budapest sponsorship may be stricter; check each role.
+
+  - name: Adyen
+    priority: A
+    category: fintech_payments
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Amsterdam, Netherlands]
+    remote: limited
+    java_backend_relevance: very_high
+    role_keywords: [java, backend, payments, platform, distributed systems]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://adyen-careers.com/
+    job_board_url: https://job-boards.greenhouse.io/adyen
+    notes:
+      - Java roles in Amsterdam may ask about visa and/or relocation support.
+      - Strong fit by fintech/payments/backend experience.
+
+  - name: N26
+    priority: A
+    category: fintech_banking
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Berlin, Barcelona, Vienna]
+    remote: limited
+    java_backend_relevance: very_high
+    role_keywords: [backend, java, kotlin, spring boot, banking, risk, lending]
+    ats: custom
+    watcher_type: custom
+    career_url: https://n26.com/en-eu/careers
+    job_board_url: https://n26.com/en-eu/careers
+    notes:
+      - Backend roles commonly mention JVM/Spring/Kotlin and relocation package with visa support.
+      - Good match for banking backend experience.
+
+  - name: Qonto
+    priority: A
+    category: fintech_banking
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [visa_support_possible, hybrid, remote_region_limited]
+    relocation_status: confirmed_role_based
+    target_locations: [France, Germany, Spain, Italy, Serbia, Portugal]
+    remote: region_limited
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, fintech, payments, banking]
+    ats: lever
+    watcher_type: lever
+    career_url: https://qonto.com/en/careers
+    job_board_url: https://jobs.lever.co/qonto
+    notes:
+      - English is stated as the primary working language.
+      - Visa/relocation depends on current location and level.
+
+  - name: Trade Republic
+    priority: A
+    category: fintech_brokerage
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Berlin, London]
+    remote: limited
+    java_backend_relevance: high
+    role_keywords: [backend, kotlin, java, banking, investment, trading]
+    ats: custom
+    watcher_type: custom
+    career_url: https://traderepublic.com/en-de/careers
+    job_board_url: https://traderepublic.com/en-de/careers
+    notes:
+      - Some London roles explicitly mention relocation and visa support.
+      - Check backend stack per role.
+
+  - name: Picnic
+    priority: A
+    category: retail_tech_logistics
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation]
+    relocation_status: confirmed_role_based
+    target_locations: [Amsterdam, Netherlands]
+    remote: limited
+    java_backend_relevance: very_high
+    role_keywords: [java, spring, backend, postgresql, logistics, distributed systems]
+    ats: custom
+    watcher_type: custom
+    career_url: https://jobs.picnic.app/en/tech
+    job_board_url: https://jobs.picnic.app/en/jobs
+    notes:
+      - Many Java backend teams; roles may state no Dutch required and relocation to the Netherlands.
+      - Good match for retail/backend experience.
+
+  - name: Vinted
+    priority: A
+    category: marketplace_product
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation]
+    relocation_status: confirmed_role_based
+    target_locations: [Vilnius, Lithuania, Kaunas, Lithuania]
+    remote: limited
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, marketplace, infrastructure]
+    ats: greenhouse_embedded
+    watcher_type: greenhouse
+    career_url: https://careers.vinted.com/
+    job_board_url: https://careers.vinted.com/jobs
+    notes:
+      - Lithuania-based roles may offer extensive relocation support and sometimes a relocation bonus.
+      - Backend stack is not always Java; check role text.
+
+  - name: Bolt
+    priority: A
+    category: mobility_fintech
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Tallinn, Estonia]
+    remote: limited
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, payments, mobility, distributed systems]
+    ats: custom
+    watcher_type: custom
+    career_url: https://bolt.eu/en/careers/
+    job_board_url: https://bolt.eu/en/careers/teams/engineering/
+    notes:
+      - Estonia/Tallinn roles have clear relocation and immigration support signals.
+      - Backend stack may be Node/TypeScript more often than Java.
+
+  - name: TravelPerk / Perk
+    priority: A
+    category: travel_saas
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Barcelona, Spain, Berlin, Germany, London, UK, Edinburgh, UK]
+    remote: limited
+    java_backend_relevance: medium
+    role_keywords: [backend, software engineer, platform, travel, payments]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://www.travelperk.com/careers/
+    job_board_url: https://jobs.ashbyhq.com/Perk
+    notes:
+      - Some engineering roles mention relocation from anywhere and English as office language.
+      - Stack may not be Java-first; still a strong international target.
+
+  - name: Bending Spoons
+    priority: A
+    category: product_mobile_ai
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, remote_region_limited]
+    relocation_status: confirmed_role_based
+    target_locations: [Milan, Italy, Madrid, Spain, Warsaw, Poland, London, UK]
+    remote: eligible_countries
+    java_backend_relevance: medium
+    role_keywords: [software engineer, backend, platform, ai, distributed systems]
+    ats: custom
+    watcher_type: custom
+    career_url: https://jobs.bendingspoons.com/positions
+    job_board_url: https://jobs.bendingspoons.com/positions
+    notes:
+      - Roles mention rich relocation package and fully remote from eligible countries.
+      - Hard selection process; not Java-specific but strong engineering target.
+
+  - name: Personio
+    priority: A
+    category: hr_saas
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid, relocation_possible]
+    relocation_status: mixed_check_per_role
+    target_locations: [Munich, Germany, Berlin, Germany, Dublin, Ireland, Madrid, Spain, London, UK, Amsterdam, Netherlands]
+    remote: limited
+    java_backend_relevance: high
+    role_keywords: [backend, java, kotlin, platform, hrtech, distributed systems]
+    ats: custom
+    watcher_type: custom
+    career_url: https://www.personio.com/careers/
+    job_board_url: https://www.personio.com/careers/
+    notes:
+      - English is common in engineering roles; visa/relocation needs role-level check.
+      - Good SaaS/backend target.
+
+  - name: Airwallex
+    priority: A
+    category: fintech_payments
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, visa_sponsorship_possible, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Singapore, Melbourne, Australia, Sydney, Australia, London, UK, Amsterdam, Netherlands, San Francisco, USA]
+    remote: limited
+    java_backend_relevance: high
+    role_keywords: [backend, payments, platform, lending, data platform, distributed systems]
+    ats: custom
+    watcher_type: custom
+    career_url: https://careers.airwallex.com/
+    job_board_url: https://careers.airwallex.com/
+    notes:
+      - Some roles mention relocate to Singapore or ask about work visa sponsorship.
+      - Strong fintech/platform target, not always Java-specific.
+
+  - name: Tabby
+    priority: A
+    category: fintech_bnpl
+    language: english_russian_signal
+    russian_speaking_signal: true
+    hiring_modes: [relocation, remote, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [UAE, Saudi Arabia, Egypt, Portugal, Spain, Serbia, Armenia, Georgia]
+    remote: yes_for_some_roles
+    java_backend_relevance: medium
+    role_keywords: [backend, fintech, scoring, risk, payments, platform]
+    ats: custom
+    watcher_type: custom
+    career_url: https://tabby.ai/careers
+    job_board_url: https://tabby.ai/careers
+    notes:
+      - Backend roles often mention relocation and B1/B2+ English.
+      - Russian-speaking/CIS-friendly signal is strong, but Russian should not be assumed as official language.
+
+  - name: Exness
+    priority: A
+    category: fintech_trading
+    language: english
+    russian_speaking_signal: true
+    hiring_modes: [relocation, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Limassol, Cyprus]
+    remote: limited
+    java_backend_relevance: medium
+    role_keywords: [backend, java, data streams, trading, platform, golang]
+    ats: greenhouse_embedded
+    watcher_type: greenhouse
+    career_url: https://exness-careers.com/
+    job_board_url: https://exness-careers.com/jobs/
+    notes:
+      - Cyprus roles frequently mention full relocation support for employee and family.
+      - Stack often Go/Python/Java depending on team.
+
+  - name: Salmon
+    priority: A
+    category: fintech_banking
+    language: english_russian_signal
+    russian_speaking_signal: true
+    hiring_modes: [relocation, hybrid, remote]
+    relocation_status: confirmed_role_based
+    target_locations: [Manila, Philippines]
+    remote: yes_for_some_roles
+    java_backend_relevance: very_high
+    role_keywords: [java, kotlin, backend, fintech, banking, lending, payments]
+    ats: custom
+    watcher_type: manual_or_custom
+    career_url: https://salmon.ph/
+    job_board_url: https://salmon.ph/help/does-salmon-have-any-job-openings-right-now
+    notes:
+      - Hiring posts/listings mention relocation support for eligible candidates and English B2+ for Java/Kotlin backend roles.
+      - Strong CIS-friendly fintech signal.
+
+  - name: Plata
+    priority: A
+    category: fintech_banking
+    language: english_russian_signal
+    russian_speaking_signal: true
+    hiring_modes: [relocation, remote, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Serbia, Cyprus, Georgia, Kazakhstan, Spain, Mexico]
+    remote: yes_for_some_roles
+    java_backend_relevance: very_high
+    role_keywords: [java, kotlin, backend, fintech, banking, auth, kafka, postgresql, spring]
+    ats: greenhouse_or_custom
+    watcher_type: custom
+    career_url: https://platacard.mx/
+    job_board_url: https://job-boards.greenhouse.io/platacard
+    notes:
+      - Java/Kotlin backend roles may mention relocation to Serbia/Cyprus/Georgia/Kazakhstan with visa and permit support.
+      - Very strong match by fintech + Java/Kotlin + CIS-friendly signal.
+
+  - name: Finom
+    priority: A
+    category: fintech_sme_banking
+    language: english_russian_signal
+    russian_speaking_signal: true
+    hiring_modes: [remote, relocation]
+    relocation_status: confirmed_role_based
+    target_locations: [Cyprus, Netherlands, Poland, Spain, Portugal, Serbia, Germany, Armenia, Georgia, Kazakhstan, Uzbekistan]
+    remote: yes_for_some_roles
+    java_backend_relevance: medium
+    role_keywords: [backend, fintech, banking, go, java, platform, payments]
+    ats: lever
+    watcher_type: lever
+    career_url: https://careers.finom.co/
+    job_board_url: https://jobs.eu.lever.co/pnlfin
+    notes:
+      - Remote-friendly and many team countries; Cyprus roles may mention relocation package.
+      - Stack often Go/Python/frontend; monitor backend/platform roles.
+
+  - name: TradingView
+    priority: A
+    category: fintech_trading_social
+    language: english_russian_signal
+    russian_speaking_signal: true
+    hiring_modes: [relocation, hybrid, remote_role_based]
+    relocation_status: confirmed_role_based
+    target_locations: [Malaga, Spain, Limassol, Cyprus, Paphos, Cyprus, Tbilisi, Georgia, London, UK]
+    remote: yes_for_some_roles
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, trading, go, java, distributed systems]
+    ats: teamtailor
+    watcher_type: custom
+    career_url: https://tradingview.teamtailor.com/jobs
+    job_board_url: https://tradingview.teamtailor.com/jobs
+    notes:
+      - Roles mention relocation package with visa, transport and accommodation support for selected offices.
+      - Stack appears Go-heavy, but backend/platform experience is relevant.
+
+  - name: JetBrains
+    priority: A
+    category: developer_tools
+    language: english_russian_signal
+    russian_speaking_signal: true
+    hiring_modes: [relocation, hybrid, remote_role_based]
+    relocation_status: confirmed_role_based
+    target_locations: [Amsterdam, Netherlands, Berlin, Germany, Limassol, Cyprus, Paphos, Cyprus, Prague, Czech Republic, Warsaw, Poland, Belgrade, Serbia, Madrid, Spain, Yerevan, Armenia]
+    remote: role_based
+    java_backend_relevance: high
+    role_keywords: [java, kotlin, backend, developer tools, platform, intellij, teamcity]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://www.jetbrains.com/careers/jobs/
+    job_board_url: https://job-boards.greenhouse.io/jetbrains
+    notes:
+      - Relocation support and relocation possibilities are explicitly mentioned for several offices/roles.
+      - Strong Russian-speaking signal but English should be assumed for application materials.
+
+  - name: Miro
+    priority: A
+    category: collaboration_saas
+    language: english_russian_signal
+    russian_speaking_signal: true
+    hiring_modes: [hybrid, international]
+    relocation_status: mixed_check_per_role
+    target_locations: [Amsterdam, Netherlands, Berlin, Germany, Yerevan, Armenia, Austin, USA]
+    remote: limited
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, api, collaboration, distributed systems]
+    ats: greenhouse_embedded_or_custom
+    watcher_type: custom
+    career_url: https://miro.com/careers/
+    job_board_url: https://miro.com/careers/
+    notes:
+      - Engineering teams are international across Amsterdam/Berlin/Yerevan and other hubs.
+      - Relocation/visa is not guaranteed; check every role.
+
+  - name: inDrive
+    priority: A
+    category: mobility_fintech
+    language: english_russian_signal
+    russian_speaking_signal: true
+    hiring_modes: [relocation, hybrid, remote_role_based]
+    relocation_status: confirmed_role_based
+    target_locations: [Cyprus, Kazakhstan, Georgia, UK, LATAM, MENA]
+    remote: yes_for_some_roles
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, fintech, mobility, go, java, sre]
+    ats: custom
+    watcher_type: custom
+    career_url: https://careers.indrive.com/vacancies/
+    job_board_url: https://careers.indrive.com/vacancies/
+    notes:
+      - Some tech roles mention relocation to Cyprus/Kazakhstan and Russian+English requirements.
+      - Backend stack varies; monitor senior backend/platform roles.
+
+  - name: PandaDoc
+    priority: A
+    category: document_saas
+    language: english_russian_signal
+    russian_speaking_signal: true
+    hiring_modes: [remote_region_limited]
+    relocation_status: remote_region_limited
+    target_locations: [Remote Europe, Poland, Portugal, Ukraine, Germany, Spain]
+    remote: region_limited
+    java_backend_relevance: low
+    role_keywords: [backend, python, platform, document automation, saas]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://www.pandadoc.com/careers/
+    job_board_url: https://job-boards.greenhouse.io/pandadoc
+    notes:
+      - Good CIS-friendly remote target, but not Java-first.
+      - Keep because remote Europe and English roles are common.
+
+  - name: Canonical
+    priority: A
+    category: open_source_cloud
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_global]
+    relocation_status: remote_global
+    target_locations: [Worldwide]
+    remote: worldwide
+    java_backend_relevance: low
+    role_keywords: [software engineer, python, golang, kubernetes, cloud, platform, linux]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://canonical.com/careers/all
+    job_board_url: https://job-boards.greenhouse.io/canonical
+    notes:
+      - Strong global remote target; not Java-first.
+      - Useful if role is platform/cloud/backend and English is comfortable.
+
+  - name: Automattic
+    priority: A
+    category: remote_product_saas
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_global]
+    relocation_status: remote_global
+    target_locations: [Worldwide]
+    remote: worldwide
+    java_backend_relevance: low
+    role_keywords: [software engineer, backend, systems, php, javascript, distributed work]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://automattic.com/work-with-us/
+    job_board_url: https://job-boards.greenhouse.io/automatticcareers
+    notes:
+      - Fully remote global company with workforce in many countries.
+      - Not Java-first, but useful as remote fallback target.
+
+  - name: GitLab
+    priority: A
+    category: devtools_remote
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_region_limited]
+    relocation_status: remote_region_limited
+    target_locations: [Supported countries globally]
+    remote: supported_countries_only
+    java_backend_relevance: low
+    role_keywords: [backend, platform, ruby, golang, devtools, infrastructure]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://about.gitlab.com/jobs/
+    job_board_url: https://job-boards.greenhouse.io/gitlab
+    notes:
+      - Strong remote company, but generally does not provide visa sponsorship except limited cases.
+      - Keep as remote target only, not relocation target.
+
+  - name: Canva
+    priority: A
+    category: design_product_platform
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, remote_region_limited, hybrid]
+    relocation_status: confirmed_role_based
+    target_locations: [Sydney, Australia, Melbourne, Australia, Remote ANZ]
+    remote: anz_limited
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, java, kotlin, cloud, distributed systems]
+    ats: smartrecruiters
+    watcher_type: smartrecruiters
+    career_url: https://www.lifeatcanva.com/en/jobs/
+    job_board_url: https://careers.smartrecruiters.com/canva
+    notes:
+      - Australia location page says relocation support is available when relocating for a role.
+      - Many roles are ANZ-limited; check work rights/sponsorship per vacancy.
+
+  - name: MongoDB
+    priority: A
+    category: database_cloud
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid, remote_region_limited, sponsorship_possible]
+    relocation_status: mixed_check_per_role
+    target_locations: [Dublin, Ireland, London, UK, Toronto, Canada, New York, USA, Remote Ireland]
+    remote: region_limited
+    java_backend_relevance: high
+    role_keywords: [java, backend, distributed systems, database, query engine, cloud, platform]
+    ats: greenhouse_or_custom
+    watcher_type: custom
+    career_url: https://www.mongodb.com/company/careers/see-jobs
+    job_board_url: https://www.mongodb.com/company/careers/see-jobs
+    notes:
+      - Strong backend/distributed systems target; sponsorship/relocation is role- and country-dependent.
+      - Ireland roles are especially worth tracking.
+
+  - name: Elastic
+    priority: A
+    category: search_observability_cloud
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_region_limited, hybrid, sponsorship_possible]
+    relocation_status: mixed_check_per_role
+    target_locations: [EMEA, Netherlands, Germany, UK, USA, Canada]
+    remote: region_limited
+    java_backend_relevance: high
+    role_keywords: [java, backend, distributed systems, search, elasticsearch, observability, cloud]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://www.elastic.co/careers/
+    job_board_url: https://job-boards.greenhouse.io/elastic
+    notes:
+      - Strong Java/distributed systems target; remote/hybrid options vary by role.
+      - Check sponsorship on every role.
