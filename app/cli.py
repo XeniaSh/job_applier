@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from typing import Callable
@@ -435,6 +436,16 @@ def collect_greenhouse(
     _print_linkedin_summary(report)
 
 
+def _console_safe_text(value: object, *, encoding: str | None = None) -> str:
+    text = "" if value is None else str(value)
+    resolved = encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+    return text.encode(resolved, errors="replace").decode(resolved, errors="replace")
+
+
+def _safe_echo(message: str = "", *, err: bool = False) -> None:
+    typer.echo(_console_safe_text(message), err=err)
+
+
 @app.command("collect-target-companies-greenhouse")
 def collect_target_companies_greenhouse(
     config: Path = typer.Option(
@@ -442,36 +453,97 @@ def collect_target_companies_greenhouse(
         "--config",
         help="Path to target companies YAML.",
     ),
+    show_vacancies: bool = typer.Option(
+        False,
+        "--show-vacancies",
+        help="Print vacancies to the console.",
+    ),
+    limit: int = typer.Option(
+        30,
+        "--limit",
+        min=1,
+        help="Max vacancies to print to the console.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Write all vacancies to a UTF-8 JSONL file.",
+    ),
 ) -> None:
     try:
         loaded = load_target_companies_config(config)
     except TargetCompaniesConfigLoadError as exc:
-        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
 
     greenhouse_count = sum(1 for company in loaded.companies if is_greenhouse_target(company))
     result = GreenhouseTargetWatcher().watch(loaded.companies)
 
-    typer.echo(f"Компаний в конфиге: {len(loaded.companies)}")
-    typer.echo(f"Greenhouse-компаний: {greenhouse_count}")
-    typer.echo(f"Найдено вакансий: {len(result.vacancies)}")
-    typer.echo(f"Ошибок: {len(result.errors)}")
+    _safe_echo(f"Companies in config: {len(loaded.companies)}")
+    _safe_echo(f"Greenhouse companies: {greenhouse_count}")
+    _safe_echo(f"Vacancies found: {len(result.vacancies)}")
+    _safe_echo(f"Errors: {len(result.errors)}")
 
+    _safe_echo("")
+    _safe_echo("Vacancies by company:")
+    vacancy_counts: dict[str, int] = {}
     for vacancy in result.vacancies:
-        typer.echo("")
-        typer.echo(f"company: {vacancy.company or ''}")
-        typer.echo(f"title: {vacancy.title}")
-        typer.echo(f"location: {vacancy.location or ''}")
-        typer.echo(f"url: {vacancy.url}")
-        typer.echo(f"source: {vacancy.source}")
-        typer.echo(f"external_id: {vacancy.external_id}")
+        name = vacancy.company or "unknown"
+        vacancy_counts[name] = vacancy_counts.get(name, 0) + 1
+    if vacancy_counts:
+        for name in sorted(vacancy_counts):
+            _safe_echo(f"  {name}: {vacancy_counts[name]}")
+    else:
+        _safe_echo("  (none)")
 
-    for error in result.errors:
-        typer.echo("")
-        typer.secho(
-            f"Ошибка {error.company_name}: {error.message}",
-            fg=typer.colors.YELLOW,
-        )
+    _safe_echo("")
+    _safe_echo("Errors by company:")
+    if result.errors:
+        for error in result.errors:
+            _safe_echo(f"  {error.company_name}: {error.message}")
+    else:
+        _safe_echo("  (none)")
+
+    if show_vacancies:
+        visible = result.vacancies[:limit]
+        for vacancy in visible:
+            _safe_echo("")
+            _safe_echo(f"company: {vacancy.company or ''}")
+            _safe_echo(f"title: {vacancy.title}")
+            _safe_echo(f"location: {vacancy.location or ''}")
+            _safe_echo(f"url: {vacancy.url}")
+            _safe_echo(f"source: {vacancy.source}")
+            _safe_echo(f"external_id: {vacancy.external_id}")
+        if len(result.vacancies) > limit:
+            _safe_echo("")
+            _safe_echo(
+                f"Showing {limit} of {len(result.vacancies)} vacancies. "
+                "Use --limit or --output to inspect more."
+            )
+
+    if output is not None:
+        try:
+            with output.open("w", encoding="utf-8") as handle:
+                for vacancy in result.vacancies:
+                    payload = {
+                        "company": vacancy.company,
+                        "title": vacancy.title,
+                        "location": vacancy.location,
+                        "url": vacancy.url,
+                        "source": vacancy.source,
+                        "external_id": vacancy.external_id,
+                        "description": vacancy.description,
+                    }
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            typer.secho(
+                _console_safe_text(f"Cannot write output file: {output}"),
+                err=True,
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1) from exc
+        _safe_echo("")
+        _safe_echo(f"Wrote {len(result.vacancies)} vacancies to {output}")
 
 
 @app.command("reset-imap-checkpoint")
