@@ -600,6 +600,212 @@ def collect_target_companies_greenhouse(
         _safe_echo(f"Wrote {len(result.vacancies)} vacancies to {output}")
 
 
+@app.command("analyze-target-companies-greenhouse")
+def analyze_target_companies_greenhouse(
+    config: Path = typer.Option(
+        DEFAULT_TARGET_COMPANIES_PATH,
+        "--config",
+        help="Path to target companies YAML.",
+    ),
+    company: list[str] | None = typer.Option(
+        None,
+        "--company",
+        help="Analyze only these company names. Repeatable.",
+    ),
+    limit: int = typer.Option(
+        30,
+        "--limit",
+        min=1,
+        help="Max vacancies to analyze. Safety guard against large LLM batches.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Write full analysis results to a UTF-8 JSON file.",
+    ),
+) -> None:
+    try:
+        loaded = load_target_companies_config(config)
+    except TargetCompaniesConfigLoadError as exc:
+        typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    try:
+        selected_companies = _select_target_companies(loaded.companies, company)
+    except ValueError as exc:
+        typer.secho(_console_safe_text(str(exc)), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    greenhouse_count = sum(1 for item in selected_companies if is_greenhouse_target(item))
+    watch_result = GreenhouseTargetWatcher().watch(selected_companies)
+    to_analyze = watch_result.vacancies[:limit]
+
+    _safe_echo(f"Companies in config: {len(loaded.companies)}")
+    if company:
+        _safe_echo(f"Selected companies: {len(selected_companies)}")
+    _safe_echo(f"Greenhouse companies: {greenhouse_count}")
+    _safe_echo(f"Raw vacancies fetched: {watch_result.raw_fetched}")
+    _safe_echo(f"Vacancies after prefilter: {len(watch_result.vacancies)}")
+    _safe_echo(f"Analyzing {len(to_analyze)} vacancies (limit: {limit})")
+
+    analyzer = None
+    if to_analyze:
+        try:
+            settings = Settings()
+        except ValidationError as exc:
+            typer.secho(
+                _console_safe_text(f"Missing required LLM configuration: {exc}"),
+                err=True,
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=2) from exc
+        try:
+            analyzer = build_analyzer(settings)
+        except (SkillsProfileLoadError, PromptLoadError) as exc:
+            typer.secho(_console_safe_text(f"Failed to load analysis files: {exc}"), err=True, fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+    analyzed_rows: list[dict[str, object]] = []
+    decision_counts: dict[str, int] = {
+        Decision.STRONG_MATCH.value: 0,
+        Decision.POTENTIAL_MATCH.value: 0,
+        Decision.IGNORE.value: 0,
+    }
+    analyzed_by_company: dict[str, int] = {}
+    analysis_errors = 0
+
+    for vacancy in to_analyze:
+        if analyzer is None:
+            break
+        try:
+            evaluation = analyzer.analyze(vacancy.to_analysis_text(), content_completeness="FULL")
+        except Exception as exc:  # noqa: BLE001
+            analysis_errors += 1
+            logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
+            analyzed_rows.append(_target_company_analysis_payload(vacancy, evaluation=None, error=str(exc)))
+            _safe_echo("")
+            _safe_echo(f"[ERROR] {vacancy.company or 'unknown'} - {vacancy.title}")
+            _safe_echo(f"Error: {exc}")
+            continue
+
+        decision_name = evaluation.decision.value
+        decision_counts[decision_name] = decision_counts.get(decision_name, 0) + 1
+        company_name = vacancy.company or "unknown"
+        analyzed_by_company[company_name] = analyzed_by_company.get(company_name, 0) + 1
+        analyzed_rows.append(_target_company_analysis_payload(vacancy, evaluation=evaluation))
+        _print_target_company_analysis_vacancy(vacancy, evaluation)
+
+    analyzed_count = sum(decision_counts.values())
+    _safe_echo("")
+    _safe_echo(f"Vacancies analyzed: {analyzed_count}")
+    _safe_echo(f"Watcher errors: {len(watch_result.errors)}")
+    if analysis_errors:
+        _safe_echo(f"Analysis errors: {analysis_errors}")
+
+    _safe_echo("")
+    _safe_echo("Decisions:")
+    for name in (Decision.STRONG_MATCH.value, Decision.POTENTIAL_MATCH.value, Decision.IGNORE.value):
+        _safe_echo(f"  {name}: {decision_counts.get(name, 0)}")
+
+    _safe_echo("")
+    _safe_echo("Analyzed by company:")
+    if analyzed_by_company:
+        for name in sorted(analyzed_by_company):
+            _safe_echo(f"  {name}: {analyzed_by_company[name]}")
+    else:
+        _safe_echo("  (none)")
+
+    _safe_echo("")
+    _safe_echo("Errors by company:")
+    _print_company_errors(watch_result.errors, debug=False)
+
+    if output is not None:
+        document = {
+            "vacancies": analyzed_rows,
+            "errors": [
+                {
+                    "company_name": item.company_name,
+                    "message": item.message,
+                    "slug": item.slug,
+                    "endpoint": item.endpoint,
+                    "status_code": item.status_code,
+                    "error_type": item.error_type,
+                    "attempts": item.attempts,
+                    "response_snippet": item.response_snippet,
+                }
+                for item in watch_result.errors
+            ],
+        }
+        try:
+            output.write_text(
+                json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            typer.secho(
+                _console_safe_text(f"Cannot write output file: {output}"),
+                err=True,
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1) from exc
+        _safe_echo("")
+        _safe_echo(f"Wrote {len(analyzed_rows)} analyzed vacancies to {output}")
+
+
+def _target_company_analysis_payload(
+    vacancy: NormalizedVacancy,
+    *,
+    evaluation: VacancyEvaluation | None,
+    error: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "company": vacancy.company,
+        "title": vacancy.title,
+        "location": vacancy.location,
+        "url": vacancy.url,
+        "source": vacancy.source,
+        "external_id": vacancy.external_id,
+    }
+    if evaluation is not None:
+        payload.update(evaluation.model_dump(mode="json"))
+    if error:
+        payload["error"] = error
+    return payload
+
+
+def _print_target_company_analysis_vacancy(
+    vacancy: NormalizedVacancy,
+    evaluation: VacancyEvaluation,
+) -> None:
+    score = _format_analysis_score(evaluation.match_percentage)
+    company_name = vacancy.company or "unknown"
+    _safe_echo("")
+    _safe_echo(f"[{evaluation.decision.value}] {score} - {company_name} - {vacancy.title}")
+    _safe_echo(f"Location: {vacancy.location or ''}")
+    reasons = _compact_analysis_reasons(evaluation)
+    if reasons:
+        _safe_echo(f"Reasons: {reasons}")
+    _safe_echo(f"URL: {vacancy.url}")
+
+
+def _format_analysis_score(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.1f}"
+
+
+def _compact_analysis_reasons(evaluation: VacancyEvaluation) -> str:
+    points = [item.strip() for item in evaluation.matched_points if item.strip()]
+    if points:
+        return ", ".join(points[:4])
+    reason = " ".join(evaluation.decision_reason.split()) if evaluation.decision_reason else ""
+    if reason:
+        return reason
+    return " ".join(evaluation.summary.split()) if evaluation.summary else ""
+
+
 def _select_target_companies(
     companies: list[TargetCompany],
     names: list[str] | None,
