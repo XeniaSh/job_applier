@@ -19,6 +19,12 @@ from pydantic import ValidationError
 from app.collectors.hh_client import HHClient
 from app.collectors.hh_collector import DEFAULT_HH_QUERIES, HHCollector, HHCollectReport
 from app.collectors.greenhouse_collector import GreenhouseCollectionError, GreenhouseCollector
+from app.company_watch.config_loader import (
+    DEFAULT_TARGET_COMPANIES_PATH,
+    TargetCompaniesConfigLoadError,
+    load_target_companies_config,
+)
+from app.company_watch.watchers.greenhouse import GreenhouseTargetWatcher, is_greenhouse_target
 from app.collectors.email_imap_client import (
     EmailAuthenticationError,
     EmailConnectionError,
@@ -427,6 +433,45 @@ def collect_greenhouse(
     _sync_application_history(report.processed)
     _print_linkedin_results(report=report, include_ignore=include_ignore, dry_run=False)
     _print_linkedin_summary(report)
+
+
+@app.command("collect-target-companies-greenhouse")
+def collect_target_companies_greenhouse(
+    config: Path = typer.Option(
+        DEFAULT_TARGET_COMPANIES_PATH,
+        "--config",
+        help="Path to target companies YAML.",
+    ),
+) -> None:
+    try:
+        loaded = load_target_companies_config(config)
+    except TargetCompaniesConfigLoadError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    greenhouse_count = sum(1 for company in loaded.companies if is_greenhouse_target(company))
+    result = GreenhouseTargetWatcher().watch(loaded.companies)
+
+    typer.echo(f"Компаний в конфиге: {len(loaded.companies)}")
+    typer.echo(f"Greenhouse-компаний: {greenhouse_count}")
+    typer.echo(f"Найдено вакансий: {len(result.vacancies)}")
+    typer.echo(f"Ошибок: {len(result.errors)}")
+
+    for vacancy in result.vacancies:
+        typer.echo("")
+        typer.echo(f"company: {vacancy.company or ''}")
+        typer.echo(f"title: {vacancy.title}")
+        typer.echo(f"location: {vacancy.location or ''}")
+        typer.echo(f"url: {vacancy.url}")
+        typer.echo(f"source: {vacancy.source}")
+        typer.echo(f"external_id: {vacancy.external_id}")
+
+    for error in result.errors:
+        typer.echo("")
+        typer.secho(
+            f"Ошибка {error.company_name}: {error.message}",
+            fg=typer.colors.YELLOW,
+        )
 
 
 @app.command("reset-imap-checkpoint")
