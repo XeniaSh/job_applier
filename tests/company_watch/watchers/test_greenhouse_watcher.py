@@ -113,7 +113,7 @@ def test_empty_role_keywords_do_not_filter() -> None:
                     _job(job_id=101, title="Java Backend Engineer"),
                     _job(
                         job_id=202,
-                        title="Frontend Designer",
+                        title="Warehouse Operator",
                         url="https://job-boards.greenhouse.io/agoda/jobs/202",
                         content="<p>Figma and CSS.</p>",
                     ),
@@ -171,8 +171,8 @@ def test_source_and_external_id_are_stable() -> None:
         )
     )
 
-    first = GreenhouseTargetWatcher().watch(_company())
-    second = GreenhouseTargetWatcher().watch(_company())
+    first = GreenhouseTargetWatcher().watch(_company(role_keywords=[], role_title_keywords=[]))
+    second = GreenhouseTargetWatcher().watch(_company(role_keywords=[], role_title_keywords=[]))
 
     assert [item.source for item in first.vacancies] == [
         "target_company:greenhouse:agoda",
@@ -207,3 +207,56 @@ def test_watch_accepts_a_single_company_without_treating_model_as_sequence() -> 
     result = GreenhouseTargetWatcher().watch(company)
     assert result.vacancies == []
     assert result.errors == []
+
+
+@respx.mock
+def test_description_only_keyword_is_ignored() -> None:
+    respx.get(greenhouse_jobs_endpoint("agoda")).mock(
+        return_value=httpx.Response(
+            status_code=200,
+            json={
+                "jobs": [
+                    _job(
+                        job_id=303,
+                        title="Warehouse Operator",
+                        url="https://job-boards.greenhouse.io/agoda/jobs/303",
+                        content="<p>Java backend services and kotlin.</p>",
+                    )
+                ]
+            },
+        )
+    )
+
+    result = GreenhouseTargetWatcher().watch(_company(role_keywords=["java", "backend"]))
+
+    assert result.raw_fetched == 1
+    assert result.vacancies == []
+
+
+@respx.mock
+def test_exclude_title_keywords_drop_matching_jobs() -> None:
+    respx.get(greenhouse_jobs_endpoint("agoda")).mock(
+        return_value=httpx.Response(
+            status_code=200,
+            json={
+                "jobs": [
+                    _job(job_id=101, title="Java Backend Engineer"),
+                    _job(
+                        job_id=404,
+                        title="Staff Java Backend Engineer",
+                        url="https://job-boards.greenhouse.io/agoda/jobs/404",
+                    ),
+                ]
+            },
+        )
+    )
+
+    result = GreenhouseTargetWatcher().watch(
+        _company(
+            role_title_keywords=["java", "backend"],
+            exclude_title_keywords=["staff"],
+        )
+    )
+
+    assert result.raw_fetched == 2
+    assert [item.external_id for item in result.vacancies] == ["101"]

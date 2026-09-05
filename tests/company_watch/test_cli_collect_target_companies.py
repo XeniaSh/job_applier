@@ -95,6 +95,8 @@ def test_default_output_prints_summary_not_vacancies(tmp_path: Path, monkeypatch
     assert [company.name for company in companies] == ["Agoda", "Qonto"]
     assert "Companies in config: 2" in result.output
     assert "Greenhouse companies: 1" in result.output
+    assert "Raw vacancies fetched: 0" in result.output
+    assert "Vacancies after filtering: 1" in result.output
     assert "Vacancies found: 1" in result.output
     assert "Errors: 0" in result.output
     assert "Vacancies by company:" in result.output

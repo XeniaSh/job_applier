@@ -481,6 +481,8 @@ def collect_target_companies_greenhouse(
 
     _safe_echo(f"Companies in config: {len(loaded.companies)}")
     _safe_echo(f"Greenhouse companies: {greenhouse_count}")
+    _safe_echo(f"Raw vacancies fetched: {result.raw_fetched}")
+    _safe_echo(f"Vacancies after filtering: {len(result.vacancies)}")
     _safe_echo(f"Vacancies found: {len(result.vacancies)}")
     _safe_echo(f"Errors: {len(result.errors)}")
 

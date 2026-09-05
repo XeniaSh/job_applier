@@ -42,6 +42,9 @@ class TargetCompany(BaseModel):
     job_board_url: str | None = None
     java_backend_relevance: str | None = None
     role_keywords: list[str] = Field(default_factory=list)
+    role_title_keywords: list[str] = Field(default_factory=list)
+    role_description_keywords: list[str] = Field(default_factory=list)
+    exclude_title_keywords: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
     @field_validator("name", mode="before")
@@ -76,6 +79,9 @@ class TargetCompany(BaseModel):
         "hiring_modes",
         "known_hiring_locations",
         "role_keywords",
+        "role_title_keywords",
+        "role_description_keywords",
+        "exclude_title_keywords",
         "notes",
         mode="before",
     )

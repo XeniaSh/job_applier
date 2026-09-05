@@ -33,6 +33,9 @@ def test_load_minimal_valid_yaml(tmp_path: Path) -> None:
     assert company.watcher_type == "greenhouse"
     assert company.known_hiring_locations == []
     assert company.role_keywords == []
+    assert company.role_title_keywords == []
+    assert company.role_description_keywords == []
+    assert company.exclude_title_keywords == []
     assert company.notes == []
     assert company.career_url is None
     assert company.job_board_url is None
@@ -50,6 +53,7 @@ def test_load_real_target_companies_yaml() -> None:
     assert agoda.watcher_type == "greenhouse"
     assert agoda.known_hiring_locations
     assert agoda.role_keywords
+    assert agoda.role_title_keywords
     assert agoda.career_url is not None
     assert agoda.job_board_url is not None
 

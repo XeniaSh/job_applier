@@ -140,7 +140,9 @@ For now, company watchers should use only source-specific fields such as:
 - `ats`
 - `career_url`
 - `job_board_url`
+- `role_title_keywords`
 - `role_keywords`
+- `exclude_title_keywords`
 
 ## Company watchers
 
@@ -197,8 +199,11 @@ Use existing timeout and HTTP style where possible.
 
 For Target Company watchers:
 
-- `role_keywords` are a soft OR filter over title + description.
-- If `role_keywords` is empty, do not filter by keywords.
+- `role_title_keywords` are a title-only OR include filter.
+- `role_keywords` is a legacy alias: if `role_title_keywords` is empty, it is applied to title only, not description.
+- `exclude_title_keywords` are merged with a built-in title exclude list.
+- `role_description_keywords` is reserved and is not a hard filter yet.
+- If include title keywords are empty, do not filter by include keywords.
 - Do not filter by `known_hiring_locations`.
 - Do not filter by relocation metadata.
 - Do not filter by language metadata.
@@ -226,8 +231,8 @@ For company watcher work, test at least:
 - unsupported watcher type is skipped;
 - mocked API response is parsed;
 - vacancies map into `NormalizedVacancy`;
-- keyword filtering works;
-- empty keyword list does not filter;
+- keyword filtering works, including title-only include and title exclude;
+- empty include keyword list does not filter by include keywords;
 - one company failure does not break another company;
 - `source` and `external_id` are stable.
 

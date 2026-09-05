@@ -16,6 +16,7 @@ from app.collectors.greenhouse_collector import (
 )
 from app.collectors.vacancy_collector import NormalizedVacancy
 from app.company_watch.models import TargetCompany
+from app.company_watch.prefilter import passes_role_prefilter
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class GreenhouseCompanyError:
 class GreenhouseWatchResult:
     vacancies: list[NormalizedVacancy]
     errors: list[GreenhouseCompanyError]
+    raw_fetched: int = 0
 
 
 class GreenhouseTargetWatcher:
@@ -50,6 +52,7 @@ class GreenhouseTargetWatcher:
     ) -> GreenhouseWatchResult:
         vacancies: list[NormalizedVacancy] = []
         errors: list[GreenhouseCompanyError] = []
+        raw_fetched = 0
         with build_greenhouse_http_client(
             timeout_seconds=self._timeout_seconds,
             user_agent=self._user_agent,
@@ -58,18 +61,30 @@ class GreenhouseTargetWatcher:
                 if not is_greenhouse_target(company):
                     continue
                 try:
-                    vacancies.extend(self._watch_company(company, client=client))
+                    collected, fetched = self._watch_company(company, client=client)
+                    vacancies.extend(collected)
+                    raw_fetched += fetched
                 except (GreenhouseCollectionError, ValueError) as exc:
                     message = str(exc).strip() or f"Greenhouse watch failed for '{company.name}'."
                     logger.warning("Greenhouse watch failed for '%s': %s", company.name, message)
                     errors.append(GreenhouseCompanyError(company_name=company.name, message=message))
-        return GreenhouseWatchResult(vacancies=vacancies, errors=errors)
+        return GreenhouseWatchResult(
+            vacancies=vacancies,
+            errors=errors,
+            raw_fetched=raw_fetched,
+        )
 
-    def _watch_company(self, company: TargetCompany, *, client: httpx.Client) -> list[NormalizedVacancy]:
+    def _watch_company(
+        self,
+        company: TargetCompany,
+        *,
+        client: httpx.Client,
+    ) -> tuple[list[NormalizedVacancy], int]:
         board = resolve_greenhouse_board_slug(company)
         source = f"{_SOURCE_PREFIX}:{board}"
         jobs = fetch_greenhouse_board_jobs(board, client=client)
         collected: list[NormalizedVacancy] = []
+        raw_fetched = 0
         for item in jobs:
             vacancy = greenhouse_job_to_normalized(
                 item,
@@ -78,10 +93,11 @@ class GreenhouseTargetWatcher:
             )
             if vacancy is None:
                 continue
-            if not matches_role_keywords(vacancy, company.role_keywords):
+            raw_fetched += 1
+            if not passes_role_prefilter(vacancy, company):
                 continue
             collected.append(vacancy)
-        return collected
+        return collected, raw_fetched
 
 
 def is_greenhouse_target(company: TargetCompany) -> bool:
@@ -100,14 +116,6 @@ def resolve_greenhouse_board_slug(company: TargetCompany) -> str:
     if not slug:
         raise ValueError(f"Cannot resolve Greenhouse board for company: {company.name}")
     return slug
-
-
-def matches_role_keywords(vacancy: NormalizedVacancy, keywords: list[str]) -> bool:
-    cleaned = [item.strip().casefold() for item in keywords if item.strip()]
-    if not cleaned:
-        return True
-    haystack = f"{vacancy.title}\n{vacancy.description}".casefold()
-    return any(keyword in haystack for keyword in cleaned)
 
 
 def _as_company_list(companies: TargetCompany | Sequence[TargetCompany]) -> list[TargetCompany]:

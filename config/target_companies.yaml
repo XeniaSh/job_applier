@@ -14,7 +14,10 @@
 #   english_russian_signal: English required, plus Russian-speaking/CIS-friendly signal; not a guarantee that Russian is official working language
 #
 # ats values are best-effort and should be verified before implementing watchers.
-# For MVP: start with watcher_type in [greenhouse, lever, ashby] and leave custom/manual later.
+# role_title_keywords match the job title only (OR).
+# role_keywords is a legacy alias applied to title only when role_title_keywords is empty.
+# exclude_title_keywords are added to the built-in title exclude list.
+# role_description_keywords is reserved and is not a hard filter yet.
 
 companies:
   - name: Agoda
@@ -28,6 +31,7 @@ companies:
     remote: limited
     java_backend_relevance: high
     role_keywords: [backend, java, kotlin, platform, fintech, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse
     watcher_type: greenhouse
     career_url: https://careersatagoda.com/
@@ -85,6 +89,7 @@ companies:
     remote: limited
     java_backend_relevance: very_high
     role_keywords: [java, backend, payments, platform, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse
     watcher_type: greenhouse
     career_url: https://adyen-careers.com/
@@ -180,6 +185,7 @@ companies:
     remote: limited
     java_backend_relevance: medium
     role_keywords: [backend, platform, marketplace, infrastructure]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse_embedded
     watcher_type: greenhouse
     career_url: https://careers.vinted.com/
@@ -313,6 +319,7 @@ companies:
     remote: limited
     java_backend_relevance: medium
     role_keywords: [backend, java, data streams, trading, platform, golang]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse_embedded
     watcher_type: greenhouse
     career_url: https://exness-careers.com/
@@ -408,6 +415,7 @@ companies:
     remote: role_based
     java_backend_relevance: high
     role_keywords: [java, kotlin, backend, developer tools, platform, intellij, teamcity]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse
     watcher_type: greenhouse
     career_url: https://www.jetbrains.com/careers/jobs/
@@ -465,6 +473,7 @@ companies:
     remote: region_limited
     java_backend_relevance: low
     role_keywords: [backend, python, platform, document automation, saas]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse
     watcher_type: greenhouse
     career_url: https://www.pandadoc.com/careers/
@@ -484,6 +493,7 @@ companies:
     remote: worldwide
     java_backend_relevance: low
     role_keywords: [software engineer, python, golang, kubernetes, cloud, platform, linux]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse
     watcher_type: greenhouse
     career_url: https://canonical.com/careers/all
@@ -503,6 +513,7 @@ companies:
     remote: worldwide
     java_backend_relevance: low
     role_keywords: [software engineer, backend, systems, php, javascript, distributed work]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse
     watcher_type: greenhouse
     career_url: https://automattic.com/work-with-us/
@@ -522,6 +533,7 @@ companies:
     remote: supported_countries_only
     java_backend_relevance: low
     role_keywords: [backend, platform, ruby, golang, devtools, infrastructure]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse
     watcher_type: greenhouse
     career_url: https://about.gitlab.com/jobs/
@@ -579,6 +591,7 @@ companies:
     remote: region_limited
     java_backend_relevance: high
     role_keywords: [java, backend, distributed systems, search, elasticsearch, observability, cloud]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
     ats: greenhouse
     watcher_type: greenhouse
     career_url: https://www.elastic.co/careers/
