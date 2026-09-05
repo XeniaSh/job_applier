@@ -24,7 +24,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation]
     relocation_status: confirmed_role_based
-    target_locations: [Bangkok, Thailand]
+    known_hiring_locations: [Bangkok, Thailand]
     remote: limited
     java_backend_relevance: high
     role_keywords: [backend, java, kotlin, platform, fintech, distributed systems]
@@ -43,7 +43,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [relocation, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Poland, Spain, Portugal, UAE, Cyprus, UK]
+    known_hiring_locations: [Poland, Spain, Portugal, UAE, Cyprus, UK]
     remote: limited
     java_backend_relevance: very_high
     role_keywords: [java, backend, payments, risk, fraud, credit, kotlin, distributed systems]
@@ -62,7 +62,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Tallinn, London, Budapest, Singapore]
+    known_hiring_locations: [Tallinn, London, Budapest, Singapore]
     remote: limited
     java_backend_relevance: very_high
     role_keywords: [backend, java, kotlin, payments, financial crime, platform]
@@ -81,7 +81,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Amsterdam, Netherlands]
+    known_hiring_locations: [Amsterdam, Netherlands]
     remote: limited
     java_backend_relevance: very_high
     role_keywords: [java, backend, payments, platform, distributed systems]
@@ -100,7 +100,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Berlin, Barcelona, Vienna]
+    known_hiring_locations: [Berlin, Barcelona, Vienna]
     remote: limited
     java_backend_relevance: very_high
     role_keywords: [backend, java, kotlin, spring boot, banking, risk, lending]
@@ -119,7 +119,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [visa_support_possible, hybrid, remote_region_limited]
     relocation_status: confirmed_role_based
-    target_locations: [France, Germany, Spain, Italy, Serbia, Portugal]
+    known_hiring_locations: [France, Germany, Spain, Italy, Serbia, Portugal]
     remote: region_limited
     java_backend_relevance: medium
     role_keywords: [backend, platform, fintech, payments, banking]
@@ -138,7 +138,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Berlin, London]
+    known_hiring_locations: [Berlin, London]
     remote: limited
     java_backend_relevance: high
     role_keywords: [backend, kotlin, java, banking, investment, trading]
@@ -157,7 +157,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation]
     relocation_status: confirmed_role_based
-    target_locations: [Amsterdam, Netherlands]
+    known_hiring_locations: [Amsterdam, Netherlands]
     remote: limited
     java_backend_relevance: very_high
     role_keywords: [java, spring, backend, postgresql, logistics, distributed systems]
@@ -176,7 +176,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation]
     relocation_status: confirmed_role_based
-    target_locations: [Vilnius, Lithuania, Kaunas, Lithuania]
+    known_hiring_locations: [Vilnius, Lithuania, Kaunas, Lithuania]
     remote: limited
     java_backend_relevance: medium
     role_keywords: [backend, platform, marketplace, infrastructure]
@@ -195,7 +195,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Tallinn, Estonia]
+    known_hiring_locations: [Tallinn, Estonia]
     remote: limited
     java_backend_relevance: medium
     role_keywords: [backend, platform, payments, mobility, distributed systems]
@@ -214,7 +214,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Barcelona, Spain, Berlin, Germany, London, UK, Edinburgh, UK]
+    known_hiring_locations: [Barcelona, Spain, Berlin, Germany, London, UK, Edinburgh, UK]
     remote: limited
     java_backend_relevance: medium
     role_keywords: [backend, software engineer, platform, travel, payments]
@@ -233,7 +233,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation, remote_region_limited]
     relocation_status: confirmed_role_based
-    target_locations: [Milan, Italy, Madrid, Spain, Warsaw, Poland, London, UK]
+    known_hiring_locations: [Milan, Italy, Madrid, Spain, Warsaw, Poland, London, UK]
     remote: eligible_countries
     java_backend_relevance: medium
     role_keywords: [software engineer, backend, platform, ai, distributed systems]
@@ -252,7 +252,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [hybrid, relocation_possible]
     relocation_status: mixed_check_per_role
-    target_locations: [Munich, Germany, Berlin, Germany, Dublin, Ireland, Madrid, Spain, London, UK, Amsterdam, Netherlands]
+    known_hiring_locations: [Munich, Germany, Berlin, Germany, Dublin, Ireland, Madrid, Spain, London, UK, Amsterdam, Netherlands]
     remote: limited
     java_backend_relevance: high
     role_keywords: [backend, java, kotlin, platform, hrtech, distributed systems]
@@ -271,7 +271,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation, visa_sponsorship_possible, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Singapore, Melbourne, Australia, Sydney, Australia, London, UK, Amsterdam, Netherlands, San Francisco, USA]
+    known_hiring_locations: [Singapore, Melbourne, Australia, Sydney, Australia, London, UK, Amsterdam, Netherlands, San Francisco, USA]
     remote: limited
     java_backend_relevance: high
     role_keywords: [backend, payments, platform, lending, data platform, distributed systems]
@@ -290,7 +290,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [relocation, remote, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [UAE, Saudi Arabia, Egypt, Portugal, Spain, Serbia, Armenia, Georgia]
+    known_hiring_locations: [UAE, Saudi Arabia, Egypt, Portugal, Spain, Serbia, Armenia, Georgia]
     remote: yes_for_some_roles
     java_backend_relevance: medium
     role_keywords: [backend, fintech, scoring, risk, payments, platform]
@@ -309,7 +309,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [relocation, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Limassol, Cyprus]
+    known_hiring_locations: [Limassol, Cyprus]
     remote: limited
     java_backend_relevance: medium
     role_keywords: [backend, java, data streams, trading, platform, golang]
@@ -328,7 +328,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [relocation, hybrid, remote]
     relocation_status: confirmed_role_based
-    target_locations: [Manila, Philippines]
+    known_hiring_locations: [Manila, Philippines]
     remote: yes_for_some_roles
     java_backend_relevance: very_high
     role_keywords: [java, kotlin, backend, fintech, banking, lending, payments]
@@ -347,7 +347,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [relocation, remote, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Serbia, Cyprus, Georgia, Kazakhstan, Spain, Mexico]
+    known_hiring_locations: [Serbia, Cyprus, Georgia, Kazakhstan, Spain, Mexico]
     remote: yes_for_some_roles
     java_backend_relevance: very_high
     role_keywords: [java, kotlin, backend, fintech, banking, auth, kafka, postgresql, spring]
@@ -366,7 +366,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [remote, relocation]
     relocation_status: confirmed_role_based
-    target_locations: [Cyprus, Netherlands, Poland, Spain, Portugal, Serbia, Germany, Armenia, Georgia, Kazakhstan, Uzbekistan]
+    known_hiring_locations: [Cyprus, Netherlands, Poland, Spain, Portugal, Serbia, Germany, Armenia, Georgia, Kazakhstan, Uzbekistan]
     remote: yes_for_some_roles
     java_backend_relevance: medium
     role_keywords: [backend, fintech, banking, go, java, platform, payments]
@@ -385,7 +385,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [relocation, hybrid, remote_role_based]
     relocation_status: confirmed_role_based
-    target_locations: [Malaga, Spain, Limassol, Cyprus, Paphos, Cyprus, Tbilisi, Georgia, London, UK]
+    known_hiring_locations: [Malaga, Spain, Limassol, Cyprus, Paphos, Cyprus, Tbilisi, Georgia, London, UK]
     remote: yes_for_some_roles
     java_backend_relevance: medium
     role_keywords: [backend, platform, trading, go, java, distributed systems]
@@ -404,7 +404,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [relocation, hybrid, remote_role_based]
     relocation_status: confirmed_role_based
-    target_locations: [Amsterdam, Netherlands, Berlin, Germany, Limassol, Cyprus, Paphos, Cyprus, Prague, Czech Republic, Warsaw, Poland, Belgrade, Serbia, Madrid, Spain, Yerevan, Armenia]
+    known_hiring_locations: [Amsterdam, Netherlands, Berlin, Germany, Limassol, Cyprus, Paphos, Cyprus, Prague, Czech Republic, Warsaw, Poland, Belgrade, Serbia, Madrid, Spain, Yerevan, Armenia]
     remote: role_based
     java_backend_relevance: high
     role_keywords: [java, kotlin, backend, developer tools, platform, intellij, teamcity]
@@ -423,7 +423,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [hybrid, international]
     relocation_status: mixed_check_per_role
-    target_locations: [Amsterdam, Netherlands, Berlin, Germany, Yerevan, Armenia, Austin, USA]
+    known_hiring_locations: [Amsterdam, Netherlands, Berlin, Germany, Yerevan, Armenia, Austin, USA]
     remote: limited
     java_backend_relevance: medium
     role_keywords: [backend, platform, api, collaboration, distributed systems]
@@ -442,7 +442,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [relocation, hybrid, remote_role_based]
     relocation_status: confirmed_role_based
-    target_locations: [Cyprus, Kazakhstan, Georgia, UK, LATAM, MENA]
+    known_hiring_locations: [Cyprus, Kazakhstan, Georgia, UK, LATAM, MENA]
     remote: yes_for_some_roles
     java_backend_relevance: medium
     role_keywords: [backend, platform, fintech, mobility, go, java, sre]
@@ -461,7 +461,7 @@ companies:
     russian_speaking_signal: true
     hiring_modes: [remote_region_limited]
     relocation_status: remote_region_limited
-    target_locations: [Remote Europe, Poland, Portugal, Ukraine, Germany, Spain]
+    known_hiring_locations: [Remote Europe, Poland, Portugal, Ukraine, Germany, Spain]
     remote: region_limited
     java_backend_relevance: low
     role_keywords: [backend, python, platform, document automation, saas]
@@ -480,7 +480,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [remote_global]
     relocation_status: remote_global
-    target_locations: [Worldwide]
+    known_hiring_locations: [Worldwide]
     remote: worldwide
     java_backend_relevance: low
     role_keywords: [software engineer, python, golang, kubernetes, cloud, platform, linux]
@@ -499,7 +499,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [remote_global]
     relocation_status: remote_global
-    target_locations: [Worldwide]
+    known_hiring_locations: [Worldwide]
     remote: worldwide
     java_backend_relevance: low
     role_keywords: [software engineer, backend, systems, php, javascript, distributed work]
@@ -518,7 +518,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [remote_region_limited]
     relocation_status: remote_region_limited
-    target_locations: [Supported countries globally]
+    known_hiring_locations: [Supported countries globally]
     remote: supported_countries_only
     java_backend_relevance: low
     role_keywords: [backend, platform, ruby, golang, devtools, infrastructure]
@@ -537,7 +537,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [relocation, remote_region_limited, hybrid]
     relocation_status: confirmed_role_based
-    target_locations: [Sydney, Australia, Melbourne, Australia, Remote ANZ]
+    known_hiring_locations: [Sydney, Australia, Melbourne, Australia, Remote ANZ]
     remote: anz_limited
     java_backend_relevance: medium
     role_keywords: [backend, platform, java, kotlin, cloud, distributed systems]
@@ -556,7 +556,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [hybrid, remote_region_limited, sponsorship_possible]
     relocation_status: mixed_check_per_role
-    target_locations: [Dublin, Ireland, London, UK, Toronto, Canada, New York, USA, Remote Ireland]
+    known_hiring_locations: [Dublin, Ireland, London, UK, Toronto, Canada, New York, USA, Remote Ireland]
     remote: region_limited
     java_backend_relevance: high
     role_keywords: [java, backend, distributed systems, database, query engine, cloud, platform]
@@ -575,7 +575,7 @@ companies:
     russian_speaking_signal: false
     hiring_modes: [remote_region_limited, hybrid, sponsorship_possible]
     relocation_status: mixed_check_per_role
-    target_locations: [EMEA, Netherlands, Germany, UK, USA, Canada]
+    known_hiring_locations: [EMEA, Netherlands, Germany, UK, USA, Canada]
     remote: region_limited
     java_backend_relevance: high
     role_keywords: [java, backend, distributed systems, search, elasticsearch, observability, cloud]
