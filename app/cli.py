@@ -20,6 +20,10 @@ from pydantic import ValidationError
 from app.collectors.hh_client import HHClient
 from app.collectors.hh_collector import DEFAULT_HH_QUERIES, HHCollector, HHCollectReport
 from app.collectors.greenhouse_collector import GreenhouseCollectionError, GreenhouseCollector
+from app.company_watch.analysis_cache import (
+    DEFAULT_TARGET_COMPANY_ANALYSIS_CACHE_PATH,
+    TargetCompanyAnalysisCache,
+)
 from app.company_watch.application_recommendation import (
     RECOMMENDATION_LABELS,
     ApplicationRecommendation,
@@ -681,6 +685,21 @@ def analyze_target_companies_greenhouse(
         "--output",
         help="Write filtered analysis results to a UTF-8 JSON file.",
     ),
+    cache: Path = typer.Option(
+        DEFAULT_TARGET_COMPANY_ANALYSIS_CACHE_PATH,
+        "--cache",
+        help="Path to Target Companies analysis cache JSON.",
+    ),
+    no_cache: bool = typer.Option(
+        False,
+        "--no-cache",
+        help="Disable reading and writing the analysis cache.",
+    ),
+    refresh_cache: bool = typer.Option(
+        False,
+        "--refresh-cache",
+        help="Ignore existing cache entries, but write new results.",
+    ),
 ) -> None:
     try:
         sort_by_normalized = _normalize_analyze_sort_by(sort_by)
@@ -722,8 +741,26 @@ def analyze_target_companies_greenhouse(
     _safe_echo(f"Vacancies after prefilter: {len(watch_result.vacancies)}")
     _safe_echo(f"Analyzing {len(to_analyze)} vacancies (analyze-limit: {analyze_limit})")
 
+    read_cache = not no_cache and not refresh_cache
+    write_cache = not no_cache
+    analysis_cache: TargetCompanyAnalysisCache | None = None
+    if read_cache or write_cache:
+        analysis_cache = TargetCompanyAnalysisCache(cache)
+        analysis_cache.load()
+
     analyzer = None
-    if to_analyze:
+    cache_hits = 0
+    cache_misses = 0
+    analyzed_items: list[_TargetCompanyAnalysisItem] = []
+    decision_counts_before: dict[str, int] = {name: 0 for name in _ANALYZE_DECISION_CHOICES}
+    analyzed_by_company: dict[str, int] = {}
+    analysis_errors = 0
+    companies_by_name = {item.name.casefold(): item for item in selected_companies}
+
+    def get_analyzer():
+        nonlocal analyzer
+        if analyzer is not None:
+            return analyzer
         try:
             settings = Settings()
         except ValidationError as exc:
@@ -736,20 +773,56 @@ def analyze_target_companies_greenhouse(
         try:
             analyzer = build_analyzer(settings)
         except (SkillsProfileLoadError, PromptLoadError) as exc:
-            typer.secho(_console_safe_text(f"Failed to load analysis files: {exc}"), err=True, fg=typer.colors.RED)
+            typer.secho(
+                _console_safe_text(f"Failed to load analysis files: {exc}"),
+                err=True,
+                fg=typer.colors.RED,
+            )
             raise typer.Exit(code=1) from exc
+        return analyzer
 
-    analyzed_items: list[_TargetCompanyAnalysisItem] = []
-    decision_counts_before: dict[str, int] = {name: 0 for name in _ANALYZE_DECISION_CHOICES}
-    analyzed_by_company: dict[str, int] = {}
-    analysis_errors = 0
-    companies_by_name = {item.name.casefold(): item for item in selected_companies}
+    def record_success(
+        vacancy: NormalizedVacancy,
+        evaluation: VacancyEvaluation,
+        feasibility: ApplicationFeasibility,
+        recommendation: ApplicationRecommendation,
+        seniority: SeniorityClassification,
+    ) -> None:
+        decision_counts_before[evaluation.decision.value] = (
+            decision_counts_before.get(evaluation.decision.value, 0) + 1
+        )
+        company_name = vacancy.company or "unknown"
+        analyzed_by_company[company_name] = analyzed_by_company.get(company_name, 0) + 1
+        analyzed_items.append(
+            _TargetCompanyAnalysisItem(
+                vacancy=vacancy,
+                evaluation=evaluation,
+                feasibility=feasibility,
+                recommendation=recommendation,
+                seniority=seniority,
+            )
+        )
 
     for vacancy in to_analyze:
-        if analyzer is None:
-            break
+        if read_cache and analysis_cache is not None:
+            cached = analysis_cache.get(vacancy)
+            if cached is not None:
+                cache_hits += 1
+                record_success(
+                    vacancy,
+                    cached.evaluation,
+                    cached.feasibility,
+                    cached.recommendation,
+                    cached.seniority,
+                )
+                continue
+
+        cache_misses += 1
         try:
-            evaluation = analyzer.analyze(vacancy.to_analysis_text(), content_completeness="FULL")
+            evaluation = get_analyzer().analyze(
+                vacancy.to_analysis_text(),
+                content_completeness="FULL",
+            )
         except Exception as exc:  # noqa: BLE001
             analysis_errors += 1
             logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
@@ -778,20 +851,22 @@ def analyze_target_companies_greenhouse(
             location=vacancy.location,
             seniority=seniority_result,
         )
-        decision_counts_before[evaluation.decision.value] = (
-            decision_counts_before.get(evaluation.decision.value, 0) + 1
+        record_success(
+            vacancy,
+            evaluation,
+            assessment,
+            recommendation_result,
+            seniority_result,
         )
-        company_name = vacancy.company or "unknown"
-        analyzed_by_company[company_name] = analyzed_by_company.get(company_name, 0) + 1
-        analyzed_items.append(
-            _TargetCompanyAnalysisItem(
-                vacancy=vacancy,
+        if write_cache and analysis_cache is not None:
+            analysis_cache.put(
+                vacancy,
                 evaluation=evaluation,
                 feasibility=assessment,
                 recommendation=recommendation_result,
                 seniority=seniority_result,
             )
-        )
+            analysis_cache.save()
 
     filters_applied = (
         min_score is not None
@@ -865,6 +940,8 @@ def analyze_target_companies_greenhouse(
     _safe_echo("")
     _safe_echo(f"Vacancies after prefilter: {len(watch_result.vacancies)}")
     _safe_echo(f"Vacancies analyzed: {analyzed_count}")
+    _safe_echo(f"Cache hits: {cache_hits}")
+    _safe_echo(f"Cache misses: {cache_misses}")
     _safe_echo(f"Results shown: {len(shown_items)}")
     _safe_echo(f"Watcher errors: {len(watch_result.errors)}")
     if analysis_errors:

@@ -147,10 +147,10 @@ def _patch_runtime(
 
 
 def _invoke(config_file: Path, *extra: str):
-    return CliRunner().invoke(
-        cli_module.app,
-        ["analyze-target-companies-greenhouse", "--config", str(config_file), *extra],
-    )
+    args = ["analyze-target-companies-greenhouse", "--config", str(config_file), *extra]
+    if "--cache" not in extra and "--no-cache" not in extra:
+        args.extend(["--cache", str(config_file.parent / "analysis_cache.json")])
+    return CliRunner().invoke(cli_module.app, args)
 
 
 def test_command_runs_watcher_and_analyzer(tmp_path: Path, monkeypatch) -> None:
@@ -271,6 +271,8 @@ def test_summary_includes_analyzed_and_decision_counts(tmp_path: Path, monkeypat
     assert "Vacancies after prefilter: 2" in result.output
     assert "Analyzing 2 vacancies (analyze-limit: 30)" in result.output
     assert "Vacancies analyzed: 2" in result.output
+    assert "Cache hits: 0" in result.output
+    assert "Cache misses: 2" in result.output
     assert "Results shown: 2" in result.output
     assert "Watcher errors: 0" in result.output
     assert "Decisions after filters:" not in result.output
@@ -845,3 +847,134 @@ def test_unicode_in_seniority_and_recommendation_reasons_does_not_crash(
     assert "Seniority: STAFF_PLUS" in result.output
     assert "Recommendation reasons: seniority STAFF_PLUS is stretch level" in result.output
     assert "[RECOMMENDATION: CHECK_MANUALLY]" in result.output
+
+
+def test_first_run_writes_cache_and_second_run_reads_it(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    cache_file = tmp_path / "data" / "target_company_analysis_cache.json"
+    vacancy = _vacancy()
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=[vacancy], errors=[], raw_fetched=1),
+        evaluation=_evaluation(),
+    )
+
+    first = _invoke(config_file, "--cache", str(cache_file))
+    second = _invoke(config_file, "--cache", str(cache_file))
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert len(captured["texts"]) == 1
+    assert "Cache hits: 0" in first.output
+    assert "Cache misses: 1" in first.output
+    assert "Cache hits: 1" in second.output
+    assert "Cache misses: 0" in second.output
+    assert cache_file.is_file()
+    payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    entry = payload["entries"][0]
+    assert entry["source"] == vacancy.source
+    assert entry["external_id"] == vacancy.external_id
+    assert entry["description_hash"]
+    assert entry["decision"] == "STRONG_MATCH"
+    assert entry["application_recommendation"] == "CHECK_MANUALLY"
+    assert entry["seniority"] == "UNKNOWN"
+    assert entry["seniority_reasons"]
+
+
+def test_description_change_is_cache_miss(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    cache_file = tmp_path / "analysis_cache.json"
+    original = _vacancy(description="Java backend services")
+    updated = _vacancy(description="Java backend services and Kafka")
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=[original], errors=[], raw_fetched=1),
+        evaluation=_evaluation(),
+    )
+
+    first = _invoke(config_file, "--cache", str(cache_file))
+    monkeypatch.setattr(
+        cli_module,
+        "GreenhouseTargetWatcher",
+        _fake_watcher(GreenhouseWatchResult(vacancies=[updated], errors=[], raw_fetched=1)),
+    )
+    second = _invoke(config_file, "--cache", str(cache_file))
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert len(captured["texts"]) == 2
+    assert "Cache misses: 1" in second.output
+    assert "Cache hits: 0" in second.output
+
+
+def test_no_cache_always_calls_analyzer_and_does_not_write(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    cache_file = tmp_path / "analysis_cache.json"
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=[_vacancy()], errors=[], raw_fetched=1),
+        evaluation=_evaluation(),
+    )
+
+    first = _invoke(config_file, "--no-cache", "--cache", str(cache_file))
+    second = _invoke(config_file, "--no-cache", "--cache", str(cache_file))
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert len(captured["texts"]) == 2
+    assert not cache_file.exists()
+    assert "Cache hits: 0" in first.output
+    assert "Cache misses: 1" in first.output
+
+
+def test_refresh_cache_calls_analyzer_and_overwrites_entry(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    cache_file = tmp_path / "analysis_cache.json"
+    vacancy = _vacancy()
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=[vacancy], errors=[], raw_fetched=1),
+        evaluation=_evaluation(match_percentage=86.0),
+    )
+
+    first = _invoke(config_file, "--cache", str(cache_file))
+    _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=[vacancy], errors=[], raw_fetched=1),
+        evaluation=_evaluation(decision=Decision.IGNORE, match_percentage=10.0),
+        captured=captured,
+    )
+    second = _invoke(config_file, "--cache", str(cache_file), "--refresh-cache")
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert len(captured["texts"]) == 2
+    assert "Cache hits: 0" in second.output
+    assert "Cache misses: 1" in second.output
+    payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert payload["entries"][0]["decision"] == "IGNORE"
+    assert payload["entries"][0]["score"] == 10.0
+
+
+def test_cache_file_keeps_unicode_roundtrip(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    cache_file = tmp_path / "analysis_cache.json"
+    vacancy = _vacancy(title="Senior Java \u6c49 Backend", description="Kafka \u6c49 streams")
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=[vacancy], errors=[], raw_fetched=1),
+        evaluation=_evaluation(),
+    )
+
+    first = _invoke(config_file, "--cache", str(cache_file))
+    raw = cache_file.read_text(encoding="utf-8")
+    assert "\u6c49" in raw
+    assert "\\u6c49" not in raw
+    second = _invoke(config_file, "--cache", str(cache_file))
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert len(captured["texts"]) == 1
+    assert "Senior Java \u6c49 Backend" in second.output
+    assert "Seniority: SENIOR" in second.output
+    assert "Cache hits: 1" in second.output
