@@ -57,6 +57,13 @@ def test_load_real_target_companies_yaml() -> None:
     assert agoda.career_url is not None
     assert agoda.job_board_url is not None
 
+    vinted = next(company for company in config.companies if company.name == "Vinted")
+    exness = next(company for company in config.companies if company.name == "Exness")
+    assert vinted.watcher_type == "manual"
+    assert vinted.ats == "custom"
+    assert exness.watcher_type == "manual"
+    assert exness.ats == "custom"
+
 
 def test_missing_file_raises_clear_error(tmp_path: Path) -> None:
     missing_file = tmp_path / "missing.yaml"

@@ -186,8 +186,8 @@ companies:
     java_backend_relevance: medium
     role_keywords: [backend, platform, marketplace, infrastructure]
     role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
-    ats: greenhouse_embedded
-    watcher_type: greenhouse
+    ats: custom
+    watcher_type: manual
     career_url: https://careers.vinted.com/
     job_board_url: https://careers.vinted.com/jobs
     notes:
@@ -320,8 +320,8 @@ companies:
     java_backend_relevance: medium
     role_keywords: [backend, java, data streams, trading, platform, golang]
     role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
-    ats: greenhouse_embedded
-    watcher_type: greenhouse
+    ats: custom
+    watcher_type: manual
     career_url: https://exness-careers.com/
     job_board_url: https://exness-careers.com/jobs/
     notes:
