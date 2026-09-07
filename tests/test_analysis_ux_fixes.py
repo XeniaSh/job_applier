@@ -95,20 +95,30 @@ def test_java_and_spring_titles_are_strong_without_description() -> None:
         skills_loader=_profile,
         prompt_loader=lambda: "PROMPT",
     )
-    cases = (
+    backend_cases = (
         "Senior Backend Engineer (Java)",
         "Java Backend Engineer",
+    )
+    jvm_cases = (
         "Spring Boot Developer",
         "Java API Developer",
         "Java Software Engineer",
     )
-    for title in cases:
+    for title in backend_cases:
         result = analyzer.analyze(
             f"Title: {title}\nDescription:\n<not available in LinkedIn email>",
             content_completeness="PARTIAL",
         )
         assert result.decision == Decision.STRONG_MATCH, title
         assert "Explicit Java + backend signals in title" in result.decision_reason
+    for title in jvm_cases:
+        result = analyzer.analyze(
+            f"Title: {title}\nDescription:\n<not available in LinkedIn email>",
+            content_completeness="PARTIAL",
+        )
+        assert result.decision == Decision.STRONG_MATCH, title
+        assert "Explicit Java/JVM signal in title" in result.decision_reason
+        assert "backend signals in title" not in result.decision_reason
 
 
 def test_java_teacher_is_ignored_even_without_description() -> None:

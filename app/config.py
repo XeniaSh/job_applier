@@ -33,6 +33,8 @@ class TelegramChannelSettings(BaseModel):
 class TelegramSettings(BaseModel):
     bot_token: str = ""
     chat_id: str = ""
+    linkedin_chat_id: str = ""
+    target_companies_chat_id: str = ""
     job_feed: TelegramChannelSettings = Field(default_factory=TelegramChannelSettings)
 
 

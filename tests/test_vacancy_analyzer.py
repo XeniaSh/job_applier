@@ -787,6 +787,82 @@ def test_decision_reason_present_for_all_decisions() -> None:
         assert "not a good fit" not in reason
 
 
+def test_compiler_title_is_not_strong_from_java_kotlin_and_reason_is_accurate() -> None:
+    class CompilerClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["java", "kotlin"],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority="Senior",
+                responsibilities=["Implement compiler IR", "Improve codegen"],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Senior Compiler Developer",
+                short_summary="Work on Kotlin compiler core.",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=CompilerClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "kotlin", "spring boot"],
+            practical_skills=[],
+            absent_skills=[],
+            aliases={},
+            experience_years=7,
+            core_skills=["java"],
+            skill_weights={"java": 10, "kotlin": 8, "spring boot": 9},
+        ),
+        prompt_loader=lambda: "PROMPT",
+    )
+    result = analyzer.analyze(
+        "Title: Senior Compiler Developer (Kotlin Compiler - Core)\n"
+        "Description:\nWork on Kotlin compiler core internals.",
+        content_completeness="FULL",
+    )
+    assert result.decision == Decision.POTENTIAL_MATCH
+    assert "backend signals in title" not in result.decision_reason
+    assert "compiler" in result.decision_reason.lower()
+
+
+def test_java_backend_title_stays_strong_on_full_analysis() -> None:
+    class BackendClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["java", "spring boot"],
+                optional_skills=[],
+                minimum_experience_years=None,
+                seniority="Senior",
+                responsibilities=["Design backend services"],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="Senior Java Backend Engineer",
+                short_summary="Product backend role.",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=BackendClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot"],
+            practical_skills=[],
+            absent_skills=[],
+            aliases={},
+            experience_years=7,
+            core_skills=["java"],
+            skill_weights={"java": 10, "spring boot": 9},
+        ),
+        prompt_loader=lambda: "PROMPT",
+    )
+    result = analyzer.analyze(
+        "Title: Senior Java Backend Engineer\nDescription:\nBuild backend services.",
+        content_completeness="FULL",
+    )
+    assert result.decision == Decision.STRONG_MATCH
+    assert "Explicit Java + backend signals in title" in result.decision_reason
+
+
 def test_hire_feed_backend_title_has_specific_reason() -> None:
     class HireFeedClient(FakeLLMClient):
         def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:

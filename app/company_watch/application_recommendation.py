@@ -21,17 +21,6 @@ RECOMMENDATION_LABELS = (
     RECOMMENDATION_SKIP,
 )
 
-_INTERNATIONAL_RELOCATION_STATUSES = frozenset({"confirmed_role_based", "remote_global"})
-_INTERNATIONAL_HIRING_MODES = frozenset(
-    {
-        "relocation",
-        "visa_support_possible",
-        "visa_sponsorship_possible",
-        "remote_global",
-    }
-)
-_INTERNATIONAL_REMOTE = frozenset({"worldwide", "yes_for_some_roles"})
-
 
 @dataclass(frozen=True)
 class ApplicationRecommendation:
@@ -75,11 +64,16 @@ def recommend_application(
     if skip_reasons:
         return ApplicationRecommendation(label=RECOMMENDATION_SKIP, reasons=skip_reasons)
 
+    location_note = _known_hiring_location_reason(
+        location=location,
+        company=company,
+    )
+
     if seniority_label in constraints.stretch_seniority:
-        return ApplicationRecommendation(
-            label=RECOMMENDATION_CHECK_MANUALLY,
-            reasons=[f"seniority {seniority_label} is stretch level"],
-        )
+        reasons = [f"seniority {seniority_label} is stretch level"]
+        if location_note:
+            reasons.append(location_note)
+        return ApplicationRecommendation(label=RECOMMENDATION_CHECK_MANUALLY, reasons=reasons)
 
     if decision_value == Decision.STRONG_MATCH.value and _seniority_allows_apply_now(
         seniority_label,
@@ -87,18 +81,20 @@ def recommend_application(
     ):
         boost_reasons = _apply_now_signals(
             feasibility_label=feasibility_label,
-            location=location,
-            company=company,
+            visa=visa,
+            relocation=relocation,
             remote_type=remote_type,
             constraints=constraints,
         )
         if boost_reasons:
+            if location_note:
+                boost_reasons.append(location_note)
             return ApplicationRecommendation(label=RECOMMENDATION_APPLY_NOW, reasons=boost_reasons)
 
-    return ApplicationRecommendation(
-        label=RECOMMENDATION_CHECK_MANUALLY,
-        reasons=["sponsorship/relocation/location is unclear"],
-    )
+    check_reasons = ["sponsorship/relocation/location is unclear"]
+    if location_note:
+        check_reasons.append(location_note)
+    return ApplicationRecommendation(label=RECOMMENDATION_CHECK_MANUALLY, reasons=check_reasons)
 
 
 def _hard_blockers(
@@ -127,28 +123,33 @@ def _hard_blockers(
 def _apply_now_signals(
     *,
     feasibility_label: str | None,
-    location: str | None,
-    company: TargetCompany | None,
+    visa: str,
+    relocation: str,
     remote_type: str,
     constraints: CandidateConstraints,
 ) -> list[str]:
     reasons: list[str] = []
-    if feasibility_label == FEASIBILITY_LIKELY:
-        reasons.append("feasibility is LIKELY")
-    if constraints.open_to_relocation and _location_matches_known(
-        location,
-        company.known_hiring_locations if company is not None else [],
-    ):
-        reasons.append("location matches known hiring locations")
+    if visa == "yes":
+        reasons.append("visa sponsorship is available")
+    if relocation == "yes":
+        reasons.append("relocation support is available")
     if constraints.open_to_remote_worldwide and remote_type == "worldwide":
         reasons.append("remote worldwide")
-    if (
-        company is not None
-        and _company_suggests_international_hiring(company)
-        and not (location or "").strip()
-    ):
-        reasons.append("company metadata suggests international hiring")
+    if feasibility_label == FEASIBILITY_LIKELY:
+        reasons.append("feasibility is LIKELY")
     return reasons
+
+
+def _known_hiring_location_reason(
+    *,
+    location: str | None,
+    company: TargetCompany | None,
+) -> str | None:
+    if company is None:
+        return None
+    if _location_matches_known(location, company.known_hiring_locations):
+        return "location matches known hiring locations"
+    return None
 
 
 def _seniority_allows_apply_now(seniority_label: str, constraints: CandidateConstraints) -> bool:
@@ -186,14 +187,3 @@ def _location_matches_known(location: str | None, known_hiring_locations: list[s
         if token and (token in loc or loc in token):
             return True
     return False
-
-
-def _company_suggests_international_hiring(company: TargetCompany) -> bool:
-    status = company.relocation_status.strip().casefold()
-    if status in _INTERNATIONAL_RELOCATION_STATUSES:
-        return True
-    modes = {item.strip().casefold() for item in company.hiring_modes}
-    if modes & _INTERNATIONAL_HIRING_MODES:
-        return True
-    remote = (company.remote or "").strip().casefold()
-    return remote in _INTERNATIONAL_REMOTE

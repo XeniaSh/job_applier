@@ -77,10 +77,24 @@ BACKEND_ROLE_PATTERNS = (
     ("backend", r"\bbackend\b"),
     ("back-end", r"\bback-end\b"),
     ("back end", r"\bback\s+end\b"),
+)
+
+APPLICATION_ROLE_PATTERNS = (
     ("software engineer", r"\bsoftware\s+engineer\b"),
     ("software developer", r"\bsoftware\s+developer\b"),
     ("developer", r"\bdeveloper\b"),
     ("engineer", r"\bengineer\b"),
+)
+
+DOMAIN_MISMATCH_PATTERNS = (
+    ("compiler", r"\bcompiler\b"),
+    ("kernel", r"\bkernel\b"),
+    ("graphics", r"\bgraphics\b"),
+    ("embedded", r"\bembedded\b"),
+    ("firmware", r"\bfirmware\b"),
+    ("jvm runtime", r"\bjvm\s+runtime\b"),
+    ("runtime internals", r"\bruntime\s+internals\b"),
+    ("runtime", r"\bruntime\b"),
 )
 
 RULE_EXPLICIT_JVM_BACKEND = "EXPLICIT_JVM_BACKEND_TITLE"
@@ -149,7 +163,23 @@ def jvm_title_hits(normalized_title: str) -> list[str]:
 
 def backend_role_hits(normalized_title: str) -> list[str]:
     hits: list[str] = []
+    for label, pattern in (*BACKEND_ROLE_PATTERNS, *APPLICATION_ROLE_PATTERNS):
+        if re.search(pattern, normalized_title, flags=re.IGNORECASE):
+            hits.append(label)
+    return hits
+
+
+def genuine_backend_title_hits(normalized_title: str) -> list[str]:
+    hits: list[str] = []
     for label, pattern in BACKEND_ROLE_PATTERNS:
+        if re.search(pattern, normalized_title, flags=re.IGNORECASE):
+            hits.append(label)
+    return hits
+
+
+def domain_mismatch_title_hits(normalized_title: str) -> list[str]:
+    hits: list[str] = []
+    for label, pattern in DOMAIN_MISMATCH_PATTERNS:
         if re.search(pattern, normalized_title, flags=re.IGNORECASE):
             hits.append(label)
     return hits
@@ -215,11 +245,31 @@ def classify_title_match(title: str) -> TitleMatchClassification:
             negative_hits=tuple(android_hits),
         )
 
+    genuine_backend_hits = tuple(genuine_backend_title_hits(normalized))
+    domain_hits = tuple(domain_mismatch_title_hits(normalized))
     if jvm_hits and role_hits:
+        if domain_hits and not genuine_backend_hits:
+            return TitleMatchClassification(
+                match_strength=None,
+                rule=RULE_LLM_FALLBACK,
+                reason=(
+                    "Specialized compiler/runtime/systems domain in title; "
+                    "not a clear Java backend application role."
+                ),
+                llm_skipped=False,
+                jvm_hits=jvm_hits,
+                role_hits=role_hits,
+                negative_hits=domain_hits,
+            )
+        reason = (
+            "Explicit Java + backend signals in title"
+            if genuine_backend_hits
+            else "Explicit Java/JVM signal in title"
+        )
         return TitleMatchClassification(
             match_strength=Decision.STRONG_MATCH,
             rule=RULE_EXPLICIT_JVM_BACKEND,
-            reason="Explicit Java + backend signals in title",
+            reason=reason,
             llm_skipped=True,
             jvm_hits=jvm_hits,
             role_hits=role_hits,

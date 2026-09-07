@@ -18,9 +18,12 @@ from app.title_rules import (
     RULE_LLM_FALLBACK,
     TitleMatchClassification,
     classify_title_match,
+    domain_mismatch_title_hits,
+    genuine_backend_title_hits,
     incomplete_description_info,
     jvm_title_hits,
     log_classification_rule,
+    normalize_title,
 )
 
 logger = logging.getLogger(__name__)
@@ -223,7 +226,11 @@ class VacancyAnalyzer:
             and incomplete_title_class == "jvm_explicit_backend"
             and decision == Decision.STRONG_MATCH
         ):
-            decision_reason = "Explicit Java + backend signals in title"
+            decision_reason = (
+                title_class.reason
+                if title_class is not None and title_class.reason
+                else "Explicit Java + backend signals in title"
+            )
         if is_incomplete and incomplete_title_class == "generic_backend" and decision == Decision.POTENTIAL_MATCH:
             decision_reason = "Backend role detected, but the technology stack is unknown"
 
@@ -231,8 +238,6 @@ class VacancyAnalyzer:
         if title_class is not None and title_class.is_deterministic and title_class.match_strength is not None:
             decision = title_class.match_strength
             decision_reason = title_class.reason
-            if decision == Decision.STRONG_MATCH:
-                decision_reason = "Explicit Java + backend signals in title"
             if decision == Decision.POTENTIAL_MATCH and completeness in {"PARTIAL", "MINIMAL"}:
                 desc = incomplete_description_info(completeness)
                 if desc and desc not in info_items:
@@ -285,10 +290,7 @@ def _build_deterministic_evaluation(
 
     reason = classification.reason
     if decision == Decision.STRONG_MATCH and description_info:
-        reason = (
-            "Explicit Java and backend signals in title; "
-            "job description is unavailable in the LinkedIn email."
-        )
+        reason = f"{classification.reason}; job description is unavailable in the LinkedIn email."
     if decision == Decision.POTENTIAL_MATCH and classification.rule == RULE_LLM_FALLBACK:
         reason = "Backend role detected, but the technology stack is unknown"
 
@@ -302,7 +304,7 @@ def _build_deterministic_evaluation(
     return VacancyEvaluation(
         decision=decision,
         summary=summary,
-        decision_reason=reason if decision != Decision.STRONG_MATCH else "Explicit Java + backend signals in title",
+        decision_reason=reason,
         matched_points=list(classification.jvm_hits[:5]),
         gaps=[],
         nuances=[],
@@ -382,6 +384,14 @@ def _build_decision_reason(
             return f"Core requirements are matched ({top}) with strong backend alignment."
         return "Core backend requirements are matched with strong alignment."
     if decision == Decision.POTENTIAL_MATCH:
+        normalized_title = normalize_title(title_text)
+        if domain_mismatch_title_hits(normalized_title) and not genuine_backend_title_hits(
+            normalized_title
+        ):
+            return (
+                "Specialized compiler/runtime/systems domain in title; "
+                "not a clear Java backend application role."
+            )
         if location_nuance:
             return "Role appears relevant but location/remote constraints require confirmation."
         if lead_nuance:

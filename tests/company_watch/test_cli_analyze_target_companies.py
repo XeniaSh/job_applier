@@ -269,6 +269,7 @@ def test_summary_includes_analyzed_and_decision_counts(tmp_path: Path, monkeypat
     assert "Greenhouse companies: 2" in result.output
     assert "Raw vacancies fetched: 10" in result.output
     assert "Vacancies after prefilter: 2" in result.output
+    assert "Selected for analysis by company:" in result.output
     assert "Analyzing 2 vacancies (analyze-limit: 30)" in result.output
     assert "Vacancies analyzed: 2" in result.output
     assert "Cache hits: 0" in result.output
@@ -978,3 +979,239 @@ def test_cache_file_keeps_unicode_roundtrip(tmp_path: Path, monkeypatch) -> None
     assert "Senior Java \u6c49 Backend" in second.output
     assert "Seniority: SENIOR" in second.output
     assert "Cache hits: 1" in second.output
+
+
+def test_analyze_limit_per_company_takes_n_from_each_company(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", company="Agoda", title="Agoda One"),
+        _vacancy(external_id="102", company="Agoda", title="Agoda Two"),
+        _vacancy(external_id="103", company="Agoda", title="Agoda Three"),
+        _vacancy(external_id="201", company="Canonical", title="Canonical One"),
+        _vacancy(external_id="202", company="Canonical", title="Canonical Two"),
+        _vacancy(external_id="203", company="Canonical", title="Canonical Three"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=6),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(
+        config_file,
+        "--analyze-limit",
+        "30",
+        "--analyze-limit-per-company",
+        "2",
+    )
+
+    assert result.exit_code == 0
+    assert len(captured["texts"]) == 4
+    assert "Agoda One" in result.output
+    assert "Agoda Two" in result.output
+    assert "Agoda Three" not in result.output
+    assert "Canonical One" in result.output
+    assert "Canonical Two" in result.output
+    assert "Canonical Three" not in result.output
+    assert "Selected for analysis by company:" in result.output
+    assert "Agoda: 2" in result.output
+    assert "Canonical: 2" in result.output
+    assert "Analyzing 4 vacancies (analyze-limit: 30, analyze-limit-per-company: 2, selection-order: relevance)" in result.output
+
+
+def test_global_analyze_limit_caps_after_per_company(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", company="Agoda", title="Agoda One"),
+        _vacancy(external_id="102", company="Agoda", title="Agoda Two"),
+        _vacancy(external_id="201", company="Canonical", title="Canonical One"),
+        _vacancy(external_id="202", company="Canonical", title="Canonical Two"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=4),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(
+        config_file,
+        "--analyze-limit-per-company",
+        "2",
+        "--analyze-limit",
+        "3",
+    )
+
+    assert result.exit_code == 0
+    assert len(captured["texts"]) == 3
+    assert "Agoda One" in result.output
+    assert "Agoda Two" in result.output
+    assert "Canonical One" in result.output
+    assert "Canonical Two" not in result.output
+    assert "Analyzing 3 vacancies (analyze-limit: 3, analyze-limit-per-company: 2, selection-order: relevance)" in result.output
+
+
+def test_per_company_limit_still_uses_cache(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    cache_file = tmp_path / "analysis_cache.json"
+    vacancies = [
+        _vacancy(external_id="101", company="Agoda", title="Agoda One"),
+        _vacancy(external_id="102", company="Agoda", title="Agoda Two"),
+        _vacancy(external_id="201", company="Canonical", title="Canonical One"),
+        _vacancy(external_id="202", company="Canonical", title="Canonical Two"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=4),
+        evaluation=_evaluation(),
+    )
+
+    first = _invoke(config_file, "--cache", str(cache_file), "--analyze-limit", "30")
+    second = _invoke(
+        config_file,
+        "--cache",
+        str(cache_file),
+        "--analyze-limit-per-company",
+        "1",
+        "--analyze-limit",
+        "30",
+    )
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert len(captured["texts"]) == 4
+    assert "Cache hits: 2" in second.output
+    assert "Cache misses: 0" in second.output
+    assert "Agoda One" in second.output
+    assert "Canonical One" in second.output
+    assert "Agoda Two" not in second.output
+    assert "Canonical Two" not in second.output
+
+
+def test_per_company_limit_picks_relevance_not_source_order(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", company="Elastic", title="Principal Compiler Developer"),
+        _vacancy(external_id="102", company="Elastic", title="JVM Runtime Engineer"),
+        _vacancy(external_id="103", company="Elastic", title="Senior Java Backend Engineer"),
+        _vacancy(external_id="201", company="Canonical", title="Frontend Engineer"),
+        _vacancy(external_id="202", company="Canonical", title="Java Backend Engineer"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=5),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(config_file, "--analyze-limit-per-company", "1", "--analyze-limit", "30")
+
+    assert result.exit_code == 0
+    assert len(captured["texts"]) == 2
+    assert "Senior Java Backend Engineer" in result.output
+    assert "Java Backend Engineer" in result.output
+    assert "Principal Compiler Developer" not in result.output
+    assert "JVM Runtime Engineer" not in result.output
+    assert "Frontend Engineer" not in result.output
+    assert "selection-order: relevance" in result.output
+
+
+def test_selection_order_source_keeps_per_company_source_order(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", company="Elastic", title="Principal Compiler Developer"),
+        _vacancy(external_id="102", company="Elastic", title="Senior Java Backend Engineer"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=2),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(
+        config_file,
+        "--analyze-limit-per-company",
+        "1",
+        "--selection-order",
+        "source",
+    )
+
+    assert result.exit_code == 0
+    assert len(captured["texts"]) == 1
+    assert "Principal Compiler Developer" in result.output
+    assert "Senior Java Backend Engineer" not in result.output
+    assert "selection-order: source" in result.output
+
+
+def test_without_per_company_limit_keeps_source_order(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", company="Elastic", title="Principal Compiler Developer"),
+        _vacancy(external_id="102", company="Elastic", title="Senior Java Backend Engineer"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=2),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(config_file, "--analyze-limit", "1")
+
+    assert result.exit_code == 0
+    assert len(captured["texts"]) == 1
+    assert "Principal Compiler Developer" in result.output
+    assert "Senior Java Backend Engineer" not in result.output
+
+
+def test_relevance_ties_keep_source_order(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", company="Elastic", title="Java Engineer Amsterdam"),
+        _vacancy(external_id="102", company="Elastic", title="Java Engineer Canada"),
+        _vacancy(external_id="103", company="Elastic", title="Java Engineer London"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=3),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(config_file, "--analyze-limit-per-company", "2")
+
+    assert result.exit_code == 0
+    assert len(captured["texts"]) == 2
+    assert "Java Engineer Amsterdam" in result.output
+    assert "Java Engineer Canada" in result.output
+    assert "Java Engineer London" not in result.output
+
+
+def test_show_selection_ranking_prints_scores(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(
+            vacancies=[_vacancy(company="Elastic", title="Senior Java Backend Engineer")],
+            errors=[],
+            raw_fetched=1,
+        ),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(config_file, "--analyze-limit-per-company", "1", "--show-selection-ranking")
+
+    assert result.exit_code == 0
+    assert "Selection ranking:" in result.output
+    assert "Elastic |" in result.output
+    assert "Senior Java Backend Engineer" in result.output
+
+
+def test_invalid_selection_order_exits_1(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=[_vacancy()], errors=[], raw_fetched=1),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(config_file, "--selection-order", "popularity")
+
+    assert result.exit_code == 1
+    assert "Invalid --selection-order" in result.output

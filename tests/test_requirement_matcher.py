@@ -39,6 +39,8 @@ def _extraction(
     optional_skills: list[str] | None = None,
     minimum_experience_years: int | None = None,
     role_type: str = "Java Backend Engineer",
+    short_summary: str = "Тест",
+    responsibilities: list[str] | None = None,
     employment_conditions: list[str] | None = None,
     location_restrictions: list[str] | None = None,
     uncertainties: list[str] | None = None,
@@ -48,12 +50,12 @@ def _extraction(
         optional_skills=optional_skills or [],
         minimum_experience_years=minimum_experience_years,
         seniority=None,
-        responsibilities=[],
+        responsibilities=responsibilities or [],
         employment_conditions=employment_conditions or [],
         location_restrictions=location_restrictions or [],
         uncertainties=uncertainties or [],
         role_type=role_type,
-        short_summary="Тест",
+        short_summary=short_summary,
     )
 
 
@@ -212,6 +214,85 @@ def test_missing_redis_cannot_independently_force_ignore() -> None:
     result = compare_requirements(
         extraction=_extraction(mandatory_skills=["java", "spring boot", "kafka"], optional_skills=["redis"]),
         candidate_skills=_skills_profile(),
+    )
+    assert result.decision == Decision.STRONG_MATCH
+
+
+def test_java_backend_title_stays_strong_match() -> None:
+    result = compare_requirements(
+        extraction=_extraction(mandatory_skills=["java", "spring boot", "kafka"]),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Senior Java Backend Engineer",
+    )
+    assert result.decision == Decision.STRONG_MATCH
+
+
+def test_compiler_title_is_not_strong_from_java_kotlin_alone() -> None:
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java", "kotlin"],
+            role_type="Senior Compiler Developer",
+            short_summary="Work on Kotlin compiler core.",
+            responsibilities=["Implement compiler IR", "Improve codegen"],
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Senior Compiler Developer (Kotlin Compiler - Core)",
+    )
+    assert result.decision == Decision.POTENTIAL_MATCH
+    assert result.match_percentage == 100.0
+
+
+def test_jvm_runtime_title_without_backend_signals_gets_domain_penalty() -> None:
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java"],
+            role_type="JVM Runtime Engineer",
+            short_summary="Work on JVM runtime internals.",
+            responsibilities=["Tune garbage collection", "Maintain runtime internals"],
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="JVM Runtime Engineer",
+    )
+    assert result.decision == Decision.POTENTIAL_MATCH
+    assert result.match_percentage == 100.0
+
+
+def test_distributed_systems_title_is_not_domain_mismatch() -> None:
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java", "spring boot", "kafka"],
+            role_type="Senior Java Engineer",
+            short_summary="Build distributed Java services.",
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Senior Java Engineer - Distributed Systems",
+    )
+    assert result.decision == Decision.STRONG_MATCH
+
+
+def test_payments_title_is_not_domain_mismatch() -> None:
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java", "spring boot", "kafka"],
+            role_type="Java Software Engineer",
+            short_summary="Payments product engineering.",
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Java Software Engineer - Payments",
+    )
+    assert result.decision == Decision.STRONG_MATCH
+
+
+def test_compiler_title_can_stay_strong_when_description_has_backend_work() -> None:
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java", "kotlin"],
+            role_type="Senior Compiler Developer",
+            short_summary="Compiler work plus backend services.",
+            responsibilities=["Design backend microservices", "Own compiler tooling"],
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Senior Compiler Developer (Kotlin Compiler - Core)",
     )
     assert result.decision == Decision.STRONG_MATCH
 

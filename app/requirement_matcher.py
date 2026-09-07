@@ -5,6 +5,11 @@ from dataclasses import dataclass
 
 from app.models import Decision, VacancyExtraction
 from app.skills_profile_loader import CandidateSkillsProfile
+from app.title_rules import (
+    domain_mismatch_title_hits,
+    genuine_backend_title_hits,
+    normalize_title,
+)
 
 OPTIONAL_WEIGHT_MULTIPLIER = 0.3
 DEFAULT_SKILL_WEIGHT = 1
@@ -62,6 +67,15 @@ BACKEND_SIGNAL_TERMS = (
     "platform",
     "api",
     "server-side",
+)
+APPLICATION_BACKEND_EVIDENCE_TERMS = (
+    "backend",
+    "back-end",
+    "back end",
+    "microservice",
+    "microservices",
+    "server-side",
+    "server side",
 )
 
 
@@ -290,6 +304,39 @@ def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
     return any(token in text for token in tokens)
 
 
+def _contains_phrase(text: str, phrase: str) -> bool:
+    pattern = rf"(?<![a-z0-9+]){re.escape(phrase)}(?![a-z0-9+])"
+    return re.search(pattern, text) is not None
+
+
+def _has_application_backend_evidence(*parts: str) -> bool:
+    combined = _normalize_text(" ".join(part for part in parts if part))
+    if not combined:
+        return False
+    return any(_contains_phrase(combined, term) for term in APPLICATION_BACKEND_EVIDENCE_TERMS)
+
+
+def _apply_specialized_domain_cap(
+    *,
+    decision: Decision,
+    vacancy_title: str | None,
+    extraction: VacancyExtraction,
+) -> Decision:
+    title_text = normalize_title(vacancy_title or "")
+    domain_hits = domain_mismatch_title_hits(title_text)
+    if not domain_hits:
+        return decision
+    if genuine_backend_title_hits(title_text):
+        return decision
+    if _has_application_backend_evidence(
+        extraction.role_type,
+        extraction.short_summary,
+        " ".join(extraction.responsibilities),
+    ):
+        return decision
+    return _apply_cap(decision, Decision.POTENTIAL_MATCH)
+
+
 def sanitize_extraction(
     extraction: VacancyExtraction,
     candidate_skills: CandidateSkillsProfile,
@@ -428,6 +475,12 @@ def compare_requirements(
         missing_core = [skill for skill in core_skills if skill in seen_mandatory and skill not in matched_all]
         if len(missing_core) == len([skill for skill in core_skills if skill in seen_mandatory]):
             decision = _apply_cap(decision, Decision.POTENTIAL_MATCH)
+
+    decision = _apply_specialized_domain_cap(
+        decision=decision,
+        vacancy_title=vacancy_title,
+        extraction=extraction,
+    )
 
     conditions_text = " ".join([*extraction.employment_conditions, *extraction.uncertainties])
     location_text = " ".join(extraction.location_restrictions)

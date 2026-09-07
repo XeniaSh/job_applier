@@ -24,7 +24,7 @@
 
 ## Telegram Safety
 
-- Callback actions are accepted only from configured `TELEGRAM_CHAT_ID`.
+- Callback actions are accepted only from configured Telegram destination chats (`TELEGRAM__LINKEDIN_CHAT_ID` / legacy `TELEGRAM__CHAT_ID`, and `TELEGRAM__TARGET_COMPANIES_CHAT_ID` when set).
 - Keep bot token private and rotate if exposed.
 - Do not print full Telegram `file_id` values in diagnostics/logs.
 

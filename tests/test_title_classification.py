@@ -83,6 +83,11 @@ def test_explicit_jvm_backend_titles_are_strong(title: str) -> None:
     assert result.match_strength == Decision.STRONG_MATCH
     assert result.rule == RULE_EXPLICIT_JVM_BACKEND
     assert result.llm_skipped is True
+    if any(token in title.lower() for token in ("backend", "back-end", "back end")):
+        assert result.reason == "Explicit Java + backend signals in title"
+    else:
+        assert result.reason == "Explicit Java/JVM signal in title"
+        assert "backend signals in title" not in result.reason
 
 
 @pytest.mark.parametrize(
@@ -146,6 +151,39 @@ def test_generic_backend_titles_use_llm_fallback(title: str) -> None:
     assert result.llm_skipped is False
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Senior Compiler Developer (Kotlin Compiler - Core)",
+        "JVM Runtime Engineer",
+        "Embedded Java Engineer",
+        "Kernel Developer (Java)",
+    ],
+)
+def test_specialized_domain_titles_are_not_strong_from_java_alone(title: str) -> None:
+    result = classify_title_match(title)
+    assert result.match_strength != Decision.STRONG_MATCH
+    assert result.rule == RULE_LLM_FALLBACK
+    assert result.llm_skipped is False
+    assert "backend signals in title" not in result.reason
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Senior Java Engineer - Distributed Systems",
+        "Java Software Engineer - Payments",
+        "Senior Java Engineer - Platform",
+        "Java Software Engineer - APIs",
+    ],
+)
+def test_ordinary_backend_adjacent_titles_stay_strong(title: str) -> None:
+    result = classify_title_match(title)
+    assert result.match_strength == Decision.STRONG_MATCH
+    assert result.rule == RULE_EXPLICIT_JVM_BACKEND
+    assert "backend signals in title" not in result.reason
+
+
 def test_partial_java_backend_is_strong_without_snippet_and_skips_llm(caplog) -> None:
     analyzer = VacancyAnalyzer(
         llm_client=_ExplodingLLM(),
@@ -158,7 +196,8 @@ def test_partial_java_backend_is_strong_without_snippet_and_skips_llm(caplog) ->
             content_completeness="PARTIAL",
         )
     assert result.decision == Decision.STRONG_MATCH
-    assert result.decision_reason == "Explicit Java + backend signals in title"
+    assert "Explicit Java + backend signals in title" in result.decision_reason
+    assert "backend signals in title" in result.decision_reason
     assert any("Job description is not available in the LinkedIn email" in item for item in result.info_items)
     assert not any("неполн" in (signal.get("evidence") or "").lower() for signal in result.warning_signals)
     log_text = "\n".join(record.getMessage() for record in caplog.records)

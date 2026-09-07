@@ -76,7 +76,7 @@ uv run python -m app preview-linkedin-email
 
 ## Telegram Sends No Cards
 
-- Verify `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+- Verify `TELEGRAM__BOT_TOKEN` and `TELEGRAM__LINKEDIN_CHAT_ID` (or legacy `TELEGRAM__CHAT_ID`).
 - Confirm the bot received at least one message from your account.
 - Run dry-run:
 

@@ -1,0 +1,462 @@
+{
+  "vacancies": [
+    {
+      "company": "Adyen",
+      "title": "Senior Backend Engineer (Java)",
+      "location": "Bengaluru",
+      "url": "https://job-boards.greenhouse.io/adyen/jobs/8041307",
+      "source": "target_company:greenhouse:adyen",
+      "external_id": "8041307",
+      "score": 88.0,
+      "decision": "STRONG_MATCH",
+      "reasons": {
+        "matched": [
+          "java",
+          "postgresql",
+          "rest api"
+        ],
+        "decision_reason": "Explicit Java + backend signals in title",
+        "rejected_because": null
+      },
+      "application_feasibility": "UNCLEAR",
+      "visa_sponsorship": "unknown",
+      "relocation_support": "unknown",
+      "remote_type": "onsite",
+      "work_authorization_requirement": "unknown",
+      "language_requirements": [
+        "english"
+      ],
+      "location_restrictions": [
+        "офис в бангалоре",
+        "работа в офисе, удалёнка не предлагается"
+      ],
+      "feasibility_warnings": [
+        "visa/relocation not mentioned; check manually",
+        "location is Bengaluru",
+        "language requirements: english"
+      ],
+      "application_recommendation": "CHECK_MANUALLY",
+      "recommendation_reasons": [
+        "sponsorship/relocation/location is unclear"
+      ],
+      "seniority": "SENIOR",
+      "seniority_reasons": [
+        "title contains senior"
+      ],
+      "match_percentage": 88.0,
+      "decision_reason": "Explicit Java + backend signals in title",
+      "matched_points": [
+        "java",
+        "postgresql",
+        "rest api"
+      ]
+    },
+    {
+      "company": "Adyen",
+      "title": "Java Software Engineer - CX",
+      "location": "Amsterdam",
+      "url": "https://job-boards.greenhouse.io/adyen/jobs/6761873",
+      "source": "target_company:greenhouse:adyen",
+      "external_id": "6761873",
+      "score": 83.4,
+      "decision": "STRONG_MATCH",
+      "reasons": {
+        "matched": [
+          "java",
+          "postgresql"
+        ],
+        "decision_reason": "Explicit Java + backend signals in title",
+        "rejected_because": null
+      },
+      "application_feasibility": "UNCLEAR",
+      "visa_sponsorship": "unknown",
+      "relocation_support": "unknown",
+      "remote_type": "onsite",
+      "work_authorization_requirement": "unknown",
+      "language_requirements": [
+        "english"
+      ],
+      "location_restrictions": [
+        "амстердам",
+        "работа в офисе",
+        "не удалённая работа"
+      ],
+      "feasibility_warnings": [
+        "visa/relocation not mentioned; check manually",
+        "location is Amsterdam",
+        "language requirements: english"
+      ],
+      "application_recommendation": "APPLY_NOW",
+      "recommendation_reasons": [
+        "location matches known hiring locations"
+      ],
+      "seniority": "UNKNOWN",
+      "seniority_reasons": [
+        "title has no explicit seniority"
+      ],
+      "match_percentage": 83.4,
+      "decision_reason": "Explicit Java + backend signals in title",
+      "matched_points": [
+        "java",
+        "postgresql"
+      ]
+    },
+    {
+      "company": "Adyen",
+      "title": "Java Software Engineer - Payments",
+      "location": "Amsterdam",
+      "url": "https://job-boards.greenhouse.io/adyen/jobs/7369512",
+      "source": "target_company:greenhouse:adyen",
+      "external_id": "7369512",
+      "score": 83.4,
+      "decision": "STRONG_MATCH",
+      "reasons": {
+        "matched": [
+          "java",
+          "postgresql"
+        ],
+        "decision_reason": "Explicit Java + backend signals in title",
+        "rejected_because": null
+      },
+      "application_feasibility": "UNCLEAR",
+      "visa_sponsorship": "unknown",
+      "relocation_support": "unknown",
+      "remote_type": "onsite",
+      "work_authorization_requirement": "unknown",
+      "language_requirements": [
+        "english"
+      ],
+      "location_restrictions": [
+        "амстердам",
+        "офисный режим"
+      ],
+      "feasibility_warnings": [
+        "visa/relocation not mentioned; check manually",
+        "location is Amsterdam",
+        "language requirements: english"
+      ],
+      "application_recommendation": "APPLY_NOW",
+      "recommendation_reasons": [
+        "location matches known hiring locations"
+      ],
+      "seniority": "UNKNOWN",
+      "seniority_reasons": [
+        "title has no explicit seniority"
+      ],
+      "match_percentage": 83.4,
+      "decision_reason": "Explicit Java + backend signals in title",
+      "matched_points": [
+        "java",
+        "postgresql"
+      ]
+    },
+    {
+      "company": "JetBrains",
+      "title": "Senior Compiler Developer (Kotlin Compiler - Core)",
+      "location": "Belgrade, Serbia; Berlin, Germany; Limassol, Cyprus; Madrid, Spain; Munich, Germany; Paphos, Cyprus; Prague, Czech Republic; Warsaw, Poland; Yerevan, Armenia",
+      "url": "https://job-boards.eu.greenhouse.io/jetbrains/jobs/4917464101",
+      "source": "target_company:greenhouse:jetbrains",
+      "external_id": "4917464101",
+      "score": 82.4,
+      "decision": "STRONG_MATCH",
+      "reasons": {
+        "matched": [
+          "kotlin",
+          "java"
+        ],
+        "decision_reason": "Explicit Java + backend signals in title",
+        "rejected_because": null
+      },
+      "application_feasibility": "LIKELY",
+      "visa_sponsorship": "unknown",
+      "relocation_support": "yes",
+      "remote_type": "hybrid",
+      "work_authorization_requirement": "unknown",
+      "language_requirements": [
+        "english"
+      ],
+      "location_restrictions": [
+        "белград, сербия",
+        "берлин, германия",
+        "лимассол, кипр",
+        "мадрид, испания",
+        "мюнхен, германия",
+        "пафос, кипр",
+        "прага, чехия",
+        "варшава, польша",
+        "ереван, армения"
+      ],
+      "feasibility_warnings": [
+        "relocation support mentioned"
+      ],
+      "application_recommendation": "APPLY_NOW",
+      "recommendation_reasons": [
+        "feasibility is LIKELY",
+        "location matches known hiring locations"
+      ],
+      "seniority": "SENIOR",
+      "seniority_reasons": [
+        "title contains senior"
+      ],
+      "match_percentage": 82.4,
+      "decision_reason": "Explicit Java + backend signals in title",
+      "matched_points": [
+        "kotlin",
+        "java"
+      ]
+    },
+    {
+      "company": "Adyen",
+      "title": "Senior Software Engineer (Java) - Financial Products",
+      "location": "Amsterdam",
+      "url": "https://job-boards.greenhouse.io/adyen/jobs/7573921",
+      "source": "target_company:greenhouse:adyen",
+      "external_id": "7573921",
+      "score": 80.0,
+      "decision": "STRONG_MATCH",
+      "reasons": {
+        "matched": [
+          "java",
+          "postgresql"
+        ],
+        "decision_reason": "Explicit Java + backend signals in title",
+        "rejected_because": null
+      },
+      "application_feasibility": "UNCLEAR",
+      "visa_sponsorship": "unknown",
+      "relocation_support": "unknown",
+      "remote_type": "hybrid",
+      "work_authorization_requirement": "unknown",
+      "language_requirements": [
+        "english"
+      ],
+      "location_restrictions": [
+        "амстердам",
+        "офисная работа",
+        "не удаленно"
+      ],
+      "feasibility_warnings": [
+        "visa/relocation not mentioned; check manually",
+        "location is Amsterdam",
+        "language requirements: english"
+      ],
+      "application_recommendation": "APPLY_NOW",
+      "recommendation_reasons": [
+        "location matches known hiring locations"
+      ],
+      "seniority": "SENIOR",
+      "seniority_reasons": [
+        "title contains senior"
+      ],
+      "match_percentage": 80.0,
+      "decision_reason": "Explicit Java + backend signals in title",
+      "matched_points": [
+        "java",
+        "postgresql"
+      ]
+    },
+    {
+      "company": "Adyen",
+      "title": "Software Engineer (Java) - Unified Platform",
+      "location": "Amsterdam",
+      "url": "https://job-boards.greenhouse.io/adyen/jobs/7342887",
+      "source": "target_company:greenhouse:adyen",
+      "external_id": "7342887",
+      "score": 80.0,
+      "decision": "STRONG_MATCH",
+      "reasons": {
+        "matched": [
+          "java",
+          "postgresql"
+        ],
+        "decision_reason": "Explicit Java + backend signals in title",
+        "rejected_because": null
+      },
+      "application_feasibility": "UNCLEAR",
+      "visa_sponsorship": "unknown",
+      "relocation_support": "unknown",
+      "remote_type": "onsite",
+      "work_authorization_requirement": "unknown",
+      "language_requirements": [
+        "english"
+      ],
+      "location_restrictions": [
+        "амстердам",
+        "офисная работа",
+        "не удаленно"
+      ],
+      "feasibility_warnings": [
+        "visa/relocation not mentioned; check manually",
+        "location is Amsterdam",
+        "language requirements: english"
+      ],
+      "application_recommendation": "APPLY_NOW",
+      "recommendation_reasons": [
+        "location matches known hiring locations"
+      ],
+      "seniority": "UNKNOWN",
+      "seniority_reasons": [
+        "title has no explicit seniority"
+      ],
+      "match_percentage": 80.0,
+      "decision_reason": "Explicit Java + backend signals in title",
+      "matched_points": [
+        "java",
+        "postgresql"
+      ]
+    },
+    {
+      "company": "JetBrains",
+      "title": "Software Developer  Java/ Node.JS (Web Development Team)",
+      "location": "Belgrade, Serbia; Berlin, Germany; Limassol, Cyprus; Madrid, Spain; Munich, Germany; Paphos, Cyprus; Warsaw, Poland",
+      "url": "https://job-boards.eu.greenhouse.io/jetbrains/jobs/4866608101",
+      "source": "target_company:greenhouse:jetbrains",
+      "external_id": "4866608101",
+      "score": 78.8,
+      "decision": "STRONG_MATCH",
+      "reasons": {
+        "matched": [
+          "kotlin",
+          "java",
+          "kubernetes"
+        ],
+        "decision_reason": "Explicit Java + backend signals in title",
+        "rejected_because": null
+      },
+      "application_feasibility": "LIKELY",
+      "visa_sponsorship": "unknown",
+      "relocation_support": "yes",
+      "remote_type": "hybrid",
+      "work_authorization_requirement": "unknown",
+      "language_requirements": [
+        "english"
+      ],
+      "location_restrictions": [
+        "белград, сербия",
+        "берлин, германия",
+        "лимассол, кипр",
+        "мадрид, испания",
+        "мюнхен, германия",
+        "пафос, кипр",
+        "варшава, польша"
+      ],
+      "feasibility_warnings": [
+        "relocation support mentioned"
+      ],
+      "application_recommendation": "APPLY_NOW",
+      "recommendation_reasons": [
+        "feasibility is LIKELY",
+        "location matches known hiring locations"
+      ],
+      "seniority": "UNKNOWN",
+      "seniority_reasons": [
+        "title has no explicit seniority"
+      ],
+      "match_percentage": 78.8,
+      "decision_reason": "Explicit Java + backend signals in title",
+      "matched_points": [
+        "kotlin",
+        "java",
+        "kubernetes"
+      ]
+    },
+    {
+      "company": "Adyen",
+      "title": "Software Engineer (Java) - Screening Team",
+      "location": "Amsterdam",
+      "url": "https://job-boards.greenhouse.io/adyen/jobs/7342892",
+      "source": "target_company:greenhouse:adyen",
+      "external_id": "7342892",
+      "score": 76.2,
+      "decision": "STRONG_MATCH",
+      "reasons": {
+        "matched": [
+          "java",
+          "postgresql"
+        ],
+        "decision_reason": "Explicit Java + backend signals in title",
+        "rejected_because": null
+      },
+      "application_feasibility": "UNCLEAR",
+      "visa_sponsorship": "unknown",
+      "relocation_support": "unknown",
+      "remote_type": "onsite",
+      "work_authorization_requirement": "unknown",
+      "language_requirements": [
+        "english"
+      ],
+      "location_restrictions": [
+        "амстердам"
+      ],
+      "feasibility_warnings": [
+        "visa/relocation not mentioned; check manually",
+        "location is Amsterdam",
+        "language requirements: english"
+      ],
+      "application_recommendation": "APPLY_NOW",
+      "recommendation_reasons": [
+        "location matches known hiring locations"
+      ],
+      "seniority": "UNKNOWN",
+      "seniority_reasons": [
+        "title has no explicit seniority"
+      ],
+      "match_percentage": 76.2,
+      "decision_reason": "Explicit Java + backend signals in title",
+      "matched_points": [
+        "java",
+        "postgresql"
+      ]
+    },
+    {
+      "company": "Adyen",
+      "title": "Senior Software Engineer (Java)",
+      "location": "Madrid",
+      "url": "https://job-boards.greenhouse.io/adyen/jobs/6924441",
+      "source": "target_company:greenhouse:adyen",
+      "external_id": "6924441",
+      "score": 70.8,
+      "decision": "STRONG_MATCH",
+      "reasons": {
+        "matched": [
+          "java",
+          "postgresql"
+        ],
+        "decision_reason": "Explicit Java + backend signals in title",
+        "rejected_because": null
+      },
+      "application_feasibility": "UNCLEAR",
+      "visa_sponsorship": "unknown",
+      "relocation_support": "unknown",
+      "remote_type": "onsite",
+      "work_authorization_requirement": "unknown",
+      "language_requirements": [
+        "english"
+      ],
+      "location_restrictions": [
+        "мадрид",
+        "работа в офисе"
+      ],
+      "feasibility_warnings": [
+        "visa/relocation not mentioned; check manually",
+        "location is Madrid",
+        "language requirements: english"
+      ],
+      "application_recommendation": "CHECK_MANUALLY",
+      "recommendation_reasons": [
+        "sponsorship/relocation/location is unclear"
+      ],
+      "seniority": "SENIOR",
+      "seniority_reasons": [
+        "title contains senior"
+      ],
+      "match_percentage": 70.8,
+      "decision_reason": "Explicit Java + backend signals in title",
+      "matched_points": [
+        "java",
+        "postgresql"
+      ]
+    }
+  ],
+  "errors": []
+}

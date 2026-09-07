@@ -100,7 +100,7 @@ def test_work_authorization_required_without_sponsorship_is_skip() -> None:
     assert any("work authorization" in reason for reason in result.reasons)
 
 
-def test_strong_match_with_known_hiring_location_is_apply_now() -> None:
+def test_strong_match_with_known_hiring_location_is_check_manually() -> None:
     result = recommend_application(
         decision=Decision.STRONG_MATCH,
         feasibility=_feasibility(),
@@ -108,7 +108,25 @@ def test_strong_match_with_known_hiring_location_is_apply_now() -> None:
         company=_company(),
         location="Amsterdam",
     )
-    assert result.label == "APPLY_NOW"
+    assert result.label == "CHECK_MANUALLY"
+    assert "sponsorship/relocation/location is unclear" in result.reasons
+    assert "location matches known hiring locations" in result.reasons
+
+
+def test_elastic_canada_without_sponsorship_is_check_manually() -> None:
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(),
+        constraints=_constraints(),
+        company=_company(
+            name="Elastic",
+            known_hiring_locations=["Canada", "USA", "UK"],
+            relocation_status="mixed_check_per_role",
+            hiring_modes=["hybrid"],
+        ),
+        location="Canada",
+    )
+    assert result.label == "CHECK_MANUALLY"
     assert "location matches known hiring locations" in result.reasons
 
 
@@ -134,6 +152,31 @@ def test_strong_match_likely_feasibility_is_apply_now() -> None:
     )
     assert result.label == "APPLY_NOW"
     assert "feasibility is LIKELY" in result.reasons
+    assert "visa sponsorship is available" in result.reasons
+
+
+def test_explicit_relocation_support_is_apply_now() -> None:
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(label="LIKELY", relocation_support="yes"),
+        constraints=_constraints(),
+        company=_company(name="JetBrains", known_hiring_locations=[]),
+        location="Berlin",
+    )
+    assert result.label == "APPLY_NOW"
+    assert "relocation support is available" in result.reasons
+
+
+def test_worldwide_remote_is_apply_now() -> None:
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(label="LIKELY", remote_type="worldwide"),
+        constraints=_constraints(),
+        company=_company(known_hiring_locations=[]),
+        location="Remote",
+    )
+    assert result.label == "APPLY_NOW"
+    assert "remote worldwide" in result.reasons
 
 
 def test_excluded_junior_seniority_is_skip() -> None:
@@ -178,11 +221,11 @@ def test_stretch_staff_plus_is_check_manually() -> None:
 def test_target_senior_seniority_can_be_apply_now() -> None:
     result = recommend_application(
         decision=Decision.STRONG_MATCH,
-        feasibility=_feasibility(),
+        feasibility=_feasibility(label="LIKELY", relocation_support="yes"),
         constraints=_constraints(),
         company=_company(),
         location="Amsterdam",
         seniority=classify_seniority("Senior Backend Engineer"),
     )
     assert result.label == "APPLY_NOW"
-    assert "location matches known hiring locations" in result.reasons
+    assert "relocation support is available" in result.reasons

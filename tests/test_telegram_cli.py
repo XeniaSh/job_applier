@@ -2,6 +2,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import app.cli as cli_module
@@ -13,6 +14,7 @@ from app.models import (
     VacancyEvaluation,
 )
 from app.storage.telegram_delivery import STATUS_PREPARE_REQUESTED, STATUS_PREPARED, TelegramDeliveryStorage
+from app.telegram.destinations import TelegramDestination
 
 
 def _set_base_env(monkeypatch, *, with_telegram: bool = True) -> None:
@@ -888,6 +890,68 @@ def test_poll_consumes_expired_callback_and_processes_next_update(monkeypatch) -
     assert prepare_requests == 1
     assert calls["updated"] == 2
     assert any("Callback acknowledgement expired linkedin-email:1; update consumed" in line for line in logs)
+
+
+def test_linkedin_client_uses_linkedin_destination_chat_id(monkeypatch) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM__CHAT_ID", "legacy")
+    monkeypatch.setenv("TELEGRAM__LINKEDIN_CHAT_ID", "111")
+    monkeypatch.setenv("TELEGRAM__TARGET_COMPANIES_CHAT_ID", "222")
+    captured: dict[str, str] = {}
+
+    class FakeClient:
+        def __init__(self, bot_token, chat_id):
+            captured["bot_token"] = bot_token
+            captured["chat_id"] = str(chat_id)
+
+    monkeypatch.setattr(cli_module, "TelegramClient", FakeClient)
+    from app.config import Settings
+
+    settings = Settings()
+    cli_module._telegram_client_for(settings, TelegramDestination.LINKEDIN)
+    assert captured["chat_id"] == "111"
+    assert captured["bot_token"] == "telegram-token"
+    cli_module._telegram_client_for(settings, TelegramDestination.TARGET_COMPANIES)
+    assert captured["chat_id"] == "222"
+
+
+def test_target_companies_settings_error_does_not_use_linkedin_chat(monkeypatch) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.delenv("TELEGRAM__TARGET_COMPANIES_CHAT_ID", raising=False)
+    from app.config import Settings
+
+    settings = Settings()
+    with pytest.raises(cli_module.typer.Exit) as exc_info:
+        cli_module._require_telegram_settings(
+            settings,
+            destination=TelegramDestination.TARGET_COMPANIES,
+        )
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", None)) == 2
+
+
+def test_callback_rejects_chat_outside_allowed_destinations() -> None:
+    answers: list[str | None] = []
+
+    class Client:
+        def answer_callback_query(self, callback_query_id, text=None):
+            _ = callback_query_id
+            answers.append(text)
+
+    update = {
+        "callback_query": {
+            "id": "cb-wrong-chat",
+            "data": "skip:li:1",
+            "message": {"chat": {"id": "789"}, "message_id": 10},
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=Client(),
+        storage=object(),
+        configured_chat_id="123",
+        allowed_chat_ids=frozenset({"123", "456"}),
+    )
+    assert answers == ["Действие недоступно для этого чата"]
 
 
 def test_telegram_chat_id_output(monkeypatch) -> None:
