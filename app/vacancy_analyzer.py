@@ -9,7 +9,12 @@ from app.models import (
     VacancyEvaluation,
     VacancyExtraction,
 )
-from app.requirement_matcher import compare_requirements
+from app.requirement_matcher import (
+    CONFLICTING_STACK_TERMS,
+    JVM_EVIDENCE_TERMS,
+    _contains_any,
+    compare_requirements,
+)
 from app.skills_profile_loader import CandidateSkillsProfile
 from app.title_rules import (
     RULE_EXPLICIT_JVM_BACKEND,
@@ -320,6 +325,20 @@ def _build_deterministic_evaluation(
     )
 
 
+def _experience_gap_reason(comparison) -> str | None:
+    if not getattr(comparison, "experience_gap_capped", False):
+        return None
+    gap = getattr(comparison, "experience_gap_years", None)
+    required = getattr(comparison, "required_experience_years", None)
+    candidate = getattr(comparison, "candidate_experience_years", None)
+    if gap is None or gap < 1 or required is None or candidate is None:
+        return None
+    return (
+        "Technical stack is relevant, but required experience "
+        f"({required} years) exceeds candidate experience ({candidate} years)."
+    )
+
+
 def _build_decision_reason(
     *,
     decision: Decision,
@@ -345,39 +364,9 @@ def _build_decision_reason(
             " ".join(extraction.optional_skills).lower(),
         ]
     )
-    has_jvm_evidence = any(
-        token in evidence_text
-        for token in ("java", "kotlin", "jvm", "spring", "spring boot", "micronaut", "quarkus", "jakarta ee")
-    )
-    has_conflicting_stack = any(
-        token in evidence_text
-        for token in (
-            "python",
-            "django",
-            "flask",
-            "fastapi",
-            "go",
-            "golang",
-            "node",
-            "node.js",
-            "typescript",
-            "javascript",
-            ".net",
-            "dotnet",
-            "php",
-            "ruby",
-            "frontend",
-            "react",
-            "angular",
-            "mobile",
-            "qa",
-            "devops",
-            "data scientist",
-            "machine learning",
-            "ml",
-            "embedded",
-        )
-    )
+    has_jvm_evidence = _contains_any(evidence_text, JVM_EVIDENCE_TERMS)
+    has_conflicting_stack = _contains_any(evidence_text, CONFLICTING_STACK_TERMS)
+    experience_reason = _experience_gap_reason(comparison)
     if decision == Decision.STRONG_MATCH:
         if comparison.matched_mandatory:
             top = ", ".join(comparison.matched_mandatory[:3])
@@ -392,13 +381,18 @@ def _build_decision_reason(
                 "Specialized compiler/runtime/systems domain in title; "
                 "not a clear Java backend application role."
             )
+        if experience_reason:
+            return experience_reason
         if location_nuance:
             return "Role appears relevant but location/remote constraints require confirmation."
         if lead_nuance:
             return "Role is relevant but lead-level expectations need manual verification."
-        if not has_jvm_evidence and "backend" in role_text and not has_conflicting_stack:
+        if not has_jvm_evidence and _contains_any(role_text, ("backend",)) and not has_conflicting_stack:
             return "Backend role but the email summary does not specify the technology stack."
-        if explicit_skill_count < 3 and not any(token in title_text.lower() for token in ("java", "kotlin", "jvm", "spring")):
+        if explicit_skill_count < 3 and not _contains_any(
+            title_text.lower(),
+            ("java", "kotlin", "jvm", "spring"),
+        ):
             return "Backend signal is present, but the email card lacks enough explicit stack evidence."
         if mandatory:
             missing = ", ".join(sorted(mandatory)[:2])
@@ -406,9 +400,9 @@ def _build_decision_reason(
         return "Backend role matches partially, but evidence is not strong enough for a full match."
     if any(token in all_constraints for token in ("incompatible", "must reside in philippines", "country restriction")):
         return "Location restriction is incompatible with the candidate profile."
-    if has_conflicting_stack:
+    if has_conflicting_stack and not has_jvm_evidence:
         return f'Primary stack in the vacancy points to "{role}", not the target Java backend stack.'
-    if any(token in role_text for token in ("frontend", "react", "angular", "qa", "tester", "devops", "python")):
+    if _contains_any(role_text, ("frontend", "react", "angular", "qa", "tester", "devops", "python")):
         return f'Role focus is "{role}", which is outside the target Java backend scope.'
     if not any(token in (set(extraction.mandatory_skills) | set(extraction.optional_skills)) for token in ("java", "kotlin", "jvm", "spring boot")):
         return "No Java/Kotlin/JVM requirement is explicitly present in the vacancy requirements."
@@ -696,14 +690,105 @@ def _detect_work_mode(text: str) -> str | None:
     return None
 
 
+_SALARY_FRAGMENT_LIMIT = 120
+
+
 def _detect_salary(text: str) -> str | None:
+    raw = text.strip()
+    if not raw:
+        return None
+    if _looks_like_full_vacancy(raw):
+        return _salary_fragment_from_text(raw)
+    cleaned = " ".join(raw.split())
+    if cleaned.lower().startswith("salary:"):
+        value = cleaned.split(":", 1)[1].strip()
+        if value and not _looks_like_full_vacancy(value) and _has_concrete_salary_hint(value):
+            return _clip_salary_fragment(value)
+        return None
+    if not _has_salary_marker(cleaned) or not _has_concrete_salary_hint(cleaned):
+        return None
+    return _clip_salary_fragment(cleaned)
+
+
+def _looks_like_full_vacancy(text: str) -> bool:
     lowered = text.lower()
-    if "salary" in lowered or "compensation" in lowered or "₱" in text or "php " in lowered:
-        cleaned = " ".join(text.strip().split())
-        if cleaned.lower().startswith("salary:"):
-            return cleaned.split(":", 1)[1].strip() or cleaned
+    padded = f"\n{lowered}"
+    has_title = padded.startswith("\ntitle:") or "\ntitle:" in padded
+    return "description:" in lowered or (has_title and "company:" in lowered)
+
+
+def _has_salary_marker(text: str) -> bool:
+    lowered = text.lower()
+    if "salary" in lowered or "compensation" in lowered or "₱" in text:
+        return True
+    if "php " in lowered or lowered.startswith("php"):
+        return True
+    padded = f" {lowered} "
+    return " pay " in padded
+
+
+def _has_concrete_salary_hint(text: str) -> bool:
+    lowered = text.lower()
+    if any(symbol in text for symbol in ("₱", "$", "€", "£")):
+        return True
+    if "php" in lowered:
+        return True
+    return any(character.isdigit() for character in text)
+
+
+def _clip_salary_fragment(value: str) -> str:
+    cleaned = " ".join(value.strip().split())
+    if len(cleaned) <= _SALARY_FRAGMENT_LIMIT:
         return cleaned
-    return None
+    return cleaned[: _SALARY_FRAGMENT_LIMIT - 1].rstrip() + "…"
+
+
+def _salary_fragment_from_text(text: str) -> str | None:
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.strip().split())
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith(("title:", "company:", "location:", "description:", "source url:", "published")):
+            continue
+        if _looks_like_full_vacancy(line):
+            candidate = _window_around_salary_marker(line)
+        elif len(line) > _SALARY_FRAGMENT_LIMIT:
+            candidate = _window_around_salary_marker(line)
+        else:
+            candidate = line if _has_salary_marker(line) else None
+        if candidate is None:
+            continue
+        if _looks_like_full_vacancy(candidate):
+            continue
+        if not _has_salary_marker(candidate) or not _has_concrete_salary_hint(candidate):
+            continue
+        return _clip_salary_fragment(candidate)
+    return _window_around_salary_marker(" ".join(text.split()))
+
+
+def _window_around_salary_marker(text: str) -> str | None:
+    lowered = text.lower()
+    markers = ("salary", "compensation", "₱", "php ", " pay ")
+    indexes = []
+    for marker in markers:
+        if marker == "₱":
+            pos = text.find(marker)
+        else:
+            pos = lowered.find(marker)
+        if pos >= 0:
+            indexes.append(pos)
+    if not indexes:
+        return None
+    idx = min(indexes)
+    start = max(0, idx - 24)
+    end = min(len(text), idx + 96)
+    fragment = " ".join(text[start:end].split())
+    if not fragment or _looks_like_full_vacancy(fragment):
+        return None
+    if not _has_salary_marker(fragment) or not _has_concrete_salary_hint(fragment):
+        return None
+    return _clip_salary_fragment(fragment)
 
 
 def _is_info_metadata_text(text: str) -> bool:

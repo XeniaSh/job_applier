@@ -31,6 +31,7 @@ CONFLICTING_STACK_TERMS = (
     "go",
     "golang",
     "node",
+    "nodejs",
     "node.js",
     "typescript",
     "javascript",
@@ -300,13 +301,15 @@ def _apply_cap(decision: Decision, cap: Decision) -> Decision:
     return cap if _decision_rank(decision) > _decision_rank(cap) else decision
 
 
-def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
-    return any(token in text for token in tokens)
-
-
 def _contains_phrase(text: str, phrase: str) -> bool:
+    if not phrase:
+        return False
     pattern = rf"(?<![a-z0-9+]){re.escape(phrase)}(?![a-z0-9+])"
     return re.search(pattern, text) is not None
+
+
+def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(_contains_phrase(text, token) for token in tokens)
 
 
 def _has_application_backend_evidence(*parts: str) -> bool:
@@ -378,6 +381,10 @@ class DeterministicMatchResult:
     match_percentage: float | None
     matched_score: float
     total_possible_score: float
+    experience_gap_years: int | None = None
+    required_experience_years: int | None = None
+    candidate_experience_years: int | None = None
+    experience_gap_capped: bool = False
 
 
 def compare_requirements(
@@ -486,9 +493,12 @@ def compare_requirements(
     location_text = " ".join(extraction.location_restrictions)
     all_constraint_text = _normalize_text(f"{conditions_text} {location_text}")
 
-    if "frontend" in role_text and "backend" not in role_text:
+    if _contains_phrase(role_text, "frontend") and not _contains_phrase(role_text, "backend"):
         decision = Decision.IGNORE
-    python_first = "python" in role_text or "python" in " ".join(extraction.mandatory_skills)
+    python_first = _contains_phrase(role_text, "python") or _contains_any(
+        _normalize_text(" ".join(extraction.mandatory_skills)),
+        ("python",),
+    )
     meaningful_jvm = any(skill in (set(extraction.mandatory_skills) | set(extraction.optional_skills)) for skill in ("java", "kotlin", "spring boot", "jvm"))
     if python_first and not meaningful_jvm:
         decision = Decision.IGNORE
@@ -505,12 +515,16 @@ def compare_requirements(
     if any(token in role_text for token in ("model evaluation", "model training", "ai evaluator")) and "backend" not in role_text:
         decision = Decision.IGNORE
 
-    if extraction.minimum_experience_years is not None and candidate_skills.experience_years is not None:
-        gap = extraction.minimum_experience_years - candidate_skills.experience_years
-        if gap >= 2:
-            decision = Decision.IGNORE
-        elif gap == 1:
+    experience_gap_years: int | None = None
+    required_experience_years = extraction.minimum_experience_years
+    candidate_experience_years = candidate_skills.experience_years
+    experience_gap_capped = False
+    if required_experience_years is not None and candidate_experience_years is not None:
+        experience_gap_years = required_experience_years - candidate_experience_years
+        if experience_gap_years >= 1:
+            previous_decision = decision
             decision = _apply_cap(decision, Decision.POTENTIAL_MATCH)
+            experience_gap_capped = previous_decision != decision or experience_gap_years >= 2
 
     remote_geo_unclear = any(
         marker in " ".join(extraction.uncertainties)
@@ -548,4 +562,8 @@ def compare_requirements(
         match_percentage=match_percentage,
         matched_score=round(matched_score, 3),
         total_possible_score=round(total_possible_score, 3),
+        experience_gap_years=experience_gap_years,
+        required_experience_years=required_experience_years,
+        candidate_experience_years=candidate_experience_years,
+        experience_gap_capped=experience_gap_capped,
     )

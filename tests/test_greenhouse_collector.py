@@ -47,6 +47,34 @@ def test_html_cleanup_plain_text() -> None:
     assert "One" in cleaned
     assert "Two" in cleaned
     assert "<li>" not in cleaned
+    assert cleaned.index("Hello") < cleaned.index("World") < cleaned.index("One")
+    assert "\n" in cleaned[cleaned.index("Hello") : cleaned.index("One")]
+
+
+def test_html_cleanup_entity_encoded_greenhouse_content() -> None:
+    encoded = (
+        "&lt;p&gt;Hello&lt;br&gt;World&lt;/p&gt;"
+        '&lt;li data-font="Symbol"&gt;One&lt;/li&gt;'
+    )
+    cleaned = clean_html_to_text(encoded)
+    assert "<p>" not in cleaned
+    assert "<li>" not in cleaned
+    assert "data-font" not in cleaned
+    assert "Hello" in cleaned
+    assert "World" in cleaned
+    assert "One" in cleaned
+    assert cleaned.index("Hello") < cleaned.index("World") < cleaned.index("One")
+    assert "\n" in cleaned[cleaned.index("Hello") : cleaned.index("World")]
+    assert "\n" in cleaned[cleaned.index("World") : cleaned.index("One")]
+
+
+def test_html_cleanup_decodes_common_entities() -> None:
+    assert "Tom & Jerry" == clean_html_to_text("Tom &amp; Jerry")
+    nbsp_cleaned = clean_html_to_text("Hello&nbsp;World")
+    assert "&nbsp;" not in nbsp_cleaned
+    assert "&amp;" not in nbsp_cleaned
+    assert "Hello" in nbsp_cleaned
+    assert "World" in nbsp_cleaned
 
 
 def test_board_normalization_slug_and_url() -> None:

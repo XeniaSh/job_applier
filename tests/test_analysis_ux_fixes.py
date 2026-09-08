@@ -10,7 +10,7 @@ from app.models import (
 from app.skills_profile_loader import CandidateSkillsProfile
 from app.telegram.formatter import card_display_sections, format_telegram_card_html
 from app.telegram.models import TelegramVacancyCard
-from app.vacancy_analyzer import VacancyAnalyzer
+from app.vacancy_analyzer import VacancyAnalyzer, _detect_salary, _extract_info_items
 
 
 class _TitleEchoClient:
@@ -219,3 +219,73 @@ def test_telegram_card_separates_warnings_and_information() -> None:
     assert "Salary: ₱2.3M–₱3.5M" in rendered
     assert "⚠️ Hybrid" not in rendered
     assert "⚠️ Work mode" not in rendered
+
+
+def _jetbrains_like_vacancy_text(*, benefit_line: str) -> str:
+    return (
+        "Title: Java Backend Engineer\n"
+        "Company: JetBrains\n"
+        "Location: Berlin, Germany\n"
+        "Description:\n"
+        f"{benefit_line}\n"
+        "Build backend services in Java and Kotlin.\n"
+    )
+
+
+def test_strong_base_salary_does_not_copy_whole_vacancy_into_info() -> None:
+    vacancy_text = _jetbrains_like_vacancy_text(benefit_line="Strong base salary. Extra time off.")
+    assert _detect_salary(vacancy_text) is None
+    _, info_items = _extract_info_items(
+        employment_conditions=[],
+        vacancy_text=vacancy_text,
+        uncertainties=[],
+    )
+    salary_items = [item for item in info_items if item.lower().startswith("salary:")]
+    assert salary_items == []
+    assert not any("Description:" in item for item in info_items)
+
+    class NoEmploymentClient(_TitleEchoClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            payload = super().extract_vacancy(prompt, vacancy)
+            return payload.model_copy(update={"employment_conditions": []})
+
+    result = VacancyAnalyzer(
+        llm_client=NoEmploymentClient(mandatory=["java", "spring boot", "kafka", "postgresql"]),
+        skills_loader=_profile,
+        prompt_loader=lambda: "PROMPT",
+    ).analyze(vacancy_text, content_completeness="FULL")
+    assert not any(item.lower().startswith("salary:") for item in result.info_items)
+    assert not any("Title:" in item and "Description:" in item for item in result.info_items)
+
+
+def test_annual_compensation_review_does_not_return_whole_jd() -> None:
+    vacancy_text = _jetbrains_like_vacancy_text(benefit_line="Annual compensation review")
+    assert _detect_salary(vacancy_text) is None
+    assert _detect_salary("Annual compensation review") is None
+    _, info_items = _extract_info_items(
+        employment_conditions=[],
+        vacancy_text=vacancy_text,
+        uncertainties=[],
+    )
+    assert not any(item.lower().startswith("salary:") for item in info_items)
+    assert not any("Description:" in item for item in info_items)
+
+
+def test_explicit_salary_condition_stays_short() -> None:
+    assert _detect_salary("Salary: ₱2.3M–₱3.5M") == "₱2.3M–₱3.5M"
+
+    class SalaryClient(_TitleEchoClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            payload = super().extract_vacancy(prompt, vacancy)
+            return payload.model_copy(update={"employment_conditions": ["Salary: ₱2.3M–₱3.5M"]})
+
+    result = VacancyAnalyzer(
+        llm_client=SalaryClient(mandatory=["java", "spring boot", "kafka", "postgresql"]),
+        skills_loader=_profile,
+        prompt_loader=lambda: "PROMPT",
+    ).analyze("Title: Java Backend Engineer", content_completeness="FULL")
+    salary_items = [item for item in result.info_items if item.lower().startswith("salary:")]
+    assert salary_items
+    assert "₱2.3m" in salary_items[0].lower()
+    assert all("description:" not in item.lower() and "title:" not in item.lower() for item in salary_items)
+    assert all(len(item) < 80 for item in salary_items)

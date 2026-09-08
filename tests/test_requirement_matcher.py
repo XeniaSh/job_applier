@@ -163,9 +163,11 @@ def test_one_year_experience_shortfall_caps_potential() -> None:
         candidate_skills=_skills_profile(experience_years=6),
     )
     assert result.decision == Decision.POTENTIAL_MATCH
+    assert result.experience_gap_years == 1
+    assert result.experience_gap_capped is True
 
 
-def test_two_year_experience_shortfall_is_ignore() -> None:
+def test_two_year_experience_shortfall_caps_potential() -> None:
     result = compare_requirements(
         extraction=_extraction(
             mandatory_skills=["java", "spring boot", "kafka"],
@@ -173,7 +175,70 @@ def test_two_year_experience_shortfall_is_ignore() -> None:
         ),
         candidate_skills=_skills_profile(experience_years=6),
     )
+    assert result.decision == Decision.POTENTIAL_MATCH
+    assert result.match_percentage == 100.0
+    assert result.experience_gap_years == 2
+    assert result.experience_gap_capped is True
+
+
+def test_agoda_company_name_is_not_conflicting_go_stack() -> None:
+    profile = _skills_profile().model_copy(
+        update={
+            "strong_skills": ["java"],
+            "practical_skills": [],
+            "skill_weights": {"java": 1, "kafka": 1},
+            "core_skills": ["java", "spring boot"],
+        }
+    )
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java", "kafka"],
+            role_type="backend engineer",
+            short_summary="Backend systems at Agoda with relocation to Bangkok",
+        ),
+        candidate_skills=profile,
+        vacancy_title="Back End Staff Software Engineer",
+    )
+    assert result.match_percentage == 50.0
+    assert result.decision == Decision.POTENTIAL_MATCH
+
+
+def test_go_backend_without_jvm_is_ignore() -> None:
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["go"],
+            role_type="Go backend engineer",
+            short_summary="Build backend services in Go",
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Go backend engineer",
+    )
     assert result.decision == Decision.IGNORE
+
+
+def test_golang_backend_without_jvm_is_ignore() -> None:
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["golang"],
+            role_type="Golang backend engineer",
+            short_summary="Build backend services in Golang",
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Golang backend engineer",
+    )
+    assert result.decision == Decision.IGNORE
+
+
+def test_mlflow_is_not_conflicting_ml_stack() -> None:
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java", "spring boot", "kafka"],
+            short_summary="Use MLflow to track experiment metadata",
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Java Backend Engineer",
+    )
+    assert result.decision == Decision.STRONG_MATCH
 
 
 def test_full_time_only_is_nuance_only() -> None:
@@ -306,3 +371,20 @@ def test_repeated_scoring_produces_identical_output() -> None:
     first = compare_requirements(extraction=extraction, candidate_skills=_skills_profile())
     second = compare_requirements(extraction=extraction, candidate_skills=_skills_profile())
     assert first == second
+
+
+def test_agoda_like_java_kotlin_experience_stretch_is_potential() -> None:
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java", "kotlin"],
+            minimum_experience_years=10,
+            role_type="backend engineer",
+            short_summary="Back End Staff Software Engineer at Agoda",
+        ),
+        candidate_skills=_skills_profile(experience_years=6),
+        vacancy_title="Back End Staff Software Engineer",
+    )
+    assert result.decision == Decision.POTENTIAL_MATCH
+    assert result.match_percentage == 100.0
+    assert result.experience_gap_years == 4
+    assert result.experience_gap_capped is True

@@ -1110,3 +1110,48 @@ def test_warning_signals_have_code_source_and_evidence() -> None:
         assert signal.get("code")
         assert signal.get("source")
         assert signal.get("evidence")
+
+
+def test_agoda_java_kotlin_backend_is_not_false_ignore() -> None:
+    class AgodaClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            _ = prompt, vacancy
+            return VacancyExtraction(
+                mandatory_skills=["Java", "Kotlin"],
+                optional_skills=[],
+                minimum_experience_years=10,
+                seniority="Staff",
+                responsibilities=["Build backend services"],
+                employment_conditions=[],
+                location_restrictions=[],
+                uncertainties=[],
+                role_type="backend engineer",
+                short_summary="Back End Staff Software Engineer at Agoda",
+            )
+
+    analyzer = VacancyAnalyzer(
+        llm_client=AgodaClient(),
+        skills_loader=lambda: CandidateSkillsProfile(
+            strong_skills=["java", "spring boot", "kafka"],
+            practical_skills=["kotlin"],
+            absent_skills=[],
+            aliases={},
+            experience_years=6,
+            core_skills=["java", "spring boot"],
+            skill_weights={"java": 10, "spring boot": 9, "kafka": 7, "kotlin": 5},
+        ),
+        prompt_loader=lambda: "PROMPT",
+    )
+    result = analyzer.analyze(
+        "Title: Back End Staff Software Engineer\nCompany: Agoda\n"
+        "Description: Java and Kotlin backend services at Agoda.",
+        content_completeness="FULL",
+    )
+    reason = result.decision_reason.lower()
+    assert result.decision == Decision.POTENTIAL_MATCH
+    assert "primary stack" not in reason
+    assert "not the target java backend" not in reason
+    assert "conflicting" not in reason
+    assert "experience" in reason
+    assert "10" in result.decision_reason
+    assert "6" in result.decision_reason

@@ -64,7 +64,7 @@ def clean_html_to_text(value: str | None) -> str:
     if not value:
         return ""
     parser = _HTMLToTextParser()
-    parser.feed(value)
+    parser.feed(html.unescape(value))
     parser.close()
     return parser.get_text()
 

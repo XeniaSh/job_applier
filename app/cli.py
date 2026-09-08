@@ -1385,7 +1385,11 @@ def _deliver_target_company_item(
     try:
         message_ref = telegram_client.send_vacancy_card(card)
     except (TelegramRequestError, ValueError) as exc:
-        logger.error("Telegram send failed for target company job %s: %s", vacancy.external_id, exc)
+        logger.error(
+            "Telegram send failed for target company job %s: %s",
+            vacancy.external_id,
+            _format_telegram_error(exc, secrets=[]),
+        )
         return False
     # Remember before save_sent: a persistence failure must not re-send this card
     # in the same process. Across restarts there is no durable record if save_sent
@@ -1957,7 +1961,11 @@ def send_linkedin_telegram(
             message_ref = telegram_client.send_vacancy_card(card)  # type: ignore[union-attr]
         except (TelegramRequestError, ValueError) as exc:
             report.send_errors += 1
-            logger.error("Telegram send failed for job %s: %s", item.external_id, exc)
+            logger.error(
+                "Telegram send failed for job %s: %s",
+                item.external_id,
+                _format_telegram_error(exc, secrets=[]),
+            )
             continue
 
         deliveries.save_sent(
@@ -3200,7 +3208,11 @@ def _deliver_pipeline_items(
         except (TelegramRequestError, ValueError) as exc:
             item.error = str(exc)
             item.error_stage = "telegram"
-            logger.error("Telegram send failed for job %s: %s", item.vacancy.external_id, exc)
+            logger.error(
+                "Telegram send failed for job %s: %s",
+                item.vacancy.external_id,
+                _format_telegram_error(exc, secrets=[]),
+            )
             continue
         deliveries.save_sent(
             source=delivery_source,
@@ -6801,7 +6813,11 @@ def _send_processed_to_telegram_detailed(
                 verbose_events.append(f"SENT {item.title}")
         except (TelegramRequestError, ValueError) as exc:
             send_errors += 1
-            logger.error("Telegram send failed for job %s: %s", item.external_id, exc)
+            logger.error(
+                "Telegram send failed for job %s: %s",
+                item.external_id,
+                _format_telegram_error(exc, secrets=[]),
+            )
     return TelegramCycleReport(
         eligible=eligible,
         already_delivered=already_sent,
