@@ -20,6 +20,7 @@ def _set_env(monkeypatch, tmp_path: Path, *, interval: int = 300, poll_interval:
     monkeypatch.setenv("LINKEDIN_EMAIL_IMAP_PASSWORD", "mail-password")
     monkeypatch.setenv("TELEGRAM__BOT_TOKEN", "telegram-token")
     monkeypatch.setenv("TELEGRAM__CHAT_ID", "123")
+    monkeypatch.setenv("TELEGRAM__TARGET_COMPANIES_CHAT_ID", "")
     monkeypatch.setenv("PIPELINE_INTERVAL_SECONDS", str(interval))
     monkeypatch.setenv("TELEGRAM_POLL_INTERVAL_SECONDS", str(poll_interval))
 

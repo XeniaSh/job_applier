@@ -25,12 +25,16 @@ from app.company_watch.analysis_cache import (
     TargetCompanyAnalysisCache,
 )
 from app.company_watch.application_recommendation import (
+    RECOMMENDATION_APPLY_NOW,
+    RECOMMENDATION_CHECK_MANUALLY,
     RECOMMENDATION_LABELS,
+    RECOMMENDATION_SKIP,
     ApplicationRecommendation,
     recommend_application,
 )
 from app.company_watch.candidate_constraints import (
     DEFAULT_CANDIDATE_CONSTRAINTS_PATH,
+    CandidateConstraints,
     CandidateConstraintsLoadError,
     load_candidate_constraints,
 )
@@ -637,6 +641,11 @@ _ANALYZE_DECISION_CHOICES = tuple(item.value for item in Decision)
 _ANALYZE_FEASIBILITY_CHOICES = FEASIBILITY_LABELS
 _ANALYZE_RECOMMENDATION_CHOICES = RECOMMENDATION_LABELS
 _ANALYZE_SENIORITY_CHOICES = SENIORITY_LABELS
+_RUN_TARGET_COMPANY_ANALYZE_LIMIT = 30
+_RUN_TARGET_COMPANY_ANALYZE_LIMIT_PER_COMPANY = 10
+_SENDABLE_TARGET_COMPANY_RECOMMENDATIONS = frozenset(
+    {RECOMMENDATION_APPLY_NOW, RECOMMENDATION_CHECK_MANUALLY}
+)
 
 
 @app.command("analyze-target-companies-greenhouse")
@@ -799,12 +808,6 @@ def analyze_target_companies_greenhouse(
         analysis_cache.load()
 
     analyzer = None
-    cache_hits = 0
-    cache_misses = 0
-    analyzed_items: list[_TargetCompanyAnalysisItem] = []
-    decision_counts_before: dict[str, int] = {name: 0 for name in _ANALYZE_DECISION_CHOICES}
-    analyzed_by_company: dict[str, int] = {}
-    analysis_errors = 0
     companies_by_name = {item.name.casefold(): item for item in selected_companies}
 
     def get_analyzer():
@@ -831,92 +834,28 @@ def analyze_target_companies_greenhouse(
             raise typer.Exit(code=1) from exc
         return analyzer
 
-    def record_success(
-        vacancy: NormalizedVacancy,
-        evaluation: VacancyEvaluation,
-        feasibility: ApplicationFeasibility,
-        recommendation: ApplicationRecommendation,
-        seniority: SeniorityClassification,
-    ) -> None:
-        decision_counts_before[evaluation.decision.value] = (
-            decision_counts_before.get(evaluation.decision.value, 0) + 1
-        )
-        company_name = vacancy.company or "unknown"
-        analyzed_by_company[company_name] = analyzed_by_company.get(company_name, 0) + 1
-        analyzed_items.append(
-            _TargetCompanyAnalysisItem(
-                vacancy=vacancy,
-                evaluation=evaluation,
-                feasibility=feasibility,
-                recommendation=recommendation,
-                seniority=seniority,
-            )
-        )
-
-    for vacancy in to_analyze:
-        if read_cache and analysis_cache is not None:
-            cached = analysis_cache.get(vacancy)
-            if cached is not None:
-                cache_hits += 1
-                record_success(
-                    vacancy,
-                    cached.evaluation,
-                    cached.feasibility,
-                    cached.recommendation,
-                    cached.seniority,
-                )
-                continue
-
-        cache_misses += 1
-        try:
-            evaluation = get_analyzer().analyze(
-                vacancy.to_analysis_text(),
-                content_completeness="FULL",
-            )
-        except Exception as exc:  # noqa: BLE001
-            analysis_errors += 1
-            logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
-            analyzed_items.append(
-                _TargetCompanyAnalysisItem(vacancy=vacancy, evaluation=None, error=str(exc))
-            )
+    analyzed_items, analyze_stats = _analyze_target_company_vacancies(
+        to_analyze,
+        get_analyzer=get_analyzer,
+        constraints=constraints,
+        companies_by_name=companies_by_name,
+        analysis_cache=analysis_cache,
+        read_cache=read_cache,
+        write_cache=write_cache,
+    )
+    cache_hits = analyze_stats.cache_hits
+    cache_misses = analyze_stats.cache_misses
+    analysis_errors = analyze_stats.analysis_errors
+    decision_counts_before: dict[str, int] = {name: 0 for name in _ANALYZE_DECISION_CHOICES}
+    analyzed_by_company: dict[str, int] = {}
+    for item in analyzed_items:
+        if item.evaluation is None:
             continue
-
-        assessment = assess_application_feasibility(
-            vacancy_text=vacancy.to_analysis_text(),
-            location=vacancy.location,
-            visa_sponsorship=evaluation.visa_sponsorship,
-            relocation_support=evaluation.relocation_support,
-            remote_type=evaluation.remote_type,
-            work_authorization_requirement=evaluation.work_authorization_requirement,
-            language_requirements=evaluation.language_requirements,
-            location_restrictions=evaluation.location_restrictions,
+        decision_counts_before[item.evaluation.decision.value] = (
+            decision_counts_before.get(item.evaluation.decision.value, 0) + 1
         )
-        target_company = companies_by_name.get((vacancy.company or "").casefold())
-        seniority_result = classify_seniority(vacancy.title)
-        recommendation_result = recommend_application(
-            decision=evaluation.decision,
-            feasibility=assessment,
-            constraints=constraints,
-            company=target_company,
-            location=vacancy.location,
-            seniority=seniority_result,
-        )
-        record_success(
-            vacancy,
-            evaluation,
-            assessment,
-            recommendation_result,
-            seniority_result,
-        )
-        if write_cache and analysis_cache is not None:
-            analysis_cache.put(
-                vacancy,
-                evaluation=evaluation,
-                feasibility=assessment,
-                recommendation=recommendation_result,
-                seniority=seniority_result,
-            )
-            analysis_cache.save()
+        company_name = item.vacancy.company or "unknown"
+        analyzed_by_company[company_name] = analyzed_by_company.get(company_name, 0) + 1
 
     filters_applied = (
         min_score is not None
@@ -1080,12 +1019,400 @@ class _TargetCompanyAnalysisItem:
     feasibility: ApplicationFeasibility | None = None
     recommendation: ApplicationRecommendation | None = None
     seniority: SeniorityClassification | None = None
+    from_cache: bool = False
 
     @property
     def score(self) -> float | None:
         if self.evaluation is None:
             return None
         return self.evaluation.match_percentage
+
+
+@dataclass
+class _TargetCompanyAnalyzeStats:
+    cache_hits: int = 0
+    cache_misses: int = 0
+    analysis_errors: int = 0
+
+
+@dataclass
+class _TargetCompaniesCycleResult:
+    enabled: bool
+    skip_reason: str | None = None
+    chat_id: str | None = None
+    watched: int = 0
+    dropped_delivered: int = 0
+    dropped_cached_skip: int = 0
+    selected: int = 0
+    analyzed: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    sent: int = 0
+    send_errors: int = 0
+
+
+def _analyze_target_company_vacancy(
+    vacancy: NormalizedVacancy,
+    *,
+    get_analyzer: Callable[[], VacancyAnalyzer],
+    constraints: CandidateConstraints,
+    companies_by_name: dict[str, TargetCompany],
+    analysis_cache: TargetCompanyAnalysisCache | None,
+    read_cache: bool,
+    write_cache: bool,
+) -> _TargetCompanyAnalysisItem:
+    if read_cache and analysis_cache is not None:
+        cached = analysis_cache.get(vacancy)
+        if cached is not None:
+            return _TargetCompanyAnalysisItem(
+                vacancy=vacancy,
+                evaluation=cached.evaluation,
+                feasibility=cached.feasibility,
+                recommendation=cached.recommendation,
+                seniority=cached.seniority,
+                from_cache=True,
+            )
+
+    try:
+        evaluation = get_analyzer().analyze(
+            vacancy.to_analysis_text(),
+            content_completeness="FULL",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
+        return _TargetCompanyAnalysisItem(vacancy=vacancy, evaluation=None, error=str(exc))
+
+    assessment = assess_application_feasibility(
+        vacancy_text=vacancy.to_analysis_text(),
+        location=vacancy.location,
+        visa_sponsorship=evaluation.visa_sponsorship,
+        relocation_support=evaluation.relocation_support,
+        remote_type=evaluation.remote_type,
+        work_authorization_requirement=evaluation.work_authorization_requirement,
+        language_requirements=evaluation.language_requirements,
+        location_restrictions=evaluation.location_restrictions,
+    )
+    target_company = companies_by_name.get((vacancy.company or "").casefold())
+    seniority_result = classify_seniority(vacancy.title)
+    recommendation_result = recommend_application(
+        decision=evaluation.decision,
+        feasibility=assessment,
+        constraints=constraints,
+        company=target_company,
+        location=vacancy.location,
+        seniority=seniority_result,
+    )
+    if write_cache and analysis_cache is not None:
+        analysis_cache.put(
+            vacancy,
+            evaluation=evaluation,
+            feasibility=assessment,
+            recommendation=recommendation_result,
+            seniority=seniority_result,
+        )
+        analysis_cache.save()
+    return _TargetCompanyAnalysisItem(
+        vacancy=vacancy,
+        evaluation=evaluation,
+        feasibility=assessment,
+        recommendation=recommendation_result,
+        seniority=seniority_result,
+    )
+
+
+def _analyze_target_company_vacancies(
+    vacancies: list[NormalizedVacancy],
+    *,
+    get_analyzer: Callable[[], VacancyAnalyzer],
+    constraints: CandidateConstraints,
+    companies_by_name: dict[str, TargetCompany],
+    analysis_cache: TargetCompanyAnalysisCache | None,
+    read_cache: bool,
+    write_cache: bool,
+) -> tuple[list[_TargetCompanyAnalysisItem], _TargetCompanyAnalyzeStats]:
+    stats = _TargetCompanyAnalyzeStats()
+    analyzed_items: list[_TargetCompanyAnalysisItem] = []
+    for vacancy in vacancies:
+        item = _analyze_target_company_vacancy(
+            vacancy,
+            get_analyzer=get_analyzer,
+            constraints=constraints,
+            companies_by_name=companies_by_name,
+            analysis_cache=analysis_cache,
+            read_cache=read_cache,
+            write_cache=write_cache,
+        )
+        if item.from_cache:
+            stats.cache_hits += 1
+        else:
+            stats.cache_misses += 1
+            if item.error is not None:
+                stats.analysis_errors += 1
+        analyzed_items.append(item)
+    return analyzed_items, stats
+
+
+def _is_unchanged_cached_skip(
+    vacancy: NormalizedVacancy,
+    analysis_cache: TargetCompanyAnalysisCache | None,
+) -> bool:
+    if analysis_cache is None:
+        return False
+    cached = analysis_cache.get(vacancy)
+    if cached is None:
+        return False
+    return cached.recommendation.label == RECOMMENDATION_SKIP
+
+
+def _target_companies_run_chat_id(settings: Settings) -> str:
+    return str(settings.telegram.target_companies_chat_id or "").strip()
+
+
+def _run_target_companies_cycle(
+    *,
+    settings: Settings,
+    analyzer: VacancyAnalyzer,
+    deliveries: TelegramDeliveryStorage,
+    verbose: bool = False,
+    config_path: Path = DEFAULT_TARGET_COMPANIES_PATH,
+    cache_path: Path = DEFAULT_TARGET_COMPANY_ANALYSIS_CACHE_PATH,
+    constraints_path: Path = DEFAULT_CANDIDATE_CONSTRAINTS_PATH,
+    analyze_limit: int = _RUN_TARGET_COMPANY_ANALYZE_LIMIT,
+    analyze_limit_per_company: int | None = _RUN_TARGET_COMPANY_ANALYZE_LIMIT_PER_COMPANY,
+    watcher: GreenhouseTargetWatcher | None = None,
+    telegram_client: TelegramClient | None = None,
+) -> _TargetCompaniesCycleResult:
+    chat_id = _target_companies_run_chat_id(settings)
+    if not chat_id:
+        return _TargetCompaniesCycleResult(enabled=False, skip_reason="missing_chat_id")
+
+    try:
+        loaded = load_target_companies_config(config_path)
+    except TargetCompaniesConfigLoadError as exc:
+        _run_log(f"Target companies: skipped (failed to load config: {exc})", component="main")
+        return _TargetCompaniesCycleResult(enabled=False, skip_reason="config_load_error")
+
+    greenhouse_companies = [item for item in loaded.companies if is_greenhouse_target(item)]
+    if not greenhouse_companies:
+        _run_log("Target companies: skipped (no Greenhouse target companies)", component="main")
+        return _TargetCompaniesCycleResult(enabled=False, skip_reason="no_greenhouse_companies")
+
+    try:
+        constraints = load_candidate_constraints(constraints_path)
+    except CandidateConstraintsLoadError as exc:
+        _run_log(f"Target companies: skipped (failed to load constraints: {exc})", component="main")
+        return _TargetCompaniesCycleResult(enabled=False, skip_reason="constraints_load_error")
+
+    try:
+        target_chat_id = _telegram_destination_chat_id(settings, TelegramDestination.TARGET_COMPANIES)
+    except TelegramDestinationConfigError as exc:
+        _run_log(f"Target companies: skipped ({exc})", component="main")
+        return _TargetCompaniesCycleResult(enabled=False, skip_reason="missing_chat_id")
+
+    target_client = telegram_client or _telegram_client_for(
+        settings,
+        TelegramDestination.TARGET_COMPANIES,
+    )
+    analysis_cache = TargetCompanyAnalysisCache(cache_path)
+    analysis_cache.load()
+    companies_by_name = {item.name.casefold(): item for item in greenhouse_companies}
+    watch_result = (watcher or GreenhouseTargetWatcher()).watch(greenhouse_companies)
+
+    candidates: list[NormalizedVacancy] = []
+    dropped_delivered = 0
+    dropped_cached_skip = 0
+    for vacancy in watch_result.vacancies:
+        if _target_company_already_delivered(
+            deliveries,
+            source=vacancy.source,
+            external_id=vacancy.external_id,
+            chat_id=target_chat_id,
+        ):
+            dropped_delivered += 1
+            continue
+        if _is_unchanged_cached_skip(vacancy, analysis_cache):
+            dropped_cached_skip += 1
+            continue
+        candidates.append(vacancy)
+
+    selection_order = _normalize_analyze_selection_order(
+        None,
+        per_company_limit=analyze_limit_per_company is not None,
+    )
+    to_analyze = _select_target_company_analysis_vacancies(
+        candidates,
+        analyze_limit=analyze_limit,
+        analyze_limit_per_company=analyze_limit_per_company,
+        selection_order=selection_order,
+    )
+    analyzed_items, analyze_stats = _analyze_target_company_vacancies(
+        to_analyze,
+        get_analyzer=lambda: analyzer,
+        constraints=constraints,
+        companies_by_name=companies_by_name,
+        analysis_cache=analysis_cache,
+        read_cache=True,
+        write_cache=True,
+    )
+
+    sent = 0
+    send_errors = 0
+    for item in analyzed_items:
+        if not _should_send_target_company_item(item):
+            continue
+        if _deliver_target_company_item(
+            item,
+            deliveries=deliveries,
+            telegram_client=target_client,
+            chat_id=target_chat_id,
+        ):
+            sent += 1
+        else:
+            send_errors += 1
+
+    result = _TargetCompaniesCycleResult(
+        enabled=True,
+        chat_id=target_chat_id,
+        watched=len(watch_result.vacancies),
+        dropped_delivered=dropped_delivered,
+        dropped_cached_skip=dropped_cached_skip,
+        selected=len(to_analyze),
+        analyzed=sum(1 for item in analyzed_items if item.evaluation is not None),
+        cache_hits=analyze_stats.cache_hits,
+        cache_misses=analyze_stats.cache_misses,
+        sent=sent,
+        send_errors=send_errors,
+    )
+    _run_log(
+        "Target companies: "
+        f"watched={result.watched} "
+        f"dropped_delivered={result.dropped_delivered} "
+        f"dropped_cached_skip={result.dropped_cached_skip} "
+        f"selected={result.selected} "
+        f"analyzed={result.analyzed} "
+        f"cache_hits={result.cache_hits} "
+        f"cache_misses={result.cache_misses} "
+        f"sent={result.sent} "
+        f"send_errors={result.send_errors}",
+        component="main",
+    )
+    if verbose:
+        for error in watch_result.errors:
+            _run_log(f"Target companies watcher error: {error.company_name}: {error.message}", component="main")
+    if telegram_client is None:
+        close_client = getattr(target_client, "close", None)
+        if callable(close_client):
+            try:
+                close_client()
+            except Exception:  # noqa: BLE001
+                pass
+    return result
+
+
+def _should_send_target_company_item(item: _TargetCompanyAnalysisItem) -> bool:
+    if item.evaluation is None or item.recommendation is None:
+        return False
+    return item.recommendation.label in _SENDABLE_TARGET_COMPANY_RECOMMENDATIONS
+
+
+_TARGET_COMPANY_SENT_IN_PROCESS: set[tuple[str, str, str]] = set()
+
+
+def _target_company_sent_key(source: str, external_id: str, chat_id: str) -> tuple[str, str, str]:
+    return (source, str(external_id), str(chat_id))
+
+
+def _mark_target_company_sent_in_process(source: str, external_id: str, chat_id: str) -> None:
+    _TARGET_COMPANY_SENT_IN_PROCESS.add(_target_company_sent_key(source, external_id, chat_id))
+
+
+def _was_target_company_sent_in_process(source: str, external_id: str, chat_id: str) -> bool:
+    return _target_company_sent_key(source, external_id, chat_id) in _TARGET_COMPANY_SENT_IN_PROCESS
+
+
+def _target_company_already_delivered(
+    deliveries: TelegramDeliveryStorage,
+    *,
+    source: str,
+    external_id: str,
+    chat_id: str,
+) -> bool:
+    if _was_target_company_sent_in_process(source, external_id, chat_id):
+        return True
+    return deliveries.get_message_ref(source=source, external_id=external_id, chat_id=chat_id) is not None
+
+
+def _deliver_target_company_item(
+    item: _TargetCompanyAnalysisItem,
+    *,
+    deliveries: TelegramDeliveryStorage,
+    telegram_client: TelegramClient,
+    chat_id: str,
+) -> bool:
+    vacancy = item.vacancy
+    evaluation = item.evaluation
+    if evaluation is None:
+        return False
+    deliveries.upsert_application_history(
+        source=vacancy.source,
+        external_id=vacancy.external_id,
+        title=vacancy.title,
+        company=vacancy.company,
+        location=vacancy.location,
+        url=vacancy.url,
+        decision=evaluation.decision.value,
+        decision_reason=evaluation.decision_reason,
+        recommended_resume=evaluation.recommended_resume.value,
+    )
+    warnings, info_items = card_display_sections(evaluation)
+    card = TelegramVacancyCard(
+        source=vacancy.source,
+        external_id=vacancy.external_id,
+        decision=evaluation.decision.value,
+        title=vacancy.title,
+        company=vacancy.company,
+        location=vacancy.location,
+        url=vacancy.url,
+        match_percentage=evaluation.match_percentage,
+        gaps=evaluation.gaps,
+        nuances=evaluation.nuances,
+        warnings=warnings,
+        info_items=info_items,
+        recommended_resume=evaluation.recommended_resume.value,
+        content_completeness=vacancy.content_completeness or "FULL",
+        decision_reason=evaluation.decision_reason,
+    )
+    try:
+        message_ref = telegram_client.send_vacancy_card(card)
+    except (TelegramRequestError, ValueError) as exc:
+        logger.error("Telegram send failed for target company job %s: %s", vacancy.external_id, exc)
+        return False
+    # Remember before save_sent: a persistence failure must not re-send this card
+    # in the same process. Across restarts there is no durable record if save_sent
+    # never succeeded; that duplicate risk cannot be closed without a successful write.
+    _mark_target_company_sent_in_process(vacancy.source, vacancy.external_id, chat_id)
+    try:
+        deliveries.save_sent(
+            source=vacancy.source,
+            external_id=vacancy.external_id,
+            chat_id=chat_id,
+            message_id=message_ref.message_id,
+        )
+        deliveries.mark_history_status(
+            source=vacancy.source,
+            external_id=vacancy.external_id,
+            status="SENT",
+            timestamp_field="sent_at",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Target company job %s was sent to Telegram (message_id=%s) "
+            "but the delivery record was not saved: %s",
+            vacancy.external_id,
+            message_ref.message_id,
+            exc,
+        )
+    return True
 
 
 def _normalize_analyze_sort_by(value: str) -> str:
@@ -2041,6 +2368,15 @@ def run_pipeline(
                     if verbose:
                         for outcome in _pipeline_verbose_outcomes(pipeline_result):
                             _run_log(outcome, component="main")
+                    try:
+                        _run_target_companies_cycle(
+                            settings=settings,
+                            analyzer=analyzer,
+                            deliveries=deliveries,
+                            verbose=verbose,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        _run_log(f"Target companies cycle failed: {exc}", component="main")
                 except (LLMRequestError, LLMResponseError) as exc:
                     _run_log(f"Pipeline cycle failed: {exc}", component="main")
                 except Exception as exc:  # noqa: BLE001

@@ -10,6 +10,7 @@ from app.telegram.client import (
     map_code_to_source,
     map_source_to_code,
     parse_callback_data,
+    source_supports_prepare,
     validate_linkedin_job_url,
 )
 from app.telegram.models import TelegramVacancyCard
@@ -129,6 +130,70 @@ def test_url_validation_and_callback_limit() -> None:
     assert prepared_buttons[2][0].text == "🔗 Open vacancy"
     assert prepared_buttons[3][0].callback_data == "applied:li:4439013108"
     assert prepared_buttons[4][0].callback_data == "skip:li:4439013108"
+
+
+def test_target_company_greenhouse_callback_round_trip() -> None:
+    full_agoda = "target_company:greenhouse:agoda"
+    full_jetbrains = "target_company:greenhouse:jetbrains"
+    assert map_source_to_code(full_agoda) == "tcg.agoda"
+    assert map_source_to_code("tcg.agoda") == "tcg.agoda"
+    assert map_code_to_source("tcg.agoda") == full_agoda
+    assert map_code_to_source(full_agoda) == full_agoda
+    assert map_code_to_source(map_source_to_code(full_agoda)) == full_agoda
+    assert map_source_to_code(map_code_to_source("tcg.jetbrains")) == "tcg.jetbrains"
+
+    parsed_agoda = parse_callback_data("skip:tcg.agoda:12")
+    parsed_jetbrains = parse_callback_data("applied:tcg.jetbrains:12")
+    assert parsed_agoda == ("skip", full_agoda, "12", None)
+    assert parsed_jetbrains == ("applied", full_jetbrains, "12", None)
+    assert parsed_agoda[1] != parsed_jetbrains[1]
+    assert parse_callback_data("undo:tcg.agoda:739281:abc12345") == (
+        "undo",
+        full_agoda,
+        "739281",
+        "abc12345",
+    )
+    assert map_source_to_code("linkedin-email") == "li"
+    assert map_source_to_code("greenhouse") == "gh"
+    assert map_code_to_source("li") == "linkedin-email"
+    assert map_code_to_source("gh") == "greenhouse"
+
+
+def test_prepare_is_hidden_for_target_companies_and_generic_greenhouse() -> None:
+    url = "https://job-boards.greenhouse.io/agoda/jobs/739281"
+    linkedin = build_action_buttons(
+        "linkedin-email",
+        "4439013108",
+        "https://www.linkedin.com/jobs/view/4439013108/",
+    )
+    target_full = build_action_buttons("target_company:greenhouse:agoda", "739281", url)
+    target_code = build_action_buttons("tcg.agoda", "739281", url)
+    generic = build_action_buttons("greenhouse", "12", url)
+
+    assert source_supports_prepare("linkedin-email") is True
+    assert source_supports_prepare("li") is True
+    assert source_supports_prepare("target_company:greenhouse:agoda") is False
+    assert source_supports_prepare("tcg.agoda") is False
+    assert source_supports_prepare("greenhouse") is False
+    assert source_supports_prepare("gh") is False
+
+    assert [button.text for row in linkedin for button in row] == [
+        "🛠 Prepare",
+        "✅ Applied",
+        "⏭ Skip",
+        "🔗 Open vacancy",
+    ]
+    for buttons in (target_full, target_code, generic):
+        labels = [button.text for row in buttons for button in row]
+        assert "🛠 Prepare" not in labels
+        assert labels == ["✅ Applied", "⏭ Skip", "🔗 Open vacancy"]
+        assert buttons[0][0].callback_data.endswith(":739281") or buttons[0][0].callback_data.endswith(":12")
+    assert target_full[0][0].callback_data == "applied:tcg.agoda:739281"
+    assert target_full[1][0].callback_data == "skip:tcg.agoda:739281"
+    assert target_code[0][0].callback_data == "applied:tcg.agoda:739281"
+    assert generic[0][0].callback_data == "applied:gh:12"
+    assert target_full[-1][0].url == url
+    assert generic[-1][0].text == "🔗 Open vacancy"
 
 
 def test_send_prepared_application_payload_contains_buttons(monkeypatch) -> None:

@@ -339,14 +339,15 @@ def build_action_buttons(source: str, external_id: str, url: str) -> list[list[T
     validated_url = validate_vacancy_url(url)
     compact_source = map_source_to_code(source)
     skip_data = _callback_data("skip", compact_source, external_id)
-    prepare_data = _callback_data("prepare", compact_source, external_id)
     applied_data = _callback_data("applied", compact_source, external_id)
-    return [
-        [TelegramInlineButton(text="🛠 Prepare", callback_data=prepare_data)],
-        [TelegramInlineButton(text="✅ Applied", callback_data=applied_data)],
-        [TelegramInlineButton(text="⏭ Skip", callback_data=skip_data)],
-        [TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)],
-    ]
+    rows: list[list[TelegramInlineButton]] = []
+    if source_supports_prepare(source):
+        prepare_data = _callback_data("prepare", compact_source, external_id)
+        rows.append([TelegramInlineButton(text="🛠 Prepare", callback_data=prepare_data)])
+    rows.append([TelegramInlineButton(text="✅ Applied", callback_data=applied_data)])
+    rows.append([TelegramInlineButton(text="⏭ Skip", callback_data=skip_data)])
+    rows.append([TelegramInlineButton(text="🔗 Open vacancy", url=validated_url)])
+    return rows
 
 
 def build_prepared_application_buttons(source: str, external_id: str, url: str) -> list[list[TelegramInlineButton]]:
@@ -410,12 +411,38 @@ def build_ready_text(*, title: str, company: str | None, recommended_resume: str
     )
 
 
+_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX = "target_company:greenhouse:"
+_TARGET_COMPANY_GREENHOUSE_CODE_PREFIX = "tcg."
+_PREPARE_SUPPORTED_SOURCES = frozenset({"linkedin-email"})
+
+
+def source_supports_prepare(source: str) -> bool:
+    """Return whether Prepare is offered for this vacancy source or compact code."""
+    normalized = str(source or "").strip()
+    if not normalized:
+        return False
+    try:
+        canonical = map_code_to_source(normalized)
+    except ValueError:
+        try:
+            canonical = map_code_to_source(map_source_to_code(normalized))
+        except ValueError:
+            return False
+    return canonical in _PREPARE_SUPPORTED_SOURCES
+
+
 def map_source_to_code(source: str) -> str:
     mapping = {"linkedin-email": "li", "li": "li", "greenhouse": "gh", "gh": "gh"}
     mapped = mapping.get(source)
-    if mapped is None:
-        raise ValueError(f"Unknown source: {source}")
-    return mapped
+    if mapped is not None:
+        return mapped
+    board = _target_company_greenhouse_board(source, prefix=_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX)
+    if board is not None:
+        return f"{_TARGET_COMPANY_GREENHOUSE_CODE_PREFIX}{board}"
+    board = _target_company_greenhouse_board(source, prefix=_TARGET_COMPANY_GREENHOUSE_CODE_PREFIX)
+    if board is not None:
+        return source
+    raise ValueError(f"Unknown source: {source}")
 
 
 def map_code_to_source(code: str) -> str:
@@ -426,9 +453,24 @@ def map_code_to_source(code: str) -> str:
         "greenhouse": "greenhouse",
     }
     mapped = reverse.get(code)
-    if mapped is None:
-        raise ValueError(f"Unknown source code: {code}")
-    return mapped
+    if mapped is not None:
+        return mapped
+    board = _target_company_greenhouse_board(code, prefix=_TARGET_COMPANY_GREENHOUSE_CODE_PREFIX)
+    if board is not None:
+        return f"{_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX}{board}"
+    board = _target_company_greenhouse_board(code, prefix=_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX)
+    if board is not None:
+        return code
+    raise ValueError(f"Unknown source code: {code}")
+
+
+def _target_company_greenhouse_board(value: str, *, prefix: str) -> str | None:
+    if not value.startswith(prefix):
+        return None
+    board = value[len(prefix) :]
+    if not board or ":" in board:
+        return None
+    return board
 
 
 def parse_callback_data(value: str) -> tuple[str, str, str, str | None]:
