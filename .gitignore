@@ -12,3 +12,5 @@ resumes/*.pdf
 target_companies_*_output.*
 target_companies_titles.txt
 data/target_company_analysis_cache.json
+.DS_Store
+**/.DS_Store

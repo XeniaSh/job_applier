@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+
+resumes/*.pdf
+resumes/*.docx
+
+data/prepared/
+data/debug/
+data/
+
+*.sqlite
+*.sqlite3
+*.db
