@@ -11,6 +11,7 @@ Requires-Dist: typer>=0.16.0
 Requires-Dist: python-dotenv>=1.1.0
 Requires-Dist: pyyaml
 Requires-Dist: fpdf2>=2.8.8
+Requires-Dist: playwright>=1.49.0
 
 # Job Applier
 
@@ -130,8 +131,10 @@ Never commit real secrets in `.env`.
 | `LINKEDIN_EMAIL_FOLDER` | LinkedIn email collection | `LinkedIn Jobs` | IMAP mailbox/label name | No |
 | `LINKEDIN_EMAIL_SEARCH_DAYS` | LinkedIn email collection | `7` | Lookback window in days | No |
 | `LINKEDIN_EMAIL_MARK_AS_READ` | LinkedIn email collection | `false` | Mark processed emails as read | No |
-| `TELEGRAM_BOT_TOKEN` | Telegram integration | `123456:ABC...` | Bot API token from BotFather | Yes |
-| `TELEGRAM_CHAT_ID` | Telegram integration | `123456789` | Target private chat ID | Potentially |
+| `TELEGRAM_BOT_TOKEN` | Telegram integration | `123456:ABC...` | Shared Bot API token from BotFather | Yes |
+| `TELEGRAM_CHAT_ID` | Telegram integration | `123456789` | Legacy LinkedIn/discovery chat ID; fallback for `TELEGRAM__LINKEDIN_CHAT_ID` | Potentially |
+| `TELEGRAM__LINKEDIN_CHAT_ID` | Telegram LinkedIn flow | `123456789` | Chat ID for LinkedIn/current discovery messages | Potentially |
+| `TELEGRAM__TARGET_COMPANIES_CHAT_ID` | Telegram Target Companies flow | `987654321` | Chat ID for Target Companies messages; no silent fallback to LinkedIn | Potentially |
 | `RESUMES_DIR` | Preparation pipeline | `resumes` | Directory with local resume PDFs | No |
 | `CANDIDATE_PREFERRED_LANGUAGE` | Cover letter generation | `en` | Preferred language when vacancy language is ambiguous | No |
 | `CANDIDATE_GRAMMATICAL_GENDER` | RU cover letter grammar | `neutral` | Gender setting used for language checks | No |
@@ -184,7 +187,7 @@ This project reads LinkedIn alert emails only; it does not scrape LinkedIn pages
 
 1. Open [@BotFather](https://t.me/BotFather).
 2. Run `/newbot` and create bot.
-3. Put token into `TELEGRAM_BOT_TOKEN`.
+3. Put token into `TELEGRAM__BOT_TOKEN`.
 4. Send at least one message to your bot from your private account.
 5. Resolve chat ID:
 
@@ -192,14 +195,15 @@ This project reads LinkedIn alert emails only; it does not scrape LinkedIn pages
 uv run python -m app telegram-chat-id
 ```
 
-6. Put value into `TELEGRAM_CHAT_ID`.
-7. Dry run card generation:
+6. Put the LinkedIn/discovery chat ID into `TELEGRAM__LINKEDIN_CHAT_ID` (or keep using legacy `TELEGRAM__CHAT_ID`).
+7. For Target Companies messages, put a **different** chat ID into `TELEGRAM__TARGET_COMPANIES_CHAT_ID`. Do not omit it and expect LinkedIn channel fallback.
+8. Dry run card generation:
 
 ```bash
 uv run python -m app send-linkedin-telegram --dry-run --limit 3
 ```
 
-8. Real send:
+9. Real send:
 
 ```bash
 uv run python -m app send-linkedin-telegram --limit 3

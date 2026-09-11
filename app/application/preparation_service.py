@@ -11,12 +11,12 @@ from typing import Any, Protocol
 from app.collectors.email_imap_client import EmailIMAPClient
 from app.collectors.linkedin_email_parser import parse_linkedin_email
 from app.collectors.linkedin_models import LinkedInEmailVacancy
+from app.application.artifact_retention import ArtifactRetentionError, cleanup_generated_artifacts
+from app.application.cover_letter_generation import generate_cover_letter_text
 from app.cover_letter_documents import CoverLetterArtifacts, generate_cover_letter_artifacts
-from app.cover_letter_profiles import apply_cover_letter_profile, resolve_cover_letter_profile
 from app.llm_client import LLMClient
 from app.models import CoverLetterResult, VacancyEvaluation
 from app.profile_loader import CandidateProfileContext, load_candidate_profile_context
-from app.prompt_loader import load_cover_letter_prompt
 from app.resume_selector import ResumeSelector
 from app.vacancy_analyzer import VacancyAnalyzer
 
@@ -409,24 +409,16 @@ class PreparationService:
         profile: CandidateProfileContext,
         location: str | None = None,
     ) -> CoverLetterResult:
-        letter_profile = resolve_cover_letter_profile(
-            location=location,
-            vacancy_text=analysis_text,
-        )
-        logger.info("Cover letter profile: %s", letter_profile.label)
-        prompt = load_cover_letter_prompt()
-        result = self._llm_client.create_cover_letter(
-            prompt=prompt,
+        return generate_cover_letter_text(
+            llm_client=self._llm_client,
             candidate_profile=profile.text,
             vacancy_text=analysis_text,
             analysis=analysis,
             recommended_resume=recommended_resume,
             preferred_language=profile.preferred_language,
             grammatical_gender=profile.grammatical_gender,
-            operation="cover_letter",
+            location=location,
         )
-        result.cover_letter = apply_cover_letter_profile(result.cover_letter, letter_profile)
-        return result
 
     def _generate_cover_letter_artifacts(
         self,
@@ -436,6 +428,10 @@ class PreparationService:
         language: str,
         cover_letter: str,
     ) -> CoverLetterArtifacts:
+        try:
+            cleanup_generated_artifacts(self._artifacts_dir)
+        except (ArtifactRetentionError, OSError) as exc:
+            logger.warning("Generated artifact cleanup skipped: %s", exc)
         try:
             return generate_cover_letter_artifacts(
                 base_dir=self._artifacts_dir,

@@ -390,6 +390,30 @@ def test_cached_skip_is_excluded_before_ranking(monkeypatch, tmp_path: Path) -> 
     assert getattr(telegram.cards[0], "external_id") == "2"
 
 
+def test_lead_manager_skip_is_not_sent_while_senior_ic_is(monkeypatch, tmp_path: Path) -> None:
+    lead = _vacancy(
+        external_id="7044713",
+        title="Lead Software Engineer - Back End (FinTech) (Bangkok based - Relocation provided)",
+    )
+    senior = _vacancy(
+        company="JetBrains",
+        board="jetbrains",
+        external_id="2",
+        title="Senior Java Backend Engineer",
+    )
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[lead, senior],
+        analyzer=analyzer,
+    )
+
+    assert result.sent == 1
+    assert {getattr(card, "external_id") for card in telegram.cards} == {"2"}
+    assert "7044713" not in {getattr(card, "external_id") for card in telegram.cards}
+
+
 def test_cached_apply_now_and_check_manually_do_not_recall_llm(monkeypatch, tmp_path: Path) -> None:
     apply_now = _vacancy(external_id="1", title="Java Backend Engineer")
     check = _vacancy(company="JetBrains", board="jetbrains", external_id="2", title="Kotlin Backend Engineer")

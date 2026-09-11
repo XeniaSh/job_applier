@@ -127,10 +127,18 @@ class LLMClient:
         )
 
         for attempt in range(1, 3):
+            vacancy_payload = user_payload
+            if attempt > 1 and isinstance(last_error, CoverLetterValidationError):
+                vacancy_payload = (
+                    f"{user_payload}\n\nPrevious draft failed validation: {last_error}. "
+                    "Rewrite the cover letter so it complies with that rule. "
+                    "Use at most two highly relevant core technologies. "
+                    "Do not dump a long technology list."
+                )
             try:
                 raw_content = self._request_content(
                     prompt=prompt,
-                    vacancy=user_payload,
+                    vacancy=vacancy_payload,
                     temperature=0.2,
                     max_tokens=500,
                     operation=operation,
@@ -166,6 +174,51 @@ class LLMClient:
         if isinstance(last_error, CoverLetterValidationError):
             raise CoverLetterValidationError(str(last_error)) from last_error
         raise LLMResponseError("LLM returned an invalid cover-letter response twice.") from last_error
+
+    def create_short_application_answer(
+        self,
+        *,
+        prompt: str,
+        vacancy_text: str,
+        candidate_profile: str,
+        question: str,
+        options: list[str],
+    ) -> tuple[str, bool]:
+        user_payload = json.dumps(
+            {
+                "candidate_profile": candidate_profile,
+                "vacancy_text": vacancy_text,
+                "question": question,
+                "options": options,
+            },
+            ensure_ascii=False,
+        )
+        last_error: Exception | None = None
+        for attempt in range(1, 3):
+            try:
+                raw_content = self._request_content(
+                    prompt=prompt,
+                    vacancy=user_payload,
+                    temperature=0.2,
+                    max_tokens=220,
+                    operation="application_answer",
+                )
+                payload = json.loads(raw_content)
+                if not isinstance(payload, dict):
+                    raise LLMResponseError("Application answer is not a JSON object.")
+                answer = str(payload.get("answer") or "").strip()
+                confident = payload.get("confident") is True
+                return answer, confident
+            except (JSONDecodeError, LLMResponseError) as exc:
+                last_error = exc
+                logger.warning(
+                    "Invalid application-answer response on attempt %d of 2: %s",
+                    attempt,
+                    type(exc).__name__,
+                )
+        raise LLMResponseError(
+            "LLM returned an invalid application-answer response twice."
+        ) from last_error
 
     def _request_content(
         self,

@@ -1,0 +1,2 @@
+This is a synthetic resume fixture for autofill tests.
+It is not a real CV.

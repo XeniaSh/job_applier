@@ -18,7 +18,9 @@ Hard rules:
 - Never claim Senior/Lead/Principal/Staff/Architect for the candidate.
 - You may refer to the vacancy title as written (for example: "this Senior Java Developer role") without claiming that title yourself.
 - If only the job title is known, reference only that title. Do not invent responsibilities, stack requirements, or company details.
-- Mention no more than 4 technologies/technical areas total.
+- Mention normally only 1-2 highly relevant core technologies (for example Java and Kotlin, or Java and Spring Boot).
+- Do not dump a long technology list. Naming many languages, frameworks, and infrastructure tools will fail validation.
+- Mention no more than 4 technologies/technical areas total (hard maximum).
 - Output plain text only inside JSON. No markdown. No bullet lists. No meta commentary.
 
 Never emit:
@@ -35,12 +37,12 @@ Avoid these awkward templates:
 
 Preferred sentence flow (3 to 5 complete sentences):
 1. Who the candidate is (title + approximate experience).
-2. Main technical expertise (2-3 core technologies).
+2. Main technical expertise (1-2 highly relevant core technologies, not a stack list).
 3. Types of systems/projects worked on (production services, integrations, distributed systems, etc.).
 4. Why the background fits THIS role, naming the vacancy title when available.
 
 Good English example:
-"I am a Java Backend Engineer with around seven years of experience developing applications using Java, Spring Boot, REST APIs, and microservices. I have built and maintained production services, implemented integrations, and improved the reliability of distributed systems. My experience aligns well with this Senior Java Developer role because it focuses on the same core technologies and engineering challenges."
+"I am a Java Backend Engineer with around seven years of experience building production backend services with Java and Kotlin. I have implemented integrations and improved the reliability of production systems. My experience is relevant to this Senior Java Developer role because it focuses on the same core technologies."
 
 For PARTIAL/MINIMAL vacancy content:
 - Keep wording neutral.
@@ -65,7 +67,7 @@ Final self-check before output:
 1) Approximate seven years wording is present (not six).
 2) Candidate is not called Senior/Lead/Principal/Staff/Architect.
 3) No forbidden cliches, no prompt fragments, no unfinished clauses.
-4) No more than four technologies.
+4) Normally 1-2 core technologies; never more than four.
 5) Every claim is supported by candidate_profile.md.
 6) Role fit sentence refers to the vacancy title when known, without inventing duties.
 7) Text sounds like a real engineer wrote it.

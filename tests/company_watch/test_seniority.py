@@ -54,3 +54,10 @@ def test_title_without_level_is_unknown() -> None:
 def test_engineer_ii_is_mid() -> None:
     result = classify_seniority("Software Engineer II")
     assert result.label == "MID"
+
+
+def test_lead_software_engineer_backend_is_lead_manager() -> None:
+    result = classify_seniority(
+        "Lead Software Engineer - Back End (FinTech) (Bangkok based - Relocation provided)"
+    )
+    assert result.label == "LEAD_MANAGER"

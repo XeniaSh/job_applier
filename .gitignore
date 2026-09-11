@@ -1,4 +1,5 @@
 .venv/
+.tools/
 __pycache__/
 .pytest_cache/
 .python-version
@@ -14,3 +15,5 @@ target_companies_titles.txt
 data/target_company_analysis_cache.json
 .DS_Store
 **/.DS_Store
+candidate_profile.local.yaml
+candidate_profile.local.*

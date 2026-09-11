@@ -12,6 +12,7 @@ dependencies = [
   "python-dotenv>=1.1.0",
   "pyyaml",
   "fpdf2>=2.8.8",
+  "playwright>=1.49.0",
 ]
 
 [dependency-groups]

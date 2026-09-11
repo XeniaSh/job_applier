@@ -1,0 +1,371 @@
+from __future__ import annotations
+
+import re
+
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
+
+from app.application.autofill.options import label_matches, match_option, match_yes_no
+
+_CHIP_SELECTOR = (
+    "[class*='multi-value__label'], [class*='multiValue'] [class*='label'], "
+    "[class*='select__multi-value__label'], [class*='multi-value']"
+)
+_SINGLE_VALUE_SELECTOR = (
+    "[class*='single-value'], [class*='singleValue'], [class*='select__single-value']"
+)
+_CONTROL_XPATH = (
+    "xpath=ancestor::*[contains(@class,'select__control') or contains(@class,'iti')][1]"
+)
+
+
+def open_menu(page: Page, locator: Locator) -> list[str]:
+    control = _control_root(locator)
+    try:
+        control.click(timeout=3_000)
+    except PlaywrightError:
+        control.click(force=True, timeout=3_000)
+    return wait_visible_options(page)
+
+
+def wait_visible_options(page: Page, timeout: int = 2_500) -> list[str]:
+    try:
+        page.locator("[role='option']").first.wait_for(state="visible", timeout=timeout)
+    except PlaywrightTimeoutError:
+        pass
+    return visible_option_texts(page)
+
+
+def visible_option_texts(page: Page) -> list[str]:
+    options = page.get_by_role("option")
+    if options.count() == 0:
+        options = page.locator("[role='option']")
+    texts: list[str] = []
+    for index in range(options.count()):
+        option = options.nth(index)
+        try:
+            if not option.is_visible():
+                continue
+        except PlaywrightError:
+            continue
+        text = " ".join((option.inner_text() or "").split())
+        if text:
+            texts.append(text)
+    return texts
+
+
+def matching_option(page: Page, wanted: str) -> Locator | None:
+    needle = wanted.strip()
+    if not needle:
+        return None
+    options = page.get_by_role("option")
+    if options.count() == 0:
+        options = page.locator("[role='option']")
+    lowered = needle.lower()
+    prefix: Locator | None = None
+    for index in range(options.count()):
+        option = options.nth(index)
+        try:
+            if not option.is_visible():
+                continue
+        except PlaywrightError:
+            continue
+        text = " ".join((option.inner_text() or "").split())
+        if not text:
+            continue
+        current = text.lower()
+        if current == lowered:
+            return option
+        if label_matches(needle, text):
+            prefix = prefix or option
+    return prefix
+
+
+def click_option(page: Page, wanted: str) -> bool:
+    option = matching_option(page, wanted)
+    if option is None:
+        return False
+    try:
+        option.click(timeout=3_000)
+    except PlaywrightError:
+        try:
+            option.click(force=True, timeout=3_000)
+        except PlaywrightError:
+            return False
+    return True
+
+
+def dismiss_menu(page: Page) -> None:
+    try:
+        page.keyboard.press("Escape")
+    except PlaywrightError:
+        pass
+
+
+def read_selected_chips(page: Page, locator: Locator) -> list[str]:
+    try:
+        native = locator.evaluate(
+            """el => {
+                if (el.tagName && el.tagName.toLowerCase() === 'select') {
+                    return Array.from(el.selectedOptions || [])
+                        .map(opt => (opt.textContent || '').trim())
+                        .filter(Boolean);
+                }
+                return [];
+            }"""
+        )
+    except PlaywrightError:
+        native = []
+    if isinstance(native, list) and native:
+        return [str(item).strip() for item in native if str(item).strip()]
+    root = _value_root(locator)
+    chips = root.locator(_CHIP_SELECTOR)
+    texts: list[str] = []
+    seen: set[str] = set()
+    for index in range(chips.count()):
+        text = " ".join((chips.nth(index).inner_text() or "").split())
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        texts.append(text)
+    return texts
+
+
+def read_selected_label(page: Page, locator: Locator) -> str | None:
+    try:
+        tag = locator.evaluate("el => el.tagName.toLowerCase()")
+        if tag == "select":
+            label = locator.evaluate(
+                """el => {
+                    const opt = el.options && el.selectedIndex >= 0 ? el.options[el.selectedIndex] : null;
+                    return opt ? (opt.textContent || '').trim() : (el.value || '');
+                }"""
+            )
+            if isinstance(label, str) and label.strip():
+                return " ".join(label.split())
+    except PlaywrightError:
+        pass
+    root = _value_root(locator)
+    selected = root.locator(_SINGLE_VALUE_SELECTOR)
+    if selected.count() > 0:
+        text = " ".join((selected.first.inner_text() or "").split())
+        if text:
+            return text
+    chips = read_selected_chips(page, locator)
+    if chips:
+        return ", ".join(chips)
+    try:
+        typed = locator.input_value().strip()
+    except PlaywrightError:
+        typed = ""
+    return typed or None
+
+
+def wait_for_selected_label(page: Page, locator: Locator, wanted: str, timeout: int = 2_500) -> bool:
+    try:
+        page.wait_for_function(
+            """(payload) => {
+                const wanted = String(payload.wanted || '').trim().toLowerCase();
+                const matches = (text) => {
+                    const haystack = String(text || '').trim().toLowerCase();
+                    if (!wanted || !haystack) return false;
+                    if (haystack === wanted) return true;
+                    const idx = haystack.indexOf(wanted);
+                    if (idx < 0) return false;
+                    const before = idx === 0 ? ' ' : haystack[idx - 1];
+                    const afterIdx = idx + wanted.length;
+                    const after = afterIdx >= haystack.length ? ' ' : haystack[afterIdx];
+                    return !/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after);
+                };
+                const singles = Array.from(document.querySelectorAll(payload.singleSel))
+                    .map(el => (el.textContent || '').trim());
+                const chips = Array.from(document.querySelectorAll(payload.chipSel))
+                    .map(el => (el.textContent || '').trim());
+                return singles.some(matches) || chips.some(matches);
+            }""",
+            arg={"wanted": wanted, "chipSel": _CHIP_SELECTOR, "singleSel": _SINGLE_VALUE_SELECTOR},
+            timeout=timeout,
+        )
+        return True
+    except PlaywrightError:
+        visible = read_selected_label(page, locator) or ""
+        return _label_matches(wanted, visible)
+
+
+def select_single_option(page: Page, locator: Locator, wanted: str) -> bool:
+    if _is_native_select(locator):
+        try:
+            locator.select_option(label=wanted)
+            return _label_matches(wanted, read_selected_label(page, locator) or "")
+        except PlaywrightError:
+            try:
+                locator.select_option(value=wanted)
+                return _label_matches(wanted, read_selected_label(page, locator) or "")
+            except PlaywrightError:
+                return False
+    open_menu(page, locator)
+    live = visible_option_texts(page)
+    match = match_option(wanted, live) or wanted
+    if not click_option(page, match):
+        dismiss_menu(page)
+        return False
+    persisted = wait_for_selected_label(page, locator, match)
+    dismiss_menu(page)
+    visible = read_selected_label(page, locator) or ""
+    return persisted and _label_matches(match, visible)
+
+
+def select_yes_no(page: Page, locator: Locator, value: bool, options: list[str] | None = None) -> bool:
+    if _is_native_select(locator):
+        live = list(options or [])
+        if not live:
+            live = locator.evaluate(
+                """el => Array.from(el.options || []).map(opt => (opt.textContent || '').trim()).filter(Boolean)"""
+            ) or []
+        matched = match_yes_no(value, live)
+        if matched is None:
+            return False
+        return select_single_option(page, locator, matched)
+    open_menu(page, locator)
+    live = visible_option_texts(page) or list(options or [])
+    matched = match_yes_no(value, live)
+    if matched is None:
+        dismiss_menu(page)
+        return False
+    if not click_option(page, matched):
+        dismiss_menu(page)
+        return False
+    persisted = wait_for_selected_label(page, locator, matched)
+    dismiss_menu(page)
+    visible = read_selected_label(page, locator) or ""
+    return persisted and semantic_choice_matches(value, visible)
+
+
+def select_multi_options(
+    page: Page,
+    locator: Locator,
+    values: list[str],
+    *,
+    max_choices: int | None,
+) -> bool:
+    wanted = [item.strip() for item in values if item and str(item).strip()]
+    if max_choices is not None and max_choices > 0:
+        wanted = wanted[:max_choices]
+    if not wanted:
+        return False
+    if _is_native_select(locator):
+        try:
+            locator.select_option(label=wanted)
+        except PlaywrightError:
+            try:
+                locator.select_option(value=wanted)
+            except PlaywrightError:
+                return False
+        chips = read_selected_chips(page, locator)
+        return _chips_contain(chips, wanted)
+    confirmed: list[str] = []
+    for value in wanted:
+        match = _select_one_multi_value(page, locator, value, confirmed)
+        if match is None:
+            continue
+        confirmed.append(match)
+        chips = read_selected_chips(page, locator)
+        if not _chips_contain(chips, confirmed):
+            return False
+    if not confirmed:
+        return False
+    final = read_selected_chips(page, locator)
+    return _chips_contain(final, confirmed)
+
+
+def semantic_choice_matches(expected: bool, actual: str) -> bool:
+    cleaned = actual.strip().lower()
+    if not cleaned:
+        return False
+    if expected:
+        return bool(re.match(r"^(yes)\b", cleaned))
+    return bool(re.match(r"^(no)\b", cleaned))
+
+
+def _select_one_multi_value(
+    page: Page,
+    locator: Locator,
+    value: str,
+    already: list[str],
+) -> str | None:
+    for _attempt in range(3):
+        live = open_menu(page, locator)
+        match = match_option(value, live) or (
+            value if any(label_matches(value, item) for item in live) else None
+        )
+        if match is None:
+            dismiss_menu(page)
+            return None
+        if not click_option(page, match):
+            dismiss_menu(page)
+            continue
+        _wait_for_chip(page, match)
+        chips = read_selected_chips(page, locator)
+        needed = already + [match]
+        if _chips_contain(chips, needed):
+            if page.locator("[role='option']").count() > 0:
+                dismiss_menu(page)
+            return match
+        missing = [item for item in needed if not _chips_contain(chips, [item])]
+        dismiss_menu(page)
+        for item in missing:
+            if item.lower() == match.lower():
+                continue
+            open_menu(page, locator)
+            if click_option(page, item):
+                _wait_for_chip(page, item)
+        chips = read_selected_chips(page, locator)
+        if _chips_contain(chips, needed):
+            dismiss_menu(page)
+            return match
+    return None
+
+
+def _wait_for_chip(page: Page, wanted: str) -> None:
+    pattern = re.compile(re.escape(wanted), re.I)
+    chip = page.locator(_CHIP_SELECTOR).filter(has_text=pattern)
+    try:
+        chip.first.wait_for(state="visible", timeout=2_500)
+    except PlaywrightTimeoutError:
+        pass
+
+
+def _chips_contain(chips: list[str], needed: list[str]) -> bool:
+    for item in needed:
+        if not any(label_matches(item, chip) for chip in chips):
+            return False
+    return True
+
+
+def _label_matches(wanted: str, actual: str) -> bool:
+    return label_matches(wanted, actual)
+
+
+def _is_native_select(locator: Locator) -> bool:
+    try:
+        return locator.evaluate("el => el.tagName.toLowerCase() === 'select'")
+    except PlaywrightError:
+        return False
+
+
+def _control_root(locator: Locator) -> Locator:
+    parent = locator.locator(_CONTROL_XPATH)
+    if parent.count() > 0:
+        return parent.first
+    return locator
+
+
+def _value_root(locator: Locator) -> Locator:
+    parent = locator.locator(
+        "xpath=ancestor::*[contains(@class,'field') or contains(@class,'select__control') "
+        "or contains(@class,'iti')][1]"
+    )
+    if parent.count() > 0:
+        return parent.first
+    return locator

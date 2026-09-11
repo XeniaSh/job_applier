@@ -33,6 +33,8 @@ Important areas:
 - `app/application/`
   - Application preparation logic.
   - Cover letter and resume package preparation belongs here.
+  - Stage 1 Greenhouse autofill belongs here (`app/application/autofill/`).
+  - Autofill must not live in collectors, Telegram, or company watchers.
 
 - `app/telegram/`
   - Telegram Bot API integration, message rendering, callbacks, and lifecycle handling.
@@ -87,7 +89,9 @@ application preparation
 
 Do not implement automatic final application submission.
 
-Autofill may be implemented later, but it must stop before final Submit unless explicitly requested.
+Stage 1 Greenhouse autofill is in scope. It may open a form, fill known fields, upload a resume, and leave the form for user review.
+
+Autofill must stop before final Submit unless auto-submit is explicitly implemented as a separately reviewed feature.
 
 ### Prefer deterministic logic over LLM decisions
 
@@ -105,13 +109,14 @@ Deterministic code should own:
 
 Avoid unnecessary frameworks.
 
+Playwright is allowed as the browser automation dependency for Stage 1 autofill.
+
 Do not add the following unless explicitly requested:
 
 - LangChain;
 - agent frameworks;
 - Celery/RQ;
 - new databases;
-- browser automation;
 - distributed queues.
 
 ## Target companies
@@ -218,6 +223,26 @@ Network errors, invalid responses, and unsupported companies should be reported 
 
 Do not introduce complex retry or circuit-breaker logic unless explicitly requested.
 
+## Autofill (Stage 1)
+
+Stage 1 Greenhouse autofill is allowed:
+
+- CLI `autofill SOURCE EXTERNAL_ID`;
+- Playwright headed browser session;
+- Greenhouse ATS adapter (discover, fill, upload, read-back);
+- structured Candidate Profile YAML (`candidate_profile.example.yaml` plus optional local overlay).
+
+Stage 1 must not click Submit, call `form.submit()`, or otherwise send the application.
+
+Forbidden unless separately requested:
+
+- auto-submit;
+- CAPTCHA / Cloudflare / OTP / authentication bypass;
+- Workday support;
+- reading real `candidate_profile.local.*`, resume PDF contents, `.env`, or production SQLite unless the current task requires it.
+
+Use synthetic resume fixtures in tests. Do not add live Greenhouse to the ordinary pytest suite.
+
 ## Tests
 
 Add focused tests for every new module.
@@ -282,10 +307,32 @@ After making changes, report:
 - Do not write to SQLite.
 - Do not change database schema.
 - Do not implement auto-apply.
-- Do not implement ATS autofill.
-- Do not add browser automation.
+- Do not implement auto-submit.
+- Do not bypass CAPTCHA, Cloudflare, OTP, or other authentication / bot protections.
 - Do not add Workday support.
 - Do not change resume generation.
 - Do not rewrite existing collectors.
 - Do not refactor unrelated modules.
 - Do not fix unrelated old tests.
+
+Git / remote safety rules:
+
+- You may inspect local git state using:
+  - git status
+  - git diff
+  - git log
+  - git branch
+- You may create local commits only if explicitly required by the task.
+- NEVER run:
+  - git push
+  - git push --force
+  - git pull
+  - git fetch
+  - git merge
+  - git rebase
+  - gh pr create
+  - glab mr create
+  - any command that modifies a remote repository
+
+Do not create or update pull requests.
+All work must remain local unless the user explicitly asks otherwise.

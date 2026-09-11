@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Senior Software Engineer at Agoda</title>
+</head>
+<body>
+  <h1>Senior Software Engineer</h1>
+  <iframe src="about:blank#recaptcha" title="reCAPTCHA"></iframe>
+  <form id="application-form">
+    <label for="first_name">First Name</label>
+    <input id="first_name" type="text" aria-required="true">
+
+    <label for="last_name">Last Name</label>
+    <input id="last_name" type="text" aria-required="true">
+
+    <label for="email">Email</label>
+    <input id="email" type="text" autocomplete="email" aria-required="true">
+
+    <label id="country-label" for="country">Country*</label>
+    <div class="select__control">
+      <input id="country" role="combobox" aria-labelledby="country-label" aria-autocomplete="list" aria-required="true">
+      <input id="react-select-2-input" aria-autocomplete="list">
+      <div id="country-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="iti">
+      <button type="button" class="iti__selected-country" aria-label="Change country, selected Thailand (+66)">TH</button>
+      <ul class="iti__country-list" hidden>
+        <li class="iti__country" data-country-code="de" data-dial-code="49">Germany</li>
+        <li class="iti__country" data-country-code="th" data-dial-code="66">Thailand</li>
+        <li class="iti__country" data-country-code="uz" data-dial-code="998">Uzbekistan</li>
+      </ul>
+      <label for="phone">Phone</label>
+      <input id="phone" type="tel">
+    </div>
+
+    <label for="candidate-location">Location (City)*</label>
+    <input id="candidate-location" role="combobox" aria-autocomplete="list" aria-required="true">
+    <div id="location-list" role="listbox" hidden></div>
+
+    <p>Resume/CV</p>
+    <label for="resume">Attach</label>
+    <input id="resume" type="file" style="width:1px;height:1px;opacity:0.01">
+
+    <label for="cover_letter">Attach</label>
+    <input id="cover_letter" type="file">
+
+    <label for="question_linkedin">LinkedIn Profile? (Please paste link or answer 'No').</label>
+    <input id="question_linkedin" type="text">
+
+    <label for="question_github">Github Profile? (Please paste link or answer 'No')</label>
+    <input id="question_github" type="text">
+
+    <label for="question_news">Email me about other job openings within the Booking Holding’s entities and recruitment-related newsletters*</label>
+    <input id="question_news" role="combobox" aria-required="true">
+    <div id="news-list" role="listbox" hidden></div>
+
+    <label for="question_years">What is your overall years of relevant experience?*</label>
+    <input id="question_years" role="combobox" aria-required="true">
+    <input aria-hidden="true">
+
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+  <script>
+    window.__submitClicked = false;
+    window.__formSubmitted = false;
+    document.getElementById("submit_app").addEventListener("click", function () {
+      window.__submitClicked = true;
+    });
+    document.getElementById("application-form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      window.__formSubmitted = true;
+    });
+
+    function setupCombobox(inputId, listId, options) {
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      function render(filter) {
+        var query = (filter || "").toLowerCase();
+        list.innerHTML = "";
+        list.hidden = false;
+        options.filter(function (text) {
+          return text.toLowerCase().indexOf(query) !== -1;
+        }).forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            input.value = text;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            list.hidden = true;
+          });
+          list.appendChild(option);
+        });
+      }
+      input.addEventListener("focus", function () { render(input.value); });
+      input.addEventListener("input", function () { render(input.value); });
+    }
+
+    setupCombobox("country", "country-list", ["Germany", "Thailand", "United States"]);
+    setupCombobox("candidate-location", "location-list", [
+      "Berlin, Germany",
+      "Berlin-Lichtenrade, Berlin, Germany"
+    ]);
+    setupCombobox("question_news", "news-list", ["Yes", "No"]);
+
+    var countryToggle = document.querySelector(".iti__selected-country");
+    var countryList = document.querySelector(".iti__country-list");
+    countryToggle.addEventListener("click", function () {
+      countryList.hidden = !countryList.hidden;
+    });
+    countryList.querySelectorAll(".iti__country").forEach(function (item) {
+      item.addEventListener("click", function () {
+        countryToggle.setAttribute(
+          "aria-label",
+          "Change country, selected " + item.textContent.trim() + " (+" + (item.getAttribute("data-dial-code") || "") + ")"
+        );
+        countryToggle.setAttribute("data-dial-code", item.getAttribute("data-dial-code") || "");
+        countryList.hidden = true;
+      });
+    });
+  </script>
+</body>
+</html>

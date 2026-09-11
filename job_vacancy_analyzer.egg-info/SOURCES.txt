@@ -53,12 +53,15 @@ tests/test_requirement_matcher.py
 tests/test_resume_cache_service.py
 tests/test_resume_selector.py
 tests/test_run_cli.py
+tests/test_run_target_companies.py
 tests/test_seen_jobs.py
 tests/test_skills_profile_loader.py
 tests/test_telegram_callback_latency.py
+tests/test_telegram_cleanup.py
 tests/test_telegram_cli.py
 tests/test_telegram_client.py
 tests/test_telegram_delivery.py
+tests/test_telegram_destinations.py
 tests/test_telegram_formatter.py
 tests/test_telegram_state_reconcile.py
 tests/test_telegram_undo.py

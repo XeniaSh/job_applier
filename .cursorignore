@@ -2,6 +2,9 @@
 .env.*
 !.env.example
 
+candidate_profile.local.yaml
+candidate_profile.local.*
+
 resumes/*.pdf
 resumes/*.docx
 

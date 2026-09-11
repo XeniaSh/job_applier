@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — Custom Questions</title>
+</head>
+<body>
+  <h1>Senior Backend Engineer</h1>
+  <form id="application_form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+
+    <label for="github">Github Profile? (Please paste link or answer 'No')</label>
+    <input id="github" name="job_application[urls][github]" type="url">
+
+    <label for="website">Website / Blog / Other</label>
+    <input id="website" name="job_application[urls][other]" type="url" required>
+
+    <label for="years">What is your overall years of relevant experience?*</label>
+    <select id="years" name="job_application[years]" required>
+      <option value="">Please select</option>
+      <option value="0-2">0-2 years</option>
+      <option value="3-5">3-5 years</option>
+      <option value="6-8">6-8 years</option>
+      <option value="9+">9+ years</option>
+    </select>
+
+    <label for="education">Highest academic level*</label>
+    <select id="education" name="job_application[education]" required>
+      <option value="">Please select</option>
+      <option>Highschool</option>
+      <option>Diploma</option>
+      <option>Bachelor's Degree</option>
+      <option>Master's Degree</option>
+      <option>Doctorate Degree</option>
+    </select>
+
+    <label for="tech_stack">Which of the following technologies have you had professional experience with? (select top 3)*</label>
+    <select id="tech_stack" name="job_application[tech_stack]" multiple required>
+      <option>Java</option>
+      <option>Python</option>
+      <option>Go</option>
+      <option>Kotlin</option>
+      <option>Ruby</option>
+      <option>C++</option>
+    </select>
+
+    <label for="interest">Preferred field of interest*</label>
+    <select id="interest" name="job_application[interest]" required>
+      <option value="">Please select</option>
+      <option>Frontend</option>
+      <option>Backend</option>
+      <option>Mobile</option>
+      <option>Data</option>
+    </select>
+
+    <fieldset>
+      <legend>Are you currently based in Bangkok or open to relocate to Bangkok?*</legend>
+      <label><input type="radio" name="job_application[bangkok]" value="Yes" required> Yes</label>
+      <label><input type="radio" name="job_application[bangkok]" value="No"> No</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Do you have a personal relationship with a current Agoda employee?*</legend>
+      <label><input type="radio" name="job_application[employee]" value="Yes" required> Yes</label>
+      <label><input type="radio" name="job_application[employee]" value="No"> No</label>
+    </fieldset>
+
+    <label for="how_known">If yes, how do you know the employee?</label>
+    <input id="how_known" name="job_application[how_known]" type="text">
+
+    <label for="employee_name">What is the employee's name?</label>
+    <input id="employee_name" name="job_application[employee_name]" type="text">
+
+    <label>
+      <input id="privacy" type="checkbox" name="job_application[privacy]" value="1" required>
+      I consent to the processing of my personal data for recruiting purposes
+    </label>
+
+    <label for="why_company">Why do you want to work here?</label>
+    <textarea id="why_company" name="job_application[why_company]"></textarea>
+
+    <label for="background">Briefly describe your technical background</label>
+    <textarea id="background" name="job_application[background]" required></textarea>
+
+    <label for="salary">Expected salary</label>
+    <input id="salary" name="job_application[salary]" type="text">
+
+    <section id="cover-letter-section">
+      <h2>Cover Letter</h2>
+      <button type="button" id="cover_letter_attach">Attach</button>
+      <button type="button" id="cover_letter_manual">Enter manually</button>
+      <textarea id="cover_letter_text" name="job_application[cover_letter_text]" hidden></textarea>
+    </section>
+
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+  <script>
+    window.__submitClicked = false;
+    window.__formSubmitted = false;
+    document.getElementById("submit_app").addEventListener("click", function () {
+      window.__submitClicked = true;
+    });
+    document.getElementById("application_form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      window.__formSubmitted = true;
+    });
+    document.getElementById("cover_letter_manual").addEventListener("click", function () {
+      var editor = document.getElementById("cover_letter_text");
+      editor.hidden = false;
+      editor.setAttribute("data-ready", "true");
+    });
+    document.getElementById("cover_letter_text").addEventListener("input", function (event) {
+      event.target.setAttribute("data-react-value", event.target.value);
+    });
+  </script>
+</body>
+</html>

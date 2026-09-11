@@ -1,4 +1,7 @@
-from app.company_watch.application_recommendation import recommend_application
+from app.company_watch.application_recommendation import (
+    allows_autonomous_application_workflow,
+    recommend_application,
+)
 from app.company_watch.candidate_constraints import CandidateConstraints
 from app.company_watch.feasibility import ApplicationFeasibility
 from app.company_watch.models import TargetCompany
@@ -229,3 +232,56 @@ def test_target_senior_seniority_can_be_apply_now() -> None:
     )
     assert result.label == "APPLY_NOW"
     assert "relocation support is available" in result.reasons
+
+
+AGODA_LEAD_TITLE = (
+    "Lead Software Engineer - Back End (FinTech) (Bangkok based - Relocation provided)"
+)
+
+
+def test_agoda_lead_software_engineer_is_skip() -> None:
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(label="LIKELY", relocation_support="yes"),
+        constraints=_constraints(),
+        company=_company(),
+        location="Bangkok",
+        seniority=classify_seniority(AGODA_LEAD_TITLE),
+    )
+    assert result.label == "SKIP"
+    assert "lead/manager role is not target IC backend role" in result.reasons
+    assert allows_autonomous_application_workflow(result) is False
+
+
+def test_autonomous_workflow_allows_senior_and_stretch_staff_but_not_skip() -> None:
+    senior = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(label="LIKELY", relocation_support="yes"),
+        constraints=_constraints(),
+        company=_company(),
+        location="Amsterdam",
+        seniority=classify_seniority("Senior Backend Engineer"),
+    )
+    staff = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(label="LIKELY", visa_sponsorship="yes"),
+        constraints=_constraints(),
+        company=_company(),
+        location="Amsterdam",
+        seniority=classify_seniority("Principal Software Engineer"),
+    )
+    lead = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=_feasibility(label="LIKELY", relocation_support="yes"),
+        constraints=_constraints(),
+        company=_company(),
+        location="Bangkok",
+        seniority=classify_seniority(AGODA_LEAD_TITLE),
+    )
+    assert senior.label == "APPLY_NOW"
+    assert allows_autonomous_application_workflow(senior) is True
+    assert staff.label == "CHECK_MANUALLY"
+    assert allows_autonomous_application_workflow(staff) is True
+    assert lead.label == "SKIP"
+    assert allows_autonomous_application_workflow(lead) is False
+    assert allows_autonomous_application_workflow("SKIP") is False

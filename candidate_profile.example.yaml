@@ -1,0 +1,104 @@
+# Synthetic Candidate Profile for autofill.
+# Safe for Git and coding agents. Values are fake.
+#
+# Runtime overlay (not committed): candidate_profile.local.yaml
+# Copy this file, replace values, and keep the local file untracked.
+
+identity:
+  first_name: Ada
+  last_name: Example
+  email: ada.example@example.test
+  phone: "+15555550100"
+  current_location: "Berlin, Germany"
+  country: Germany
+
+professional_links:
+  linkedin: "https://www.linkedin.com/in/ada-example-test"
+  github: "https://github.com/ada-example-test"
+  website: "https://ada.example.test"
+
+employment:
+  current_title: Backend Engineer
+  years_of_experience: 7
+  years_of_relevant_experience: 7
+  notice_period: "30 days"
+  open_to_relocation: true
+  relocation_destinations:
+    - Bangkok
+    - Thailand
+  # Awarded degree is master's-level (including a completed Russian specialist).
+  # Completed postgraduate / aspirantura study is not an awarded doctorate.
+  highest_academic_level: Master's
+  postgraduate_studies_completed: true
+  doctorate_awarded: false
+  professional_tech_stack:
+    - Java
+    - Kotlin
+    - Spring Boot
+    - PostgreSQL
+    - Kafka
+  preferred_fields_of_interest:
+    - Backend
+    - Platform
+  salary_expectations:
+    amount: 80000
+    currency: EUR
+    period: yearly
+    fill_salary: false
+
+work_eligibility:
+  citizenship:
+    - Germany
+  work_authorizations:
+    - country: Germany
+      authorized: true
+  requires_visa_sponsorship: false
+
+application_files:
+  default_resume: resumes/example_java_backend.pdf
+  alternative_resumes: []
+  cover_letter_strategy: generate
+
+employee_relationship:
+  has_relationship: false
+  how_known: null
+  employee_name: null
+
+application_consent:
+  privacy_data_processing: true
+  recruiting_contact: null
+
+application_policy:
+  relocation:
+    willing: true
+  default_no_undeclared_affiliations: true
+  newsletter_opt_in: false
+  sms_interview_updates: false
+  prefer_not_to_disclose_gender: true
+  prior_affiliations:
+    - organization: Deloitte
+      associated: false
+  application_source_preference:
+    - Company Website
+    - Careers Website
+    - Careers Page
+    - Direct Application
+    - LinkedIn
+    - Other
+  question_overrides:
+    - question_contains: "engineering blog"
+      answer: true
+    - question_contains:
+        - "applied"
+        - "past 6 months"
+      answer: false
+
+sensitive:
+  # Factual demographic data. Application forms use ApplicationPolicy
+  # prefer_not_to_disclose_gender and do not send this value.
+  gender: Female
+  ethnicity: null
+  disability: null
+  veteran_status: null
+
+fill_sensitive_fields: false

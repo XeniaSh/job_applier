@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -25,11 +27,10 @@ from app.company_watch.analysis_cache import (
     TargetCompanyAnalysisCache,
 )
 from app.company_watch.application_recommendation import (
-    RECOMMENDATION_APPLY_NOW,
-    RECOMMENDATION_CHECK_MANUALLY,
     RECOMMENDATION_LABELS,
     RECOMMENDATION_SKIP,
     ApplicationRecommendation,
+    allows_autonomous_application_workflow,
     recommend_application,
 )
 from app.company_watch.candidate_constraints import (
@@ -137,9 +138,12 @@ from app.telegram.models import (
     TelegramVacancyCard,
 )
 from app.vacancy_analyzer import VacancyAnalyzer
+from app.application.autofill.cli import register_autofill_command
 
 app = typer.Typer(help="Personal job vacancy analyzer.")
 logger = logging.getLogger(__name__)
+
+register_autofill_command(app)
 
 
 def _load_vacancy_text(path: Path) -> str:
@@ -643,9 +647,6 @@ _ANALYZE_RECOMMENDATION_CHOICES = RECOMMENDATION_LABELS
 _ANALYZE_SENIORITY_CHOICES = SENIORITY_LABELS
 _RUN_TARGET_COMPANY_ANALYZE_LIMIT = 30
 _RUN_TARGET_COMPANY_ANALYZE_LIMIT_PER_COMPANY = 10
-_SENDABLE_TARGET_COMPANY_RECOMMENDATIONS = frozenset(
-    {RECOMMENDATION_APPLY_NOW, RECOMMENDATION_CHECK_MANUALLY}
-)
 
 
 @app.command("analyze-target-companies-greenhouse")
@@ -1312,7 +1313,7 @@ def _run_target_companies_cycle(
 def _should_send_target_company_item(item: _TargetCompanyAnalysisItem) -> bool:
     if item.evaluation is None or item.recommendation is None:
         return False
-    return item.recommendation.label in _SENDABLE_TARGET_COMPANY_RECOMMENDATIONS
+    return allows_autonomous_application_workflow(item.recommendation)
 
 
 _TARGET_COMPANY_SENT_IN_PROCESS: set[tuple[str, str, str]] = set()

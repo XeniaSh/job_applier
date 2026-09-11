@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — React Controls</title>
+  <style>
+    .select__control { border: 1px solid #ccc; padding: 6px; min-height: 32px; cursor: pointer; }
+    .select__multi-value, .select__single-value { display: inline-block; margin-right: 6px; background: #eef; padding: 2px 6px; }
+    .iti { display: flex; gap: 8px; align-items: center; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Senior Backend Engineer</h1>
+  <form id="application_form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+
+    <div class="iti" id="phone-widget">
+      <button type="button" class="iti__selected-country" aria-label="Change country, selected United States (+1)" data-dial-code="1">US +1</button>
+      <ul class="iti__country-list" hidden>
+        <li class="iti__country" data-country-code="uz" data-dial-code="998">Uzbekistan</li>
+        <li class="iti__country" data-country-code="de" data-dial-code="49">Germany</li>
+        <li class="iti__country" data-country-code="us" data-dial-code="1">United States</li>
+      </ul>
+      <span class="iti__selected-dial-code">+1</span>
+      <label for="phone">Phone</label>
+      <input id="phone" name="job_application[phone]" type="tel" required>
+    </div>
+
+    <div class="field" id="tech-field">
+      <label id="tech-label">Which tech stack have you had professional experience with? (Please select top 3 options)</label>
+      <div class="select__control" data-multi="true">
+        <div class="select__value-container">
+          <input id="tech_stack" aria-labelledby="tech-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="tech-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="academic-field">
+      <label id="academic-label">What is your highest academic level?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="academic" aria-labelledby="academic-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="academic-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="gender-field">
+      <label id="gender-label">Gender*</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="gender" aria-labelledby="gender-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="gender-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="country-based-field">
+      <label id="country-based-label">In which country/region are you currently based?*</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="country_based" aria-labelledby="country-based-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="country-based-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="booking-field">
+      <label id="booking-label">Are you presently employed by any company within the Booking Holdings group of companies?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="booking" aria-labelledby="booking-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="booking-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="sms-field">
+      <label id="sms-label">Do you allow us to provide you TEXT/SMS updates of your interview process?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="sms" aria-labelledby="sms-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="sms-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="newsletter-field">
+      <label id="newsletter-label">Email me about other job openings within Booking Holdings entities and recruitment-related newsletters</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="newsletter" aria-labelledby="newsletter-label" role="combobox" aria-autocomplete="list">
+        </div>
+      </div>
+      <div id="newsletter-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="blog-field">
+      <label id="blog-label">Have you read our engineering blog?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="blog" aria-labelledby="blog-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="blog-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="applied-field">
+      <label id="applied-label">Have you applied to this company in the past 6 months?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="applied" aria-labelledby="applied-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="applied-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="relocation-field">
+      <label id="relocation-label">Are you currently based in Bangkok or open to relocate to Bangkok?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="relocation" aria-labelledby="relocation-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="relocation-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="relationship-field">
+      <label id="relationship-label">Do you as a candidate have a personal relationship with a current Agoda employee?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="relationship" aria-labelledby="relationship-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="relationship-list" role="listbox" hidden></div>
+    </div>
+
+    <label for="employee_name">If yes, what is the employee's name?</label>
+    <input id="employee_name" name="job_application[employee_name]" type="text" required>
+
+    <div class="field" id="deloitte-field">
+      <label id="deloitte-label">Please confirm if you are currently or formerly associated with Deloitte or any of its subsidiary entities.</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="deloitte" aria-labelledby="deloitte-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="deloitte-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="source-field">
+      <label id="source-label">How did you hear about this job?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="source" aria-labelledby="source-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="source-list" role="listbox" hidden></div>
+    </div>
+
+    <p>Resume/CV</p>
+    <section id="resume-section">
+      <h2>Resume/CV</h2>
+      <button type="button" id="resume_attach">Attach</button>
+      <button type="button" id="resume_dropbox">Dropbox</button>
+      <button type="button" id="resume_drive">Google Drive</button>
+      <button type="button" id="resume_manual">Enter manually</button>
+      <input id="resume" type="file" style="width:1px;height:1px;opacity:0.01">
+      <textarea id="resume_text" hidden></textarea>
+    </section>
+
+    <input id="cover_letter" type="file" style="width:1px;height:1px;opacity:0.01">
+
+    <section id="cover-letter-section">
+      <h2>Cover Letter</h2>
+      <button type="button" id="cover_letter_attach">Attach</button>
+      <button type="button" id="cover_letter_dropbox">Dropbox</button>
+      <button type="button" id="cover_letter_drive">Google Drive</button>
+      <button type="button" id="cover_letter_manual">Enter manually</button>
+      <textarea id="cover_letter_text" name="job_application[cover_letter_text]" hidden></textarea>
+    </section>
+
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+  <script>
+    window.__submitClicked = false;
+    window.__formSubmitted = false;
+    document.getElementById("submit_app").addEventListener("click", function () {
+      window.__submitClicked = true;
+    });
+    document.getElementById("application_form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      window.__formSubmitted = true;
+    });
+
+    var phoneToggle = document.querySelector(".iti__selected-country");
+    var phoneList = document.querySelector(".iti__country-list");
+    var dialCode = document.querySelector(".iti__selected-dial-code");
+    phoneToggle.addEventListener("click", function () {
+      phoneList.hidden = !phoneList.hidden;
+    });
+    phoneList.querySelectorAll(".iti__country").forEach(function (item) {
+      item.addEventListener("click", function () {
+        var code = item.getAttribute("data-dial-code") || "";
+        phoneToggle.setAttribute("data-dial-code", code);
+        phoneToggle.setAttribute(
+          "aria-label",
+          "Change country, selected " + item.textContent.trim() + " (+" + code + ")"
+        );
+        phoneToggle.textContent = item.textContent.trim() + " +" + code;
+        dialCode.textContent = "+" + code;
+        phoneList.hidden = true;
+      });
+    });
+
+    function setupReactSingle(fieldId, inputId, listId, options) {
+      var field = document.getElementById(fieldId);
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      var control = field.querySelector(".select__control");
+      var valueNode = field.querySelector(".select__single-value");
+      function render() {
+        list.innerHTML = "";
+        list.hidden = false;
+        options.forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            valueNode.textContent = text;
+            input.value = "";
+            list.hidden = true;
+          });
+          list.appendChild(option);
+        });
+      }
+      control.addEventListener("click", function (event) {
+        if (event.target === input) {
+          render();
+          return;
+        }
+        render();
+      });
+      input.addEventListener("focus", render);
+      input.addEventListener("input", function () {
+        /* Writing true/false into the input must NOT select Yes/No. */
+      });
+    }
+
+    function setupReactMulti(fieldId, inputId, listId, options) {
+      var field = document.getElementById(fieldId);
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      var control = field.querySelector(".select__control");
+      var valueContainer = field.querySelector(".select__value-container");
+      var selected = [];
+      function renderChips() {
+        valueContainer.querySelectorAll(".select__multi-value").forEach(function (node) {
+          node.remove();
+        });
+        selected.forEach(function (text) {
+          var chip = document.createElement("div");
+          chip.className = "select__multi-value";
+          var label = document.createElement("div");
+          label.className = "select__multi-value__label";
+          label.textContent = text;
+          chip.appendChild(label);
+          valueContainer.insertBefore(chip, input);
+        });
+        input.value = "";
+      }
+      function openMenu() {
+        list.innerHTML = "";
+        list.hidden = false;
+        options.filter(function (text) { return selected.indexOf(text) === -1; }).forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            if (selected.indexOf(text) === -1) {
+              selected.push(text);
+            }
+            renderChips();
+            list.hidden = true;
+          });
+          list.appendChild(option);
+        });
+      }
+      control.addEventListener("click", function () { openMenu(); });
+      input.addEventListener("focus", function () { openMenu(); });
+      input.addEventListener("input", function () {
+        if (input.value === "") {
+          selected = [];
+          renderChips();
+          return;
+        }
+        var exact = options.find(function (text) {
+          return text.toLowerCase() === input.value.toLowerCase();
+        });
+        if (exact && list.hidden) {
+          selected = [exact];
+          renderChips();
+        }
+      });
+    }
+
+    setupReactMulti("tech-field", "tech_stack", "tech-list", ["Javascript", "Java", "Python", "Go", "Kotlin", "Spring Boot", "Ruby"]);
+    setupReactSingle("academic-field", "academic", "academic-list", [
+      "Highschool",
+      "Diploma",
+      "Bachelor's Degree",
+      "Master's Degree",
+      "Doctorate Degree"
+    ]);
+    setupReactSingle("gender-field", "gender", "gender-list", ["Prefer not to disclose", "Female", "Genderqueer", "Male"]);
+    setupReactSingle("country-based-field", "country_based", "country-based-list", ["Germany", "Thailand", "Uzbekistan", "United States"]);
+    setupReactSingle("booking-field", "booking", "booking-list", ["Yes", "No"]);
+    setupReactSingle("sms-field", "sms", "sms-list", ["Yes", "No"]);
+    setupReactSingle("newsletter-field", "newsletter", "newsletter-list", ["Yes", "No"]);
+    setupReactSingle("blog-field", "blog", "blog-list", ["Yes", "No"]);
+    setupReactSingle("applied-field", "applied", "applied-list", ["Yes", "No"]);
+    setupReactSingle("relocation-field", "relocation", "relocation-list", ["Yes", "No"]);
+    setupReactSingle("relationship-field", "relationship", "relationship-list", ["Yes", "No"]);
+    setupReactSingle("deloitte-field", "deloitte", "deloitte-list", [
+      "Yes, I am a current/an ex-employee of Deloitte or its subsidiaries",
+      "No, I am not a current/an ex-employee of Deloitte or any of its subsidiary entities"
+    ]);
+    setupReactSingle("source-field", "source", "source-list", [
+      "Employee Referral",
+      "Company Website",
+      "LinkedIn",
+      "Recruiter",
+      "University",
+      "Other"
+    ]);
+
+    document.getElementById("resume_manual").addEventListener("click", function () {
+      var editor = document.getElementById("resume_text");
+      editor.hidden = false;
+    });
+    document.getElementById("cover_letter_manual").addEventListener("click", function () {
+      var editor = document.getElementById("cover_letter_text");
+      editor.hidden = false;
+      editor.setAttribute("data-ready", "true");
+    });
+    document.getElementById("cover_letter_text").addEventListener("input", function (event) {
+      event.target.setAttribute("data-react-value", event.target.value);
+    });
+  </script>
+</body>
+</html>

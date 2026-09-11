@@ -22,6 +22,24 @@ RECOMMENDATION_LABELS = (
 )
 
 
+def allows_autonomous_application_workflow(
+    recommendation: ApplicationRecommendation | str,
+) -> bool:
+    """True when the vacancy may enter the normal discovery → application path.
+
+    SKIP vacancies stay out of automatic Telegram delivery and must not be
+    selected for automatic application. An explicit CLI invocation that
+    already names source + external_id is a manual smoke-test path and
+    does not use this gate.
+    """
+    label = (
+        recommendation.label
+        if isinstance(recommendation, ApplicationRecommendation)
+        else str(recommendation).strip().upper()
+    )
+    return label in {RECOMMENDATION_APPLY_NOW, RECOMMENDATION_CHECK_MANUALLY}
+
+
 @dataclass(frozen=True)
 class ApplicationRecommendation:
     label: str

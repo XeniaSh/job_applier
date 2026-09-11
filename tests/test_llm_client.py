@@ -29,6 +29,13 @@ _VALID_EN_SUMMARY = (
     "role because it focuses on the same core technologies."
 )
 
+_SHORT_VALID_EN_SUMMARY = (
+    "I am a Java Backend Engineer with around seven years of experience building production "
+    "backend services with Java and Kotlin. I have implemented integrations and improved the "
+    "reliability of production systems. My experience is relevant to this Senior Java Developer "
+    "role because it focuses on the same core technologies."
+)
+
 
 def _chat_response(content: str, status_code: int = 200) -> httpx.Response:
     return httpx.Response(
@@ -405,6 +412,66 @@ def test_no_more_than_four_technologies_and_no_redis() -> None:
     lower = result.cover_letter.lower()
     assert "redis" not in lower
     assert route.call_count == 2
+
+
+@respx.mock
+def test_cover_letter_retry_includes_too_many_technologies_reason() -> None:
+    too_many = (
+        "I am a Java Backend Engineer with around seven years of experience using Java, "
+        "Spring Boot, Kafka, PostgreSQL, Docker, Kubernetes and microservices in distributed systems. "
+        "I have built production services. My experience is relevant to this Java Backend Engineer role."
+    )
+    route = respx.post("https://llm.local/chat/completions").mock(
+        side_effect=[
+            _chat_response(
+                json.dumps(
+                    {
+                        "language": "en",
+                        "cover_letter": too_many,
+                        "used_resume": "java-backend",
+                    }
+                )
+            ),
+            _chat_response(
+                json.dumps(
+                    {
+                        "language": "en",
+                        "cover_letter": _SHORT_VALID_EN_SUMMARY,
+                        "used_resume": "java-backend",
+                    }
+                )
+            ),
+        ]
+    )
+    client = LLMClient(api_url="https://llm.local", api_key="secret", model="test-model")
+    result = client.create_cover_letter(
+        prompt="PROMPT",
+        candidate_profile="Java Backend Engineer with 7 years of commercial backend experience.",
+        vacancy_text="Title: Java Backend Engineer",
+        analysis=_evaluation(),
+        recommended_resume="java-backend",
+    )
+    assert route.call_count == 2
+    second_body = route.calls[1].request.content.decode()
+    assert "too many technologies" in second_body.lower()
+    assert "java and kotlin" in result.cover_letter.lower()
+    assert "kubernetes" not in result.cover_letter.lower()
+
+
+def test_short_cover_letter_with_two_core_technologies_passes_validation() -> None:
+    result = CoverLetterResult(
+        language="en",
+        cover_letter=_SHORT_VALID_EN_SUMMARY,
+        used_resume="java-backend",
+    )
+    _validate_cover_letter(
+        result=result,
+        vacancy_text="Title: Senior Java Developer",
+        candidate_profile="Java Backend Engineer with 7 years of commercial backend experience.",
+        preferred_language="en",
+        grammatical_gender="neutral",
+        recommended_resume="java-backend",
+    )
 
 
 @respx.mock

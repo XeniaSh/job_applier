@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Cover Letter React clear</title>
+  <style>[hidden] { display: none !important; }</style>
+</head>
+<body>
+  <form id="application_form" data-ats="greenhouse">
+    <section id="resume-section">
+      <h2>Resume/CV</h2>
+      <button type="button" id="resume_manual">Enter manually</button>
+      <textarea id="resume_text" hidden></textarea>
+    </section>
+    <input id="cover_letter" type="file">
+    <section id="cover-letter-section">
+      <h2>Cover Letter</h2>
+      <button type="button" id="cover_letter_attach">Attach</button>
+      <button type="button" id="cover_letter_dropbox">Dropbox</button>
+      <button type="button" id="cover_letter_drive">Google Drive</button>
+      <button type="button" id="cover_letter_manual">Enter manually</button>
+      <textarea id="cover_letter_text" name="job_application[cover_letter_text]" hidden></textarea>
+    </section>
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+  <script>
+    document.getElementById("resume_manual").addEventListener("click", function () {
+      document.getElementById("resume_text").hidden = false;
+    });
+    document.getElementById("cover_letter_manual").addEventListener("click", function () {
+      var editor = document.getElementById("cover_letter_text");
+      editor.hidden = false;
+      editor.addEventListener("input", function (event) {
+        event.target.value = "";
+        event.target.setAttribute("data-react-value", "");
+      });
+    });
+  </script>
+</body>
+</html>
