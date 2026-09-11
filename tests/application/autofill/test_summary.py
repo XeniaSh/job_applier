@@ -6,7 +6,7 @@ from app.application.autofill.models import (
     FieldClassification,
     stage1_autofill_result,
 )
-from app.application.autofill.summary import render_autofill_summary
+from app.application.autofill.summary import format_privacy_acknowledgement_report, render_autofill_summary
 
 
 def test_summary_lists_labels_not_pii_values() -> None:
@@ -53,6 +53,39 @@ def test_summary_lists_labels_not_pii_values() -> None:
     assert "NOT PERFORMED" in text
     assert "Cover letter:" in text
     assert "Not filled" in text
+
+
+def test_summary_includes_privacy_diagnostic_block() -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:adyen",
+        external_id="7342887",
+        status=AutofillStatus.READY_FOR_REVIEW,
+        unresolved_required_fields=[
+            AutofillFieldResult(
+                label="Point of Data Transfer — Acknowledge/Confirm",
+                classification=FieldClassification.UNKNOWN_REQUIRED,
+                required=True,
+            )
+        ],
+        warnings=[
+            format_privacy_acknowledgement_report(
+                {
+                    "discovered": True,
+                    "classified": "required_privacy",
+                    "control_type": "hidden input + styled/label-backed checkbox",
+                    "interaction_attempted": "click_associated_label",
+                    "readback_checked": False,
+                    "failure_reason": "checked_state_did_not_persist",
+                }
+            )
+        ],
+    )
+    text = render_autofill_summary(result)
+    assert "privacy acknowledgement:" in text
+    assert "discovered: yes" in text
+    assert "classified: required_privacy" in text
+    assert "readback_checked: false" in text
+    assert "failure_reason: checked_state_did_not_persist" in text
 
 
 def test_summary_skips_blank_labels() -> None:

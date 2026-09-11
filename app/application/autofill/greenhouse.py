@@ -34,6 +34,7 @@ _BOOLEAN_CHOICE_KINDS = frozenset(
         QuestionKind.VISA_SPONSORSHIP,
         QuestionKind.WORK_AUTHORIZATION,
         QuestionKind.RELOCATION,
+        QuestionKind.OFFICE_WORK,
         QuestionKind.EMPLOYEE_RELATIONSHIP,
         QuestionKind.PRIOR_AFFILIATION,
         QuestionKind.APPLICATION_SOURCE,
@@ -58,6 +59,36 @@ _FORM_READY_SELECTOR = (
 _COMBOBOX_IDS = frozenset({"country", "candidate-location", "candidate_location"})
 
 logger = logging.getLogger(__name__)
+
+_CHECKBOX_QUESTION_META_JS = """el => {
+    const option = ((el.closest('label') && el.closest('label').innerText)
+        || el.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+    let node = el.parentElement;
+    let root = el.parentElement;
+    while (node && node.tagName && !['FORM', 'BODY', 'HTML'].includes(node.tagName)) {
+        const text = (node.innerText || '').replace(/\\s+/g, ' ').trim();
+        const marker = String(node.className || '') + ' ' + String(node.id || '');
+        const named = /question/i.test(marker)
+            || /(?:^|\\s)field\\b/i.test(marker)
+            || ['FIELDSET', 'SECTION'].includes(node.tagName);
+        const broader = option
+            ? (text.toLowerCase().includes(option.toLowerCase()) && text.length > option.length + 6)
+            : text.length > 24;
+        if (named || broader) {
+            root = node;
+            break;
+        }
+        node = node.parentElement;
+    }
+    const text = ((root && root.innerText) || '').replace(/\\s+/g, ' ').trim();
+    const firstLine = ((root && root.innerText) || '').split('\\n').map(s => s.trim()).find(Boolean) || '';
+    const ariaRequired = ((root && root.getAttribute('aria-required')) || '').toLowerCase();
+    const markedRequired = !!(root && root.querySelector(
+        '[aria-required="true"], [class*="asterisk"], [data-required="true"]'
+    ));
+    const required = ariaRequired === 'true' || markedRequired || /\\*/.test(firstLine);
+    return {context: text, required};
+}"""
 
 
 class GreenhouseFormError(Exception):
@@ -98,6 +129,7 @@ class GreenhouseAdapter:
 
     last_cover_letter_error: str | None = None
     last_multiselect_selected: list[str] | None = None
+    last_privacy_trace: dict[str, object] | None = None
 
     def recognize(self, page: Page) -> bool:
         return is_greenhouse_application_page(page)
@@ -127,7 +159,7 @@ class GreenhouseAdapter:
         fields: list[DiscoveredField] = []
         seen_radio_names: set[str] = set()
         seen_ids: set[str] = set()
-        controls = form.locator("input, textarea, select")
+        controls = form.locator("input, textarea, select, [role='checkbox']:not(input)")
         for index in range(controls.count()):
             locator = controls.nth(index)
             field = _discover_control(page, locator, seen_radio_names)
@@ -163,7 +195,20 @@ class GreenhouseAdapter:
                 self.last_multiselect_selected = selected
                 return bool(selected)
             if field.field_type == "checkbox":
-                return _fill_checkbox(locator, classified.value)
+                trace = react_controls.set_checkbox_with_trace(
+                    page, locator, _checkbox_should_check(classified.value)
+                )
+                self._record_privacy_trace(classified, trace)
+                logger.info(
+                    "checkbox fill label=%r control_type=%s attempted=%s readback=%s ok=%s reason=%s",
+                    field.label,
+                    trace.get("control_type"),
+                    trace.get("interaction_attempted"),
+                    trace.get("readback_checked"),
+                    trace.get("success"),
+                    trace.get("failure_reason"),
+                )
+                return bool(trace["success"])
             if field.field_type == "radio":
                 return _fill_radio(page, field, classified.value)
             if classified.kind is QuestionKind.COUNTRY:
@@ -171,7 +216,20 @@ class GreenhouseAdapter:
                     return True
                 return _fill_combobox(page, locator, str(classified.value))
             if classified.kind in _MENU_CHOICE_KINDS or isinstance(classified.value, bool):
-                return _fill_choice(page, locator, field, classified.value, kind=classified.kind)
+                ok = _fill_choice(page, locator, field, classified.value, kind=classified.kind)
+                if classified.kind is QuestionKind.PRIVACY_CONSENT:
+                    self.last_privacy_trace = {
+                        "discovered": True,
+                        "classified": (
+                            "required_privacy" if field.required else "privacy_optional"
+                        ),
+                        "control_type": field.field_type,
+                        "interaction_attempted": "select_affirmative_option",
+                        "readback_checked": ok,
+                        "failure_reason": None if ok else "choice_select_did_not_persist",
+                        "locator": _field_locator_debug(field),
+                    }
+                return ok
             if classified.kind is QuestionKind.PHONE:
                 return _fill_phone(page, locator, str(classified.value), classified.country)
             if classified.kind is QuestionKind.YEARS_EXPERIENCE:
@@ -190,6 +248,24 @@ class GreenhouseAdapter:
         except PlaywrightError:
             return False
         return False
+
+    def _record_privacy_trace(self, classified: ClassifiedField, trace: dict[str, object]) -> None:
+        field = classified.field
+        if classified.kind is not QuestionKind.PRIVACY_CONSENT and not _looks_like_privacy_field(field):
+            return
+        if classified.kind is QuestionKind.PRIVACY_CONSENT:
+            classified_as = "required_privacy" if field.required else "privacy_optional"
+        else:
+            classified_as = classified.kind.value
+        self.last_privacy_trace = {
+            "discovered": True,
+            "classified": classified_as,
+            "control_type": trace.get("control_type") or field.field_type,
+            "interaction_attempted": trace.get("interaction_attempted") or "none",
+            "readback_checked": trace.get("readback_checked"),
+            "failure_reason": trace.get("failure_reason"),
+            "locator": _field_locator_debug(field),
+        }
 
     def fill_cover_letter(self, page: Page, text: str) -> bool:
         self.last_cover_letter_error = None
@@ -278,7 +354,7 @@ class GreenhouseAdapter:
             return names[0] if names else None
         locator = _field_locator(page, field)
         if field.field_type == "checkbox":
-            return "true" if locator.is_checked() else "false"
+            return "true" if react_controls.is_checked(locator) else "false"
         if field.field_type == "radio":
             if not field.name:
                 return None
@@ -359,6 +435,13 @@ def _discover_control(
         )
     field_type = _field_type(tag, input_type, locator)
     label = _control_label(page, locator)
+    context = ""
+    context_required = False
+    if field_type == "checkbox":
+        if tag != "input" and _group_has_native_checkbox(locator):
+            return None
+        context, context_required = _checkbox_question_meta(locator)
+        label = _checkbox_display_label(label, context)
     if _is_decoy_control(locator, label, name, element_id, field_type):
         return None
     if _is_cover_letter_label(label, name, element_id):
@@ -368,19 +451,26 @@ def _discover_control(
     options = []
     if field_type in {"select", "multiselect"}:
         options = _select_options(locator)
+    required = _is_required(locator)
+    if field_type == "checkbox" and not required:
+        required = context_required
     return DiscoveredField(
         label=label,
         name=name,
         field_type=field_type,
-        required=_is_required(locator),
+        required=required,
         options=options,
         current_value=_current_value(locator, field_type),
         autocomplete=locator.get_attribute("autocomplete"),
         element_id=element_id,
+        context=context if field_type == "checkbox" else "",
     )
 
 
 def _field_type(tag: str, input_type: str, locator: Locator) -> str:
+    role = (locator.get_attribute("role") or "").lower()
+    if role == "checkbox" and input_type != "checkbox":
+        return "checkbox"
     if tag == "textarea":
         return "textarea"
     if tag == "select":
@@ -416,7 +506,7 @@ def _is_decoy_control(
     element_id: str | None,
     field_type: str,
 ) -> bool:
-    if field_type == "file":
+    if field_type in {"file", "checkbox"}:
         return False
     ident = (element_id or "").lower()
     if ident.startswith("react-select") or ident.endswith("-input"):
@@ -433,11 +523,94 @@ def _is_decoy_control(
     return not ident
 
 
+def _group_has_native_checkbox(locator: Locator) -> bool:
+    try:
+        return bool(
+            locator.evaluate(
+                """el => {
+                    const group = el.closest('label') || el.parentElement;
+                    return !!(group && group.querySelector('input[type="checkbox"]'));
+                }"""
+            )
+        )
+    except PlaywrightError:
+        return False
+
+
+def _checkbox_question_meta(locator: Locator) -> tuple[str, bool]:
+    try:
+        raw = locator.evaluate(_CHECKBOX_QUESTION_META_JS)
+    except PlaywrightError:
+        return "", False
+    if not isinstance(raw, dict):
+        return "", False
+    context = " ".join(str(raw.get("context") or "").split())
+    return context, bool(raw.get("required"))
+
+
+def _looks_like_privacy_field(field: DiscoveredField) -> bool:
+    text = f"{field.label} {field.context}".lower()
+    return any(
+        term in text
+        for term in (
+            "data transfer",
+            "privacy notice",
+            "privacy policy",
+            "acknowledge/confirm",
+            "applicant privacy",
+            "processing my application data",
+        )
+    )
+
+
+def _field_locator_debug(field: DiscoveredField) -> str:
+    parts = [field.field_type]
+    if field.element_id:
+        parts.append(f"id={field.element_id}")
+    if field.name:
+        parts.append(f"name={field.name}")
+    return " ".join(parts)
+
+
 def _is_required(locator: Locator) -> bool:
     if locator.get_attribute("required") is not None:
         return True
     aria = (locator.get_attribute("aria-required") or "").lower()
     return aria == "true"
+
+
+def _checkbox_display_label(option_label: str, context: str) -> str:
+    option = " ".join((option_label or "").split())
+    heading = " ".join((context or "").split())
+    if heading:
+        heading = heading.replace("*", " ").strip()
+        # Section title is the start of the context, before help copy.
+        for separator in (" Information ", " I ", ". "):
+            if separator.strip() in heading:
+                heading = heading.split(separator)[0].strip()
+                break
+        if len(heading) > 80:
+            heading = heading[:80].rsplit(" ", 1)[0]
+    generic = option.lower().rstrip("*").strip() in {
+        "acknowledge",
+        "confirm",
+        "acknowledge/confirm",
+        "i agree",
+        "i accept",
+        "agree",
+        "accept",
+    }
+    if generic and heading:
+        return f"{heading} — {option}" if option else heading
+    if option:
+        return option
+    return heading
+
+
+def _checkbox_should_check(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "on", "acknowledge", "confirm", "acknowledge/confirm"}
 
 
 def _is_required_group(page: Page, name: str) -> bool:
@@ -528,7 +701,7 @@ def _current_value(locator: Locator, field_type: str) -> str | None:
     if field_type == "file":
         return None
     if field_type == "checkbox":
-        return "true" if locator.is_checked() else "false"
+        return "true" if react_controls.is_checked(locator) else "false"
     try:
         value = locator.input_value()
     except PlaywrightError:
@@ -946,15 +1119,6 @@ def _fill_radio(page: Page, field: DiscoveredField, value: str | bool) -> bool:
             radio.check()
             return True
     return False
-
-
-def _fill_checkbox(locator: Locator, value: str | bool) -> bool:
-    should_check = value is True or str(value).lower() in {"true", "1", "yes", "on"}
-    if should_check:
-        locator.check()
-    else:
-        locator.uncheck()
-    return True
 
 
 def _fill_years(page: Page, locator: Locator, field: DiscoveredField, value: object) -> bool:

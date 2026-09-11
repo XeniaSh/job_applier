@@ -223,6 +223,12 @@ TASK-069..072 Stage 1J fourth smoke-test follow-ups
     ↓
 TASK-073..074 Stage 1K academic level + seniority gating
     ↓
+TASK-075 Stage 1L Adyen cross-company Greenhouse smoke
+    ↓
+TASK-076 Stage 1M office/hybrid + required privacy acknowledgements
+    ↓
+TASK-077 Stage 1N privacy checkbox interaction / live Adyen remaining gap
+    ↓
 TASK-037..039 Stage 2 Telegram
     ↓
 (Stage 3 LLM remaining polish, if any)
@@ -1093,6 +1099,57 @@ Do not hardcode Agoda selectors. Education is CandidateProfile / ATS-independent
 - **Goal:** Confirm Lead Software Engineer titles (including Agoda 7044713) are `LEAD_MANAGER` / `SKIP`. Staff/Principal remain stretch `CHECK_MANUALLY`. Senior IC can be `APPLY_NOW` when otherwise eligible. The normal autonomous workflow must not auto-apply/autofill SKIP vacancies. Explicit `autofill SOURCE EXTERNAL_ID` must still run for a SKIP smoke-test vacancy. Do not put this gate in the Greenhouse adapter.
 - **Area:** `application_recommendation.allows_autonomous_application_workflow`, Target Companies send path, autofill CLI isolation tests
 - **Verification:** Lead title SKIP and not Telegram-sent; Senior sent when eligible; AutofillService/CLI do not consult recommendation.
+
+---
+
+## Stage 1L — Cross-company Greenhouse smoke (Adyen)
+
+Do not hardcode Adyen selectors or vacancy-specific answers. The goal is to prove Stage 1 Greenhouse autofill is reusable, not Agoda-specific.
+
+### TASK-075 — Second live Greenhouse smoke: Adyen Unified Platform
+
+- **Status:** in_progress
+- **Depends on:** TASK-074 (Agoda Stage 1 smoke passed sufficiently)
+- **Goal:** Select a live Adyen Greenhouse IC vacancy, audit the adapter for company-specific coupling, run fixture tests, and give the user an exact CLI command. Do **not** run the live headed browser from the agent.
+- **Area:** `PROGRESS.md`, `docs/autofill_smoke.md`; no adapter change unless leakage is found
+- **Selected vacancy:** `Software Engineer (Java) - Unified Platform` / `target_company:greenhouse:adyen` / `7342887` (Amsterdam, ordinary IC, cached recommendation `APPLY_NOW`). Ranked above Senior Financial Products `7573921` (`CHECK_MANUALLY`) because it is the only current Adyen `APPLY_NOW` Java IC role.
+- **Acceptance criteria:**
+  - Agoda/Booking/Deloitte/engineering-blog answers are not hardcoded in the Greenhouse adapter.
+  - CandidateProfile / ApplicationPolicy / question overrides remain the answer owners.
+  - Cover-letter generation uses the resolved vacancy context.
+  - User runs `uv run python -m app autofill target_company:greenhouse:adyen 7342887` and does not click Submit.
+- **Verification:** Static coupling audit + existing autofill/policy/Playwright fixture tests. Live visual confirmation is a user step.
+
+### TASK-076 — Office/hybrid policy + required privacy acknowledgement checkboxes
+TASK-077 — Greenhouse privacy checkbox interaction (label-backed / React)
+
+- **Status:** done
+- **Depends on:** TASK-075 (Adyen live form remaining gaps)
+- **Goal:** Fill office/hybrid attendance questions Yes from generic ApplicationPolicy, and auto-check only required application/recruitment privacy acknowledgements (including Point of Data Transfer / Acknowledge/Confirm). Do not auto-check marketing, SMS, legal certifications, or work-authorization declarations. Greenhouse only discovers, clicks, waits, and verifies visible/checked state.
+- **Area:** `ApplicationPolicy`, question mapper, acknowledgement classifier, Greenhouse checkbox interaction / read-back
+- **Acceptance criteria:**
+  - Office/hybrid willingness (N days in office, hybrid schedule, onsite at the job location) maps to the visible Yes option. Not Amsterdam/Adyen-specific.
+  - Office policy does not imply current location or work authorization.
+  - Required privacy/data-transfer/privacy-notice acknowledgements are checked only when classified as safe application-privacy and read-back `checked=true`.
+  - Newsletter / talent-pool / SMS remain No / unchecked.
+  - Unknown legal declarations (criminal, certify-true-and-complete) stay unresolved.
+  - Click is not treated as success; Playwright checked/visible state is.
+- **Verification:** Mapper unit tests + Playwright fixture with office Yes/No, Point of Data Transfer checkbox, newsletter, SMS, and unsafe legal checkboxes. Do not run the live Adyen browser from the agent.
+
+---
+
+### TASK-077 — Greenhouse privacy checkbox interaction (label-backed / React)
+
+- **Status:** done
+- **Depends on:** TASK-076 (office/hybrid Yes verified live; Point of Data Transfer still unchecked)
+- **Goal:** The required privacy acknowledgement is discovered, classified, and actually checked in the browser. Do not change ApplicationPolicy. Fix generic Greenhouse checkbox interaction and read-back for hidden/styled/label-backed controls. If it fails again, the CLI summary must show a privacy acknowledgement diagnostic block.
+- **Area:** Greenhouse checkbox discovery context, `react_controls` checkbox strategies, autofill summary diagnostics
+- **Acceptance criteria:**
+  - Ancestor question copy (not only `fieldset` / `.field` / `[class*=question]`) is used so `Acknowledge/Confirm` inherits Point of Data Transfer / Applicant Privacy Notice context.
+  - Interaction tries user-like strategies: visible option text, associated label, `role=checkbox`, then `locator.check()` only for a real enabled checkbox. Click is not success; `input.checked` or `aria-checked="true"` after React settle is.
+  - A realistic fixture matches a visually hidden `question_*[]` checkbox plus label-backed Acknowledge/Confirm, including React reverting programmatic `.check()`.
+  - Newsletter remains unchecked. No Submit. No Adyen-specific selectors.
+- **Verification:** Playwright fixture tests + mapper/option unit tests. Do not run the live Adyen browser from the agent.
 
 ---
 

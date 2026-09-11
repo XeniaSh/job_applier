@@ -360,6 +360,30 @@ class RelocationPolicy(BaseModel):
     willing: bool | None = None
 
 
+class OfficeWorkPolicy(BaseModel):
+    """Willingness to meet a stated office/hybrid attendance requirement.
+
+    This does not imply current residence in that city, local work
+    authorization, or that the candidate already works onsite.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    willing: bool | None = True
+
+
+class PrivacyAcknowledgementPolicy(BaseModel):
+    """Auto-acknowledge required application/recruitment privacy notices.
+
+    Does not cover marketing, newsletters, SMS, talent-pool retention, or
+    unrelated legal declarations.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    auto_acknowledge_required: bool = True
+
+
 class PriorAffiliation(BaseModel):
     """Explicit current or former association with a named organization."""
 
@@ -445,6 +469,10 @@ class ApplicationPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     relocation: RelocationPolicy = Field(default_factory=RelocationPolicy)
+    office_work: OfficeWorkPolicy = Field(default_factory=OfficeWorkPolicy)
+    privacy_acknowledgement: PrivacyAcknowledgementPolicy = Field(
+        default_factory=PrivacyAcknowledgementPolicy
+    )
     default_no_undeclared_affiliations: bool = True
     prior_affiliations: list[PriorAffiliation] = Field(default_factory=list)
     application_source_preference: list[str] = Field(
@@ -656,6 +684,30 @@ class CandidateProfile(BaseModel):
         if self.application_policy.prefer_not_to_disclose_gender:
             return "prefer not to disclose"
         return self.sensitive.gender
+
+    def office_work_answer(self) -> bool | None:
+        """Answer office/hybrid attendance questions. Does not change location or work auth."""
+        return self.application_policy.office_work.willing
+
+    def may_auto_acknowledge_required_privacy(self) -> bool:
+        if self.application_consent.privacy_data_processing is False:
+            return False
+        return bool(self.application_policy.privacy_acknowledgement.auto_acknowledge_required)
+
+    def privacy_acknowledgement_answer(self, *, required: bool) -> bool | None:
+        """Answer a classified application-privacy acknowledgement.
+
+        Required notices may be auto-acknowledged from ApplicationPolicy.
+        Optional notices need explicit ``application_consent.privacy_data_processing``.
+        """
+        explicit = self.application_consent.privacy_data_processing
+        if explicit is False:
+            return False
+        if required and self.may_auto_acknowledge_required_privacy():
+            return True
+        if explicit is True:
+            return True
+        return None
 
     def newsletter_opt_in_answer(self) -> bool:
         return bool(self.application_policy.newsletter_opt_in)

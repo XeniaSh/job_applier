@@ -71,6 +71,10 @@ application_consent:
 application_policy:
   relocation:
     willing: true
+  office_work:
+    willing: true
+  privacy_acknowledgement:
+    auto_acknowledge_required: true
   default_no_undeclared_affiliations: true
   newsletter_opt_in: false
   sms_interview_updates: false

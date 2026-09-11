@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.application.autofill.options import (
     label_matches,
     match_academic_option,
+    match_affirmative_option,
     match_application_source,
     match_gender_option,
     match_option,
@@ -113,6 +114,14 @@ def test_match_yes_no_uses_visible_labels_not_true_false() -> None:
     ]
     assert match_yes_no(False, long_no).startswith("No")
     assert match_yes_no(True, long_no).startswith("Yes")
+
+
+def test_match_affirmative_option_accepts_acknowledge_confirm() -> None:
+    options = ["Acknowledge/Confirm"]
+    assert match_yes_no(True, options) is None
+    assert match_affirmative_option(True, options) == "Acknowledge/Confirm"
+    assert match_affirmative_option(True, ["Please select", "I acknowledge"]) == "I acknowledge"
+    assert match_affirmative_option(True, ["Yes", "No"]) == "Yes"
 
 
 def test_match_application_source_prefers_website_over_linkedin() -> None:

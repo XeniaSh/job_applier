@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — Privacy Revert</title>
+</head>
+<body>
+  <form id="application-form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+    <div>
+      <div>Point of Data Transfer *</div>
+      <p>
+        Application data will be held and used for considering the application.
+        See the Applicant Privacy Notice.
+      </p>
+      <input id="question_locked" type="checkbox" name="question_locked[]" value="1">
+      <label for="question_locked">Acknowledge/Confirm</label>
+    </div>
+    <button type="submit">Submit Application</button>
+  </form>
+  <script>
+    (function () {
+      var input = document.getElementById("question_locked");
+      var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked");
+      function revert() { desc.set.call(input, false); input.setAttribute("aria-checked", "false"); }
+      Object.defineProperty(input, "checked", {
+        configurable: true,
+        get: function () { return false; },
+        set: function () { queueMicrotask(revert); }
+      });
+      document.querySelector("label[for='question_locked']").addEventListener("click", function (event) {
+        event.preventDefault();
+        revert();
+      });
+    })();
+  </script>
+</body>
+</html>

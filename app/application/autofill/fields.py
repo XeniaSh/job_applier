@@ -13,3 +13,4 @@ class DiscoveredField:
     current_value: str | None = None
     autocomplete: str | None = None
     element_id: str | None = None
+    context: str = ""

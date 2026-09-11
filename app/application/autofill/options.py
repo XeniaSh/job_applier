@@ -112,6 +112,39 @@ def match_yes_no(value: bool, options: list[str]) -> str | None:
     return None
 
 
+_AFFIRMATIVE_ACK_LABELS = (
+    "acknowledge/confirm",
+    "acknowledge",
+    "confirm",
+    "i acknowledge",
+    "i confirm",
+    "i agree",
+    "i accept",
+    "i have read and acknowledge",
+)
+
+
+def match_affirmative_option(value: bool, options: list[str]) -> str | None:
+    """Map a semantic yes onto Yes/No or acknowledgement options.
+
+    Privacy/data-transfer questions often offer Acknowledge/Confirm rather than Yes.
+    """
+    matched = match_yes_no(value, options)
+    if matched is not None:
+        return matched
+    if not value:
+        return None
+    labels = [item.strip() for item in options if item and item.strip()]
+    lowered = {item.lower(): item for item in labels}
+    for token in _AFFIRMATIVE_ACK_LABELS:
+        if token in lowered:
+            return lowered[token]
+    for item in labels:
+        if "acknowledge" in item.lower():
+            return item
+    return None
+
+
 def _yes_no_prefix_match(option: str, value: bool) -> bool:
     cleaned = option.strip().lower()
     if value:

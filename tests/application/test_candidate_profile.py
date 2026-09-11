@@ -98,6 +98,23 @@ def test_relocation_does_not_imply_work_authorization() -> None:
     assert profile.work_authorization_for("Thailand") is None
 
 
+def test_office_work_willingness_does_not_imply_location_or_authorization() -> None:
+    profile = CandidateProfile.model_validate(
+        _valid_payload(
+            application_policy={"office_work": {"willing": True}},
+            work_eligibility={
+                "citizenship": [],
+                "work_authorizations": [],
+                "requires_visa_sponsorship": None,
+            },
+        )
+    )
+    assert profile.office_work_answer() is True
+    assert profile.identity.current_location == "Berlin, Germany"
+    assert profile.work_authorization_for("Netherlands") is None
+    assert profile.work_authorization_for("Amsterdam") is None
+
+
 def test_missing_required_identity_fields() -> None:
     payload = _valid_payload()
     identity = dict(payload["identity"])  # type: ignore[arg-type]

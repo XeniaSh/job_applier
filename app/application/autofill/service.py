@@ -16,6 +16,7 @@ from app.application.autofill.browser import (
 from app.application.autofill.classifier import ClassifiedField, classify_field
 from app.application.autofill.greenhouse import GreenhouseAdapter, GreenhouseFormError
 from app.application.autofill.logging import log_autofill_result
+from app.application.autofill.summary import format_privacy_acknowledgement_report
 from app.application.autofill.models import (
     AutofillFieldResult,
     AutofillResult,
@@ -225,6 +226,13 @@ class AutofillService:
                 unresolved_required.append(record) if item.field.required else unresolved_optional.append(record)
                 warnings.append(f"Resume was not attached for '{item.field.label}'.")
 
+        privacy_trace = _build_privacy_acknowledgement_trace(classified, self._adapter, filled)
+        if privacy_trace is not None:
+            privacy_report = format_privacy_acknowledgement_report(privacy_trace)
+            logger.info("%s", privacy_report)
+            if _privacy_trace_should_warn(privacy_trace):
+                warnings.append(privacy_report)
+
         return stage1_autofill_result(
             source=vacancy.source,
             external_id=vacancy.external_id,
@@ -372,6 +380,18 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
         if lowered in {"false", "0", "off", "no"}:
             return expected is False
         return semantic_choice_matches(expected, actual)
+    if item.kind is QuestionKind.PRIVACY_CONSENT and actual.lower() in {"true", "1", "on", "yes"}:
+        if expected is True:
+            return True
+        return str(expected).strip().lower() in {
+            "true",
+            "1",
+            "yes",
+            "on",
+            "acknowledge",
+            "confirm",
+            "acknowledge/confirm",
+        }
     if isinstance(expected, list):
         expected_lower = [str(item_value).strip().lower() for item_value in expected if str(item_value).strip()]
         actual_parts = [part.strip().lower() for part in re_split_choices(actual)]
@@ -411,6 +431,7 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
             QuestionKind.YEARS_EXPERIENCE,
             QuestionKind.FIELD_OF_INTEREST,
             QuestionKind.RELOCATION,
+            QuestionKind.OFFICE_WORK,
             QuestionKind.EMPLOYEE_RELATIONSHIP,
             QuestionKind.PRIOR_AFFILIATION,
             QuestionKind.APPLICATION_SOURCE,
@@ -448,3 +469,54 @@ def re_split_choices(value: str) -> list[str]:
     if trailing:
         parts.append(trailing)
     return parts or [value]
+
+
+def _build_privacy_acknowledgement_trace(
+    classified: list[ClassifiedField],
+    adapter: object,
+    filled: list[AutofillFieldResult],
+) -> dict[str, object] | None:
+    from app.application.autofill.greenhouse import _looks_like_privacy_field
+
+    privacy_items = [item for item in classified if item.kind is QuestionKind.PRIVACY_CONSENT]
+    looking = [item for item in classified if _looks_like_privacy_field(item.field)]
+    adapter_trace = getattr(adapter, "last_privacy_trace", None)
+    if not privacy_items and not looking and not adapter_trace:
+        return None
+    filled_labels = {item.label for item in filled}
+    if isinstance(adapter_trace, dict) and adapter_trace:
+        trace = dict(adapter_trace)
+        if privacy_items and privacy_items[0].field.label in filled_labels:
+            trace["readback_checked"] = True
+            trace["failure_reason"] = None
+        return trace
+    item = privacy_items[0] if privacy_items else looking[0]
+    filled_ok = item.field.label in filled_labels
+    if item.kind is QuestionKind.PRIVACY_CONSENT:
+        classified_as = "required_privacy" if item.field.required else "privacy_optional"
+        failure = None if filled_ok else ("not_fillable" if not item.fill else "fill_or_readback_failed")
+    else:
+        classified_as = item.kind.value
+        failure = "not_classified_as_required_privacy"
+    return {
+        "discovered": True,
+        "classified": classified_as,
+        "control_type": item.field.field_type,
+        "interaction_attempted": "none" if not item.fill else "unknown",
+        "readback_checked": filled_ok,
+        "failure_reason": failure,
+        "locator": item.field.name or item.field.element_id or item.field.label,
+    }
+
+
+def _privacy_trace_should_warn(trace: dict[str, object]) -> bool:
+    if not trace.get("discovered"):
+        return False
+    reason = trace.get("failure_reason")
+    if reason:
+        return True
+    classified = str(trace.get("classified") or "")
+    if classified in {"required_privacy", "privacy_optional"}:
+        return trace.get("readback_checked") is False
+    return False
+

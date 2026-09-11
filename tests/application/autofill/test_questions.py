@@ -459,7 +459,7 @@ def test_how_did_you_hear_never_selects_referral() -> None:
     assert mapped.value is None
 
 
-def test_privacy_consent_fills_only_when_explicitly_true() -> None:
+def test_privacy_consent_optional_fills_only_when_explicitly_true() -> None:
     unset = map_question(
         DiscoveredField(label="I consent to the processing of my personal data for recruiting"),
         _profile(),
@@ -471,6 +471,132 @@ def test_privacy_consent_fills_only_when_explicitly_true() -> None:
         _profile(application_consent={"privacy_data_processing": True}),
     )
     assert allowed.fillable is True
+
+
+def test_required_privacy_acknowledgement_fills_from_policy() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="I have read and acknowledge the privacy policy",
+            field_type="checkbox",
+            required=True,
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.PRIVACY_CONSENT
+    assert mapped.fillable is True
+    assert mapped.value is True
+
+
+def test_point_of_data_transfer_checkbox_maps_to_privacy_yes() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Point of Data Transfer — Acknowledge/Confirm",
+            field_type="checkbox",
+            required=True,
+            context=(
+                "Point of Data Transfer Information submitted during the application "
+                "will be held and used for considering the application and handled "
+                "according to the Applicant Privacy Notice."
+            ),
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.PRIVACY_CONSENT
+    assert mapped.fillable is True
+    assert mapped.value is True
+
+
+def test_required_privacy_not_confused_with_newsletter() -> None:
+    newsletter = map_question(
+        DiscoveredField(
+            label="Subscribe to newsletter and other job openings",
+            field_type="checkbox",
+            required=False,
+        ),
+        _profile(),
+    )
+    privacy = map_question(
+        DiscoveredField(
+            label="I consent to processing my application data for recruitment purposes",
+            field_type="checkbox",
+            required=True,
+        ),
+        _profile(),
+    )
+    assert newsletter.kind is QuestionKind.NEWSLETTER
+    assert newsletter.value in {False, "No"}
+    assert privacy.kind is QuestionKind.PRIVACY_CONSENT
+    assert privacy.value is True
+
+
+def test_unknown_legal_checkbox_is_not_auto_checked() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="I certify that the information provided is true and complete",
+            field_type="checkbox",
+            required=True,
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.UNKNOWN
+    assert mapped.fillable is False
+
+
+def test_office_days_question_maps_to_yes() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you willing to work 3 or more days per week in the office in Amsterdam?",
+            field_type="select",
+            options=["Yes", "No"],
+            required=True,
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.OFFICE_WORK
+    assert mapped.fillable is True
+    assert mapped.value == "Yes"
+
+
+def test_hybrid_schedule_question_maps_to_yes() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you comfortable with a hybrid schedule?",
+            field_type="select",
+            options=["Yes", "No"],
+            required=True,
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.OFFICE_WORK
+    assert mapped.value == "Yes"
+    assert mapped.fillable is True
+
+
+def test_office_policy_does_not_map_current_location_or_work_auth() -> None:
+    profile = _profile()
+    location = map_question(DiscoveredField(label="Current location"), profile)
+    work_auth = map_question(
+        DiscoveredField(label="Are you legally authorized to work in the Netherlands?"),
+        profile,
+    )
+    office = map_question(
+        DiscoveredField(
+            label="Are you willing to work 3 or more days per week in the office in Amsterdam?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    assert location.kind is QuestionKind.LOCATION
+    assert location.value == "Berlin, Germany"
+    assert work_auth.kind is QuestionKind.WORK_AUTHORIZATION
+    assert work_auth.fillable is False
+    assert work_auth.value is None
+    assert office.kind is QuestionKind.OFFICE_WORK
+    assert office.value == "Yes"
+    assert profile.identity.current_location == "Berlin, Germany"
+    assert profile.work_authorization_for("Netherlands") is None
+    assert profile.work_authorization_for("Amsterdam") is None
 
 
 def test_cover_letter_is_its_own_kind() -> None:

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — Office and Privacy</title>
+  <style>
+    .select__control { border: 1px solid #ccc; padding: 6px; min-height: 32px; cursor: pointer; }
+    .select__single-value { display: inline-block; background: #eef; padding: 2px 6px; }
+    .sr-only { position: absolute; opacity: 0; width: 1px; height: 1px; }
+    .field { margin: 12px 0; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Software Engineer</h1>
+  <form id="application_form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+
+    <label for="current_location">Current location</label>
+    <input id="current_location" name="job_application[location]" type="text">
+
+    <label for="work_auth">Are you legally authorized to work in the Netherlands?</label>
+    <select id="work_auth" name="job_application[work_authorization]" required>
+      <option value="">Please select</option>
+      <option value="Yes">Yes</option>
+      <option value="No">No</option>
+    </select>
+
+    <label for="office_days">Are you willing to work 3 or more days per week in the office in Amsterdam?</label>
+    <select id="office_days" name="job_application[office_days]" required>
+      <option value="">Please select</option>
+      <option>Yes</option>
+      <option>No</option>
+    </select>
+
+    <div class="field" id="hybrid-field">
+      <label id="hybrid-label">Are you comfortable with a hybrid schedule?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="hybrid" aria-labelledby="hybrid-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="hybrid-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="data-transfer-field">
+      <div class="text--label" id="data-transfer-label">Point of Data Transfer *</div>
+      <p class="text--help">
+        Information submitted during the application will be held and used for considering
+        the application and handled according to the Applicant Privacy Notice.
+      </p>
+      <div id="data_transfer_ack"
+           role="checkbox"
+           aria-labelledby="data-transfer-label"
+           aria-required="true"
+           aria-checked="false"
+           tabindex="0">Acknowledge/Confirm</div>
+    </div>
+
+    <fieldset>
+      <legend>Applicant Privacy Notice *</legend>
+      <p>Please confirm you have read the notice.</p>
+      <label>
+        <input id="privacy_native" type="checkbox" name="job_application[privacy_native]" value="1" required>
+        I have read and acknowledge the privacy policy
+      </label>
+    </fieldset>
+
+    <div class="field">
+      <label class="text--label">Consent to process application data *</label>
+      <label>
+        <input id="privacy_hidden" class="sr-only" type="checkbox" name="job_application[privacy_hidden]" value="1" required>
+        I consent to processing my application data for recruitment purposes
+      </label>
+    </div>
+
+    <label>
+      <input id="newsletter" type="checkbox" name="job_application[newsletter]" value="1">
+      Subscribe to newsletter and other job openings
+    </label>
+
+    <label for="sms">Do you allow us to provide you TEXT/SMS updates of your interview process?</label>
+    <select id="sms" name="job_application[sms]">
+      <option value="">Please select</option>
+      <option>Yes</option>
+      <option>No</option>
+    </select>
+
+    <fieldset>
+      <legend>Criminal history declaration *</legend>
+      <label>
+        <input id="criminal" type="checkbox" name="job_application[criminal]" value="1" required>
+        I declare that I have no criminal convictions
+      </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Application certification *</legend>
+      <label>
+        <input id="certify" type="checkbox" name="job_application[certify]" value="1" required>
+        I certify that the information provided is true and complete
+      </label>
+    </fieldset>
+
+    <label>
+      <input id="talent_pool" type="checkbox" name="job_application[talent_pool]" value="1">
+      Keep my profile in the talent pool for future opportunities
+    </label>
+
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+  <script>
+    window.__submitClicked = false;
+    window.__formSubmitted = false;
+    document.getElementById("submit_app").addEventListener("click", function () {
+      window.__submitClicked = true;
+    });
+    document.getElementById("application_form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      window.__formSubmitted = true;
+    });
+
+    document.getElementById("data_transfer_ack").addEventListener("click", function () {
+      var next = this.getAttribute("aria-checked") !== "true";
+      this.setAttribute("aria-checked", next ? "true" : "false");
+    });
+
+    function setupReactSingle(fieldId, inputId, listId, options) {
+      var field = document.getElementById(fieldId);
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      var control = field.querySelector(".select__control");
+      var valueNode = field.querySelector(".select__single-value");
+      function render() {
+        list.innerHTML = "";
+        list.hidden = false;
+        options.forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            valueNode.textContent = text;
+            input.value = "";
+            list.hidden = true;
+          });
+          list.appendChild(option);
+        });
+      }
+      control.addEventListener("click", function () { render(); });
+      input.addEventListener("focus", render);
+    }
+    setupReactSingle("hybrid-field", "hybrid", "hybrid-list", ["Yes", "No"]);
+  </script>
+</body>
+</html>

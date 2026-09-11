@@ -27,6 +27,8 @@ def test_example_profile_yaml_loads_into_schema() -> None:
     assert profile.employment.doctorate_awarded is False
     assert profile.employee_relationship.has_relationship is False
     assert profile.application_policy.relocation.willing is True
+    assert profile.application_policy.office_work.willing is True
+    assert profile.application_policy.privacy_acknowledgement.auto_acknowledge_required is True
     assert profile.application_policy.prior_affiliations[0].organization == "Deloitte"
     assert profile.application_policy.prior_affiliations[0].associated is False
     assert profile.application_policy.newsletter_opt_in is False

@@ -62,6 +62,8 @@ Copy any missing structured fields from `candidate_profile.example.yaml` into
 `candidate_profile.local.yaml`, including `application_policy`:
 
 - `relocation.willing: true`
+- `office_work.willing: true`
+- `privacy_acknowledgement.auto_acknowledge_required: true`
 - `default_no_undeclared_affiliations: true`
 - `newsletter_opt_in: false`
 - `sms_interview_updates: false` (override any previous `true`)
@@ -135,3 +137,64 @@ Visual confirmation of a live form (product spec items 18–19) is a user step.
 Coding agents must not run this live smoke test unless you ask.
 
 If a CAPTCHA or login wall appears, take over the browser. Do not attempt a bypass.
+
+## Adyen cross-company follow-up (`7342887`)
+
+Agoda Stage 1 smoke is considered passed. This second run checks that Greenhouse
+autofill is reusable on another company.
+
+Selected vacancy (live collect + analysis cache, 2026-09-11):
+
+- Company: Adyen
+- Title: Software Engineer (Java) - Unified Platform
+- Source: `target_company:greenhouse:adyen`
+- External id: `7342887`
+- Location: Amsterdam
+- Seniority: ordinary IC (`UNKNOWN` — not Lead, Staff, or Junior)
+- Recommendation: `APPLY_NOW`
+
+```bash
+uv run python -m app autofill target_company:greenhouse:adyen 7342887
+```
+
+Do **not** click Submit.
+
+The adapter should fill whatever generic Greenhouse fields exist on this form
+(identity, phone, location/country, links, education Master's Degree, resume,
+cover letter via Cover Letter **Enter manually**, yes/no and selects that map
+from CandidateProfile / ApplicationPolicy). Fields that are absent must be
+skipped, not failed.
+
+Adyen-specific custom questions without a profile/policy/override answer should
+stay under **Needs review**. Agoda-only questions (engineering blog, Booking
+Holdings, Deloitte) are not expected here.
+
+After the first Adyen live run, two generic gaps were fixed in fixtures (do not
+treat these as Adyen selectors):
+
+| Field | Expected visible value |
+|---|---|
+| Are you willing to work 3 or more days per week in the office in Amsterdam? | **Yes** (office/hybrid attendance policy; does **not** mean you live in Amsterdam or have Dutch work authorization) |
+| Are you comfortable with a hybrid schedule? / equivalent onsite-hybrid attendance | **Yes** |
+| Point of Data Transfer / Acknowledge/Confirm (required applicant privacy / data-transfer notice) | **Checked** (label-backed / hidden native checkbox; not merely clicked) |
+| TEXT/SMS interview or recruitment updates | **No** |
+| Newsletter / other job openings / talent-pool marketing | **No** / unchecked |
+| Work authorization for the Netherlands (or any country not in `work_authorizations`) | Unresolved |
+| Criminal history / “I certify the information is true” / other unknown legal declarations | Unresolved / unchecked |
+
+The second live Adyen run confirmed office/hybrid **Yes**. Point of Data Transfer
+was still unchecked: Greenhouse exposes it as `multi_value_multi_select` with a
+single **Acknowledge/Confirm** option, rendered as a visually hidden checkbox
+plus label, not a Yes/No select. Autofill now walks ancestor question copy for
+classification, clicks the visible label/option text, and verifies
+`input.checked` / `aria-checked` after React settle. If that still fails, the
+CLI summary includes a `privacy acknowledgement:` diagnostic block.
+
+Re-run:
+
+```bash
+uv run python -m app autofill target_company:greenhouse:adyen 7342887
+```
+
+Do **not** click Submit. Coding agents must not run this live headed browser
+unless you ask. Report remaining unresolved required fields after visual check.

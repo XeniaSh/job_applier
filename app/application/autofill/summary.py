@@ -37,8 +37,35 @@ def render_autofill_summary(result: AutofillResult) -> str:
         "NOT PERFORMED",
     ]
     if result.warnings:
-        lines.extend(["", "Warnings:", *[f"- {item}" for item in result.warnings]])
+        lines.extend(["", "Warnings:"])
+        for item in result.warnings:
+            if "\n" in item:
+                lines.append(item)
+            else:
+                lines.append(f"- {item}")
     return "\n".join(lines)
+
+
+def format_privacy_acknowledgement_report(trace: dict[str, object]) -> str:
+    discovered_text = "yes" if trace.get("discovered") else "no"
+    readback = trace.get("readback_checked")
+    if readback is True:
+        readback_text = "true"
+    elif readback is False:
+        readback_text = "false"
+    else:
+        readback_text = "unknown"
+    return "\n".join(
+        [
+            "privacy acknowledgement:",
+            f"  discovered: {discovered_text}",
+            f"  classified: {trace.get('classified') or 'none'}",
+            f"  control_type: {trace.get('control_type') or 'unknown'}",
+            f"  interaction_attempted: {trace.get('interaction_attempted') or 'none'}",
+            f"  readback_checked: {readback_text}",
+            f"  failure_reason: {trace.get('failure_reason') or 'none'}",
+        ]
+    )
 
 
 def _label_lines(fields: list[AutofillFieldResult]) -> list[str]:

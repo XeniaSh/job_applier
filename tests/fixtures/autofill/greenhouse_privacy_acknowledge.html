@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — Privacy Acknowledge/Confirm</title>
+  <style>
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+      opacity: 0;
+    }
+    .checkbox-row { position: relative; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+    .checkbox-box { width: 16px; height: 16px; border: 1px solid #222; display: inline-block; }
+    .checkbox-box.checked { background: #222; }
+  </style>
+</head>
+<body>
+  <h1>Software Engineer (Java) - Unified Platform</h1>
+  <form id="application-form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+
+    <!--
+      Live Greenhouse custom question shape (Adyen Point of Data Transfer):
+      multi_value_multi_select with one option, rendered as a visually hidden
+      native checkbox plus a label-backed Acknowledge/Confirm control.
+      No .field / fieldset / [class*=question] wrapper.
+    -->
+    <div>
+      <div>Point of Data Transfer *</div>
+      <p>
+        Information submitted during the application will be held and used by
+        Adyen for considering the application and handled according to the
+        <a href="#privacy">Applicant Privacy Notice</a>.
+      </p>
+      <input
+        id="question_60985243"
+        class="sr-only"
+        type="checkbox"
+        name="question_60985243[]"
+        value="595142577">
+      <label class="checkbox-row" for="question_60985243">
+        <span class="checkbox-box" id="question_60985243_box"></span>
+        <span>Acknowledge/Confirm</span>
+      </label>
+    </div>
+
+    <label>
+      <input id="newsletter" type="checkbox" name="job_application[newsletter]" value="1">
+      Subscribe to newsletter and other job openings
+    </label>
+
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+  <script>
+    window.__submitClicked = false;
+    window.__formSubmitted = false;
+    document.getElementById("submit_app").addEventListener("click", function () {
+      window.__submitClicked = true;
+    });
+    document.getElementById("application-form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      window.__formSubmitted = true;
+    });
+
+    (function () {
+      var input = document.getElementById("question_60985243");
+      var box = document.getElementById("question_60985243_box");
+      var label = document.querySelector("label[for='question_60985243']");
+      var committed = false;
+      var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked");
+      function apply() {
+        desc.set.call(input, committed);
+        input.setAttribute("aria-checked", committed ? "true" : "false");
+        box.classList.toggle("checked", committed);
+      }
+      Object.defineProperty(input, "checked", {
+        configurable: true,
+        get: function () { return committed; },
+        set: function () { queueMicrotask(apply); }
+      });
+      label.addEventListener("click", function (event) {
+        event.preventDefault();
+        committed = true;
+        apply();
+      });
+    })();
+  </script>
+</body>
+</html>

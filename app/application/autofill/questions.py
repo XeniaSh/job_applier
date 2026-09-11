@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 import re
 
+from app.application.autofill.acknowledgements import (
+    AcknowledgementClass,
+    classify_acknowledgement,
+    is_safe_required_privacy_acknowledgement,
+)
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import (
     match_application_source,
@@ -13,6 +18,7 @@ from app.application.autofill.options import (
     match_prefer_not_to_disclose_gender,
     match_years_option,
     match_yes_no,
+    match_affirmative_option,
     parse_max_choices,
     parse_relocation_destination,
 )
@@ -46,6 +52,7 @@ class QuestionKind(StrEnum):
     TECH_STACK = "tech_stack"
     FIELD_OF_INTEREST = "field_of_interest"
     RELOCATION = "relocation"
+    OFFICE_WORK = "office_work"
     EMPLOYEE_RELATIONSHIP = "employee_relationship"
     EMPLOYEE_RELATIONSHIP_DETAILS = "employee_relationship_details"
     PRIOR_AFFILIATION = "prior_affiliation"
@@ -92,6 +99,7 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.TECH_STACK,
         QuestionKind.FIELD_OF_INTEREST,
         QuestionKind.RELOCATION,
+        QuestionKind.OFFICE_WORK,
     }
 )
 
@@ -144,6 +152,32 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             fillable=True,
         )
 
+    acknowledgement = classify_acknowledgement(text)
+    if acknowledgement is AcknowledgementClass.MARKETING:
+        answer = profile.newsletter_opt_in_answer()
+        return MappedQuestion(
+            kind=QuestionKind.NEWSLETTER,
+            value=_mapped_choice(answer, field.options),
+            fillable=True,
+        )
+    if acknowledgement is AcknowledgementClass.UNSAFE_LEGAL:
+        return MappedQuestion(kind=QuestionKind.UNKNOWN, fillable=False)
+
+    if acknowledgement is AcknowledgementClass.APPLICATION_PRIVACY or _is_privacy_consent(text):
+        answer = profile.privacy_acknowledgement_answer(required=field.required)
+        if answer is None and is_safe_required_privacy_acknowledgement(field, text):
+            answer = True
+        value: QuestionValue = None
+        if answer is True:
+            value = match_affirmative_option(True, field.options) if field.options else True
+        elif answer is False:
+            value = _mapped_choice(False, field.options)
+        return MappedQuestion(
+            kind=QuestionKind.PRIVACY_CONSENT,
+            value=value,
+            fillable=answer is not None and value is not None,
+        )
+
     if _is_sms_updates(text):
         answer = profile.sms_interview_updates_answer()
         return MappedQuestion(
@@ -160,14 +194,6 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             kind=QuestionKind.APPLICATION_SOURCE,
             value=value,
             fillable=bool(value),
-        )
-
-    if _is_privacy_consent(text):
-        answer = profile.application_consent.privacy_data_processing
-        return MappedQuestion(
-            kind=QuestionKind.PRIVACY_CONSENT,
-            value=_mapped_choice(answer, field.options) if answer is not None else None,
-            fillable=answer is True,
         )
 
     if _is_employee_relationship_details(text):
@@ -279,6 +305,14 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             fillable=answer is not None,
         )
 
+    if _is_office_work(text):
+        answer = profile.office_work_answer()
+        return MappedQuestion(
+            kind=QuestionKind.OFFICE_WORK,
+            value=_mapped_choice(answer, field.options) if answer is not None else None,
+            fillable=answer is not None,
+        )
+
     override = profile.question_override_answer(_search_text(field))
     if override is not None:
         value = _override_value(override, field)
@@ -382,8 +416,14 @@ def _relationship_detail_value(text: str, profile: CandidateProfile) -> str | No
 
 
 def _search_text(field: DiscoveredField) -> str:
-    parts = [field.label, field.name or "", field.autocomplete or "", field.element_id or ""]
-    return " ".join(parts).lower()
+    parts = [
+        field.label,
+        field.context,
+        field.name or "",
+        field.autocomplete or "",
+        field.element_id or "",
+    ]
+    return " ".join(part for part in parts if part).lower()
 
 
 def _is_gender(text: str) -> bool:
@@ -551,6 +591,59 @@ def _is_relocation(text: str) -> bool:
     return any(term in text for term in ("relocate", "relocation", "open to relocation"))
 
 
+def _is_office_work(text: str) -> bool:
+    """Stated office/hybrid attendance, not current location or work authorization."""
+    if _is_work_authorization(text) or _is_sponsorship(text):
+        return False
+    if any(term in text for term in ("relocate", "relocation")):
+        return False
+    if any(term in text for term in ("current location", "currently based", "where do you live")):
+        return False
+    hybrid = any(
+        term in text
+        for term in (
+            "hybrid schedule",
+            "hybrid work",
+            "comfortable with a hybrid",
+            "open to hybrid",
+            "willing to work hybrid",
+        )
+    )
+    office_days = any(
+        term in text
+        for term in (
+            "days per week in the office",
+            "days a week in the office",
+            "days per week at the office",
+            "days a week at the office",
+            "days per week from the office",
+            "in the office",
+            "from our office",
+            "from the office",
+            "attend the office",
+            "office regularly",
+            "office attendance",
+        )
+    ) and any(
+        term in text
+        for term in ("willing", "comfortable", "can you", "able to", "accept", "okay with", "agree")
+    )
+    onsite = any(
+        term in text
+        for term in (
+            "work onsite",
+            "work on-site",
+            "work on site",
+            "onsite / hybrid",
+            "on-site / hybrid",
+            "onsite/hybrid",
+            "hybrid at the",
+            "work from our office",
+        )
+    )
+    return hybrid or office_days or onsite
+
+
 def _is_employee_relationship_details(text: str) -> bool:
     if "if yes" in text:
         return True
@@ -620,18 +713,7 @@ def _is_application_source(text: str) -> bool:
 def _is_privacy_consent(text: str) -> bool:
     if _is_marketing(text):
         return False
-    return any(
-        term in text
-        for term in (
-            "privacy",
-            "data processing",
-            "personal data",
-            "gdpr",
-            "consent to process",
-            "process my data",
-            "privacy policy",
-        )
-    )
+    return classify_acknowledgement(text) is AcknowledgementClass.APPLICATION_PRIVACY
 
 
 def _is_why_company(text: str) -> bool:
@@ -692,6 +774,13 @@ def _is_llm_forbidden_text(text: str) -> bool:
         "engineering blog",
         "past 6 months",
         "past six months",
+        "hybrid",
+        "in the office",
+        "onsite",
+        "on-site",
+        "data transfer",
+        "background check",
+        "criminal",
     )
     return any(term in text for term in terms)
 
@@ -715,6 +804,8 @@ def _is_phone(text: str, field: DiscoveredField) -> bool:
 
 
 def _is_identity_location(text: str) -> bool:
+    if _is_office_work(text):
+        return False
     if any(term in text for term in ("authoriz", "sponsor", "remote", "job location", "relocate", "based in")):
         return False
     if "country" in text and "city" not in text:
