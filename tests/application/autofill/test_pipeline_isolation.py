@@ -31,3 +31,12 @@ def test_autofill_layer_does_not_gate_on_recommendation() -> None:
         assert "recommend_application" not in text, path
         assert "RECOMMENDATION_SKIP" not in text, path
         assert "allows_autonomous_application_workflow" not in text, path
+        assert "prepare_application" not in text, path
+        assert "PrepareIntent" not in text, path
+
+
+def test_greenhouse_adapter_does_not_import_orchestration() -> None:
+    text = Path("app/application/autofill/greenhouse.py").read_text(encoding="utf-8")
+    assert "prepare_application" not in text
+    assert "PrepareApplicationService" not in text
+    assert "PrepareIntent" not in text

@@ -142,7 +142,7 @@ These product capabilities already work. Schedule only additive tasks, not repla
 ### Incomplete — keep, do not replace
 
 - Candidate data is split across markdown, skills YAML, and constraints YAML. Fine for analysis; insufficient for autofill.
-- `PreparationService` supports only `linkedin-email`. Target Companies has no prepare/autofill path yet (Stage 2).
+- `PreparationService` supports only `linkedin-email` cover-letter/resume packages. Target Companies has `PrepareApplicationService` (TASK-078) that gates on recommendation and delegates to `AutofillService`. Telegram “Prepare application” is still Stage 2.
 - `application_answers` in preparation is a no-op placeholder.
 - `data/prepared/` has no retention policy.
 - Many Target Companies in YAML are `custom` / `lever` / `ashby` / `smartrecruiters` / `manual`. Only Greenhouse watcher exists.
@@ -230,6 +230,8 @@ TASK-075 Stage 1L Adyen cross-company Greenhouse smoke
 TASK-076 Stage 1M office/hybrid + required privacy acknowledgements
     ↓
 TASK-077 Stage 1N privacy checkbox interaction / live Adyen remaining gap
+    ↓
+TASK-078 recommendation → prepare/autofill orchestration
     ↓
 TASK-037..039 Stage 2 Telegram
     ↓
@@ -712,8 +714,8 @@ Do not start until Stage 1 CLI is verified.
 ### TASK-037 — Telegram Autofill action for Target Company Greenhouse
 
 - **Status:** todo
-- **Depends on:** TASK-033
-- **Goal:** Add a Telegram action that starts autofill for `target_company:greenhouse:*` using stored source+id.
+- **Depends on:** TASK-033, TASK-078
+- **Goal:** Add a Telegram action that starts autofill for `target_company:greenhouse:*` using stored source+id. Call `PrepareApplicationService` with `PrepareIntent.EXPLICIT`; do not call AutofillService from Telegram directly.
 - **Area:** `app/telegram/`, CLI callback handling
 - **Acceptance criteria:**
   - Action appears only for supported Target Company Greenhouse sources.
@@ -1110,7 +1112,7 @@ Do not hardcode Adyen selectors or vacancy-specific answers. The goal is to prov
 
 ### TASK-075 — Second live Greenhouse smoke: Adyen Unified Platform
 
-- **Status:** in_progress
+- **Status:** done
 - **Depends on:** TASK-074 (Agoda Stage 1 smoke passed sufficiently)
 - **Goal:** Select a live Adyen Greenhouse IC vacancy, audit the adapter for company-specific coupling, run fixture tests, and give the user an exact CLI command. Do **not** run the live headed browser from the agent.
 - **Area:** `PROGRESS.md`, `docs/autofill_smoke.md`; no adapter change unless leakage is found
@@ -1152,6 +1154,29 @@ TASK-077 — Greenhouse privacy checkbox interaction (label-backed / React)
   - A realistic fixture matches a visually hidden `question_*[]` checkbox plus label-backed Acknowledge/Confirm, including React reverting programmatic `.check()`.
   - Newsletter remains unchecked. No Submit. No Adyen-specific selectors.
 - **Verification:** Playwright fixture tests + mapper/option unit tests. Do not run the live Adyen browser from the agent.
+
+---
+
+## Stage 1O — Connect recommendation to application preparation
+
+Do not polish individual Greenhouse forms here. Do not click Submit. Do not
+wire Telegram UI in the same change.
+
+### TASK-078 — Prepare Application orchestration from a recommended vacancy
+
+- **Status:** done
+- **Depends on:** TASK-029, TASK-074, TASK-075
+- **Goal:** Connect discovery/recommendation to AutofillService with recommendation safety. Manual `autofill SOURCE EXTERNAL_ID` stays an ungated diagnostic path.
+- **Area:** `app/application/prepare_application.py` (application/domain). Do not put this gate in the Greenhouse adapter or Autofill CLI.
+- **Acceptance criteria:**
+  - `prepare_application(vacancy)` / `PrepareApplicationService.prepare` reuses the same `AutofillService.run` contract as the CLI.
+  - `APPLY_NOW` may enter prepare/autofill for autonomous or explicit intent.
+  - `CHECK_MANUALLY` does not auto-proceed; it may proceed only with `PrepareIntent.EXPLICIT`.
+  - `SKIP` is blocked from both autonomous and explicit product prepare paths.
+  - Manual CLI `python -m app autofill SOURCE EXTERNAL_ID` does not consult this gate.
+  - Greenhouse adapter has no recommendation logic.
+  - No auto-submit; no Telegram button in this task.
+- **Verification:** Focused unit tests with a fake AutofillService. No live browser.
 
 ---
 

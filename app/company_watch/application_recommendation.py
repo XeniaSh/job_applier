@@ -22,21 +22,26 @@ RECOMMENDATION_LABELS = (
 )
 
 
+def recommendation_label(recommendation: ApplicationRecommendation | str) -> str:
+    if isinstance(recommendation, ApplicationRecommendation):
+        return recommendation.label.strip().upper()
+    return str(recommendation).strip().upper()
+
+
 def allows_autonomous_application_workflow(
     recommendation: ApplicationRecommendation | str,
 ) -> bool:
-    """True when the vacancy may enter the normal discovery → application path.
+    """True when the vacancy may enter the normal discovery → Telegram path.
 
-    SKIP vacancies stay out of automatic Telegram delivery and must not be
-    selected for automatic application. An explicit CLI invocation that
-    already names source + external_id is a manual smoke-test path and
-    does not use this gate.
+    APPLY_NOW and CHECK_MANUALLY may be delivered for user review.
+    SKIP vacancies stay out of automatic Telegram delivery.
+
+    This is not the Prepare Application gate. That eligibility lives in
+    the application layer. An explicit CLI invocation that already names
+    source + external_id is a manual smoke-test path and does not use
+    either gate.
     """
-    label = (
-        recommendation.label
-        if isinstance(recommendation, ApplicationRecommendation)
-        else str(recommendation).strip().upper()
-    )
+    label = recommendation_label(recommendation)
     return label in {RECOMMENDATION_APPLY_NOW, RECOMMENDATION_CHECK_MANUALLY}
 
 

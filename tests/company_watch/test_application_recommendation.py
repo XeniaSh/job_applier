@@ -1,6 +1,7 @@
 from app.company_watch.application_recommendation import (
     allows_autonomous_application_workflow,
     recommend_application,
+    recommendation_label,
 )
 from app.company_watch.candidate_constraints import CandidateConstraints
 from app.company_watch.feasibility import ApplicationFeasibility
@@ -285,3 +286,5 @@ def test_autonomous_workflow_allows_senior_and_stretch_staff_but_not_skip() -> N
     assert lead.label == "SKIP"
     assert allows_autonomous_application_workflow(lead) is False
     assert allows_autonomous_application_workflow("SKIP") is False
+    assert recommendation_label(senior) == "APPLY_NOW"
+    assert recommendation_label("check_manually") == "CHECK_MANUALLY"
