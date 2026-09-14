@@ -33,6 +33,8 @@ def test_autofill_layer_does_not_gate_on_recommendation() -> None:
         assert "allows_autonomous_application_workflow" not in text, path
         assert "prepare_application" not in text, path
         assert "PrepareIntent" not in text, path
+        assert "get_history_status" not in text, path
+        assert "BLOCKED_ALREADY_APPLIED" not in text, path
 
 
 def test_greenhouse_adapter_does_not_import_orchestration() -> None:

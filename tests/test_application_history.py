@@ -261,3 +261,27 @@ def test_no_full_descriptions_or_cover_letters_stored(tmp_path: Path) -> None:
     assert "cover_letter" not in columns
     assert "vacancy_description" not in columns
     assert "candidate_profile" not in columns
+
+
+def test_get_history_status_uses_source_and_external_id(tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    storage.upsert_application_history(
+        source="target_company:greenhouse:adyen",
+        external_id="7342887",
+        title="Software Engineer (Java) - Unified Platform",
+        company="Adyen",
+        location="Amsterdam",
+        url="https://job-boards.greenhouse.io/adyen/jobs/7342887",
+        decision="STRONG_MATCH",
+        decision_reason="test fixture; not a live run",
+        recommended_resume="java",
+    )
+    storage.mark_history_status(
+        source="target_company:greenhouse:adyen",
+        external_id="7342887",
+        status="APPLIED",
+        timestamp_field="applied_at",
+    )
+    assert storage.get_history_status("target_company:greenhouse:adyen", "7342887") == "APPLIED"
+    assert storage.get_history_status("target_company:greenhouse:other", "7342887") is None
+    assert storage.get_history_status("target_company:greenhouse:adyen", "999") is None

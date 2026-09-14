@@ -1031,10 +1031,10 @@ def _live_choice_match(wanted: str, live: list[str], kind: QuestionKind | None) 
             live,
             [wanted, "Company Website", "Careers Page", "LinkedIn", "Other"],
         )
-        if kind is QuestionKind.GENDER:
-            return match_prefer_not_to_disclose_gender(live) or match_gender_option(wanted, live)
-        if kind is QuestionKind.ACADEMIC_LEVEL:
-            return match_academic_option(wanted, live)
+    if kind is QuestionKind.GENDER:
+        return match_prefer_not_to_disclose_gender(live) or match_gender_option(wanted, live)
+    if kind is QuestionKind.ACADEMIC_LEVEL:
+        return match_academic_option(wanted, live)
     semantic = _semantic_bool(wanted)
     if semantic is not None:
         from app.application.autofill.options import match_yes_no

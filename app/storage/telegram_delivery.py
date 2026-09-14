@@ -677,6 +677,20 @@ class TelegramDeliveryStorage:
         _ = current_status
         return "ok", previous_status
 
+    def get_history_status(self, source: str, external_id: str) -> str | None:
+        """Return application_history.current_status for this vacancy identity."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select current_status from application_history
+                where source = ? and external_id = ?
+                """,
+                (source, external_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row[0])
+
     def list_application_history(
         self,
         *,

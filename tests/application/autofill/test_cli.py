@@ -60,6 +60,23 @@ def test_autofill_cli_does_not_consult_recommendation(monkeypatch) -> None:
     assert "SKIP" not in result.output
 
 
+def test_autofill_cli_does_not_consult_application_history(monkeypatch) -> None:
+    monkeypatch.setattr("app.application.autofill.service.AutofillService", _FakeService)
+    result = CliRunner().invoke(
+        app,
+        [
+            "autofill",
+            "target_company:greenhouse:adyen",
+            "7342887",
+            "--no-keep-open",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Autofill completed." in result.output
+    assert "Application already submitted" not in result.output
+    assert "APPLIED" not in result.output
+
+
 def test_autofill_cli_exits_nonzero_on_failure(monkeypatch) -> None:
     monkeypatch.setattr("app.application.autofill.service.AutofillService", _FailedService)
     result = CliRunner().invoke(
