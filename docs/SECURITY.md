@@ -20,6 +20,9 @@
 
 - Resume PDFs should stay local and be ignored by git.
 - Real email/debug artifacts should be ignored by git.
+- `PROGRESS.md` is local agent/runtime state and must stay gitignored.
+  Use `PROGRESS.example.md` as the public template; do not commit vacancy IDs,
+  application history, or other operational details.
 - Verify `.gitignore` before committing.
 
 ## Telegram Safety

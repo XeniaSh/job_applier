@@ -1,8 +1,10 @@
 # JobApplier — Development Progress
 
-Last updated: 2026-09-11
+Last updated: 2026-09-14
 
-This file is the live development state for autonomous work.
+This file is local persistent agent/runtime state. It is gitignored and must
+never be committed. The public template is `PROGRESS.example.md`.
+
 Update it after every implemented task.
 
 ---
@@ -10,44 +12,79 @@ Update it after every implemented task.
 ## Current overall status
 
 **Stage 1 Greenhouse autofill is implemented against local fixtures, including
-Stage 1G–1K live-smoke follow-ups.**
+Stage 1G–1N live-smoke follow-ups.**
 
-Stage 1K fixed academic-level mapping (Diploma was incorrectly selected) and
-audited seniority/recommendation gating for Agoda `7044713`.
+**Agoda and Adyen have both passed real Greenhouse Stage 1 smoke testing.**
+Adyen `7342887` is the cross-company validation of the generic Greenhouse
+adapter (not an Adyen-specific implementation).
+
+Adyen vacancy:
+
+- Title: Software Engineer (Java) - Unified Platform
+- Source: `target_company:greenhouse:adyen`
+- External id: `7342887`
+
+Live Adyen result (user, 2026-09-11):
+
+- Office/hybrid required question autofilled **Yes**
+- Point of Data Transfer privacy acknowledgement **checked** after the checkbox fix
+- User manually clicked Submit
+- Greenhouse accepted the completed form with no missing/invalid required fields
+- After Submit, Adyen presented an **email verification challenge** (code sent to
+  the candidate email). This is a post-submit verification/challenge boundary,
+  **not** an autofill failure. Do not automate or bypass it at this stage.
+
+This confirms successful real end-to-end Greenhouse autofill through form
+validation and Submit → verification challenge.
 
 **Lever / Ashby / SmartRecruiters Target Company watchers exist but are not wired into `run`.**
 
-Discovery and analysis remain in production use. Autofill is a separate CLI path:
+Discovery and analysis remain in production use. Autofill is a separate CLI path.
 
 ```bash
-uv run python -m app autofill target_company:greenhouse:agoda 7044713
+uv run python -m app autofill target_company:greenhouse:adyen 7342887
 ```
-
-Live visual confirmation on a real Greenhouse form (product spec items 18–19) still needs the user.
 
 ---
 
 ## Task currently being worked on
 
-NONE — stopped before another live Greenhouse smoke test (manual user verification required).
+NONE — Stage 1 Greenhouse live smoke is complete for Agoda and Adyen.
 
 ## Last successfully verified task
 
-TASK-074 — SKIP vacancies stay out of autonomous application; manual autofill CLI remains
-(also TASK-073 academic level; previously TASK-069..072, TASK-062..068, TASK-054..061, TASK-051..053, TASK-040, TASK-041)
+TASK-075 — Greenhouse cross-company Stage 1 smoke **PASSED** on Adyen
+`7342887` Software Engineer (Java) - Unified Platform (user confirmation,
+2026-09-11). Office/hybrid Yes and Point of Data Transfer checked; Greenhouse
+accepted Submit; post-submit email verification is a challenge boundary, not an
+autofill failure.
+
+Previously: TASK-077 privacy checkbox interaction (fixtures); TASK-076
+office/hybrid policy; TASK-074 / Agoda Stage 1 smoke passed sufficiently
+(user confirmation, 2026-09-11).
 
 ---
 
 ## Completed this run
 
-Stage 1K after Agoda `7044713` selected **Diploma** for highest academic level:
+Greenhouse cross-company Stage 1 smoke **PASSED** on Adyen `7342887`.
 
-| Task | Result |
+| Item | Result |
 |---|---|
-| TASK-073 | Substring alias `"ma"` matched inside `"Diploma"`, so Diploma won over Master's Degree. Awarded degree is now the ATS-independent token `MASTERS`. Russian specialist / master-equivalent maps to `MASTERS`. Completed postgraduate / aspirantura with `doctorate_awarded: false` does **not** become `DOCTORATE`. Greenhouse maps `MASTERS` → visible **"Master's Degree"**, waits, reads the label back, and reports filled only if it persists. |
-| TASK-074 | Agoda `7044713` title classifies as `LEAD_MANAGER` and recommendation `SKIP`. Staff/Principal remain stretch `CHECK_MANUALLY`. Senior IC can be `APPLY_NOW` when otherwise eligible. The normal Target Companies send path already excluded SKIP (`allows_autonomous_application_workflow`). There is no autonomous discovery→autofill path yet (Stage 2 not implemented). Explicit CLI `autofill SOURCE EXTERNAL_ID` does not consult recommendation, so `7044713` remains a valid manual smoke-test fixture because it exercises a rich application form. |
+| Vacancy | Adyen Software Engineer (Java) - Unified Platform, `target_company:greenhouse:adyen` / `7342887` |
+| Office / hybrid | Required question autofilled **Yes** |
+| Privacy acknowledgement | Required Point of Data Transfer / Acknowledge/Confirm **checked** after TASK-077 |
+| Submit | User clicked Submit manually. Greenhouse accepted the form; no missing/invalid required fields reported |
+| After Submit | Adyen email verification challenge (code sent to candidate email). Post-submit verification/challenge boundary, **not** an autofill failure. Do not automate or bypass |
+| Cross-company | Agoda and Adyen both passed real Greenhouse smoke tests; Adyen validates the generic adapter |
 
-Previously completed: Stage 0–1J (TASK-001..TASK-072), TASK-042..044, TASK-049.
+Earlier TASK-077 interaction notes (still true of the implementation):
+
+| Item | Result |
+|---|---|
+| Hidden checkbox | Greenhouse `multi_value_multi_select` with one Acknowledge/Confirm option, rendered as a visually hidden `input[type=checkbox][name=question_*[]]` plus label |
+| Interaction | Visible option text, associated label, `role=checkbox`, then `locator.check()` only if a real enabled checkbox is visible. Success is `input.checked` or `aria-checked="true"` after React settle |
+| Diagnostics | Failed privacy fills can still add a `privacy acknowledgement:` summary block |
 
 OQ defaults used (until the user overrides them):
 
@@ -90,20 +127,14 @@ Not started. Live Greenhouse resolve was sufficient for Stage 1 tests. Start onl
 
 ## Current known issues
 
-### Needs user action (Stage 1 definition of done items 18–19)
+### Needs user action
 
-1. Update `candidate_profile.local.yaml` from `candidate_profile.example.yaml`:
-   - `highest_academic_level: Master's` (or specialist / master-equivalent wording)
-   - `postgraduate_studies_completed: true`
-   - `doctorate_awarded: false`
-   - `sms_interview_updates: false` (override any previous `true`)
-   - `prefer_not_to_disclose_gender: true`
-   - keep `newsletter_opt_in: false`, relocation willing, question overrides, affiliations
-   - `professional_tech_stack` strongest-first, only truthful professional skills
-   Agents must not read the local file.
-2. Chromium: `uv run playwright install chromium`.
-3. Re-run the Agoda smoke test using the command in **Next step** below.
-4. Visually confirm **Master's Degree** (not Diploma, not Doctorate) and the other fields listed in `docs/autofill_smoke.md`. Do not bypass CAPTCHA/login.
+Stage 1 definition of done items 18–19 (Agoda + second-company Adyen live smoke)
+are **done**. Keep `candidate_profile.local.yaml` aligned with
+`candidate_profile.example.yaml` for future runs (agents must not read the local
+file). Chromium: `uv run playwright install chromium` if needed.
+
+Do **not** automate or bypass the post-submit Adyen email verification challenge.
 
 ### Pre-existing test failures (unrelated to this work)
 
@@ -129,44 +160,38 @@ Full suite except `tests/test_run_cli.py` was not re-run in this follow-up. Hist
 
 | Check | Result |
 |---|---|
-| `uv run ruff check` on changed application/autofill/recommendation/CLI/test files | Passed |
-| `uv run pytest tests/application tests/company_watch/test_seniority.py tests/company_watch/test_application_recommendation.py tests/test_run_target_companies.py tests/test_llm_client.py` | 233 passed |
-| Live Greenhouse smoke | Stopped for user visual verification of Agoda 7044713 academic level |
-
-Playwright Chromium tests must run outside a restricted sandbox (`chromium_executable_available()` otherwise skips).
+| TASK-077 privacy checkbox interaction tests | `uv run pytest tests/application` — 184 passed (Playwright fixtures included) |
+| Live Adyen Stage 1 smoke (`7342887`) | **PASSED** (user, 2026-09-11): office/hybrid Yes; Point of Data Transfer checked; Greenhouse accepted Submit; email verification is a post-submit challenge, not an autofill failure |
+| Live Agoda Stage 1 smoke | **PASSED** (user confirmation, 2026-09-11) |
 
 ---
 
 ## Important implementation discoveries
 
 1. Autofill lives under `app/application/autofill/`. Collectors and company watchers do not import it. Playwright is lazy-imported from the CLI command body.
-2. Stage 1 resolve uses `DefaultVacancyResolver` → Greenhouse board API. Generic `greenhouse` / LinkedIn / HH sources fail as unsupported.
+2. Stage 1 resolve uses `DefaultVacancyResolver` → Greenhouse board API. Generic `greenhouse` / LinkedIn / HH sources fail as unsupported. Board slug comes from `target_company:greenhouse:<board>`, so Adyen is `adyen`.
 3. Demographic gender is filled from ApplicationPolicy (`prefer_not_to_disclose_gender`), not from `sensitive.gender`. Ethnicity / disability / veteran remain `SENSITIVE_OPTIONAL` unless `fill_sensitive_fields` is true.
 4. Submit is not part of the adapter API. Fixture JS asserts the Submit button was not clicked.
-5. Academic matching previously used substring aliases. `"ma"` (Master of Arts) is a substring of `"Diploma"`, so Diploma was selected whenever it appeared before Master's Degree. Matching is now whole-word / canonical tokens (`MASTERS`, `BACHELOR`, `DOCTORATE`, `DIPLOMA`).
-6. CandidateProfile still uses `employment.highest_academic_level` as free text, plus explicit `postgraduate_studies_completed` and `doctorate_awarded`. `awarded_academic_level()` is the ATS-independent value (`MASTERS` for this candidate). Greenhouse only maps that token to a visible option.
-7. Agoda `7044713` title `Lead Software Engineer - Back End (FinTech) (Bangkok based - Relocation provided)` classifies as `LEAD_MANAGER`. `config/candidate_constraints.yaml` lists `LEAD_MANAGER` under `excluded_seniority`, so recommendation is `SKIP` with reason "lead/manager role is not target IC backend role". STAFF_PLUS / Principal / Staff are stretch `CHECK_MANUALLY`. Senior IC can be `APPLY_NOW` when other signals match.
-8. Years-of-experience gaps (for example 10+ required vs ~7 candidate years) cap the matcher decision toward `POTENTIAL_MATCH`; they do **not** by themselves produce recommendation SKIP. Lead/Manager SKIP is seniority, independent of experience years.
-9. The normal autonomous Target Companies path sends only `APPLY_NOW` and `CHECK_MANUALLY` (`allows_autonomous_application_workflow`). SKIP is also dropped from re-analysis when the cached recommendation is unchanged. There is currently **no** autonomous call into AutofillService. Explicit CLI autofill by source+id does not read recommendation, so 7044713 remains usable as a manual form fixture.
+5. Academic matching uses whole-word / canonical tokens (`MASTERS`, `BACHELOR`, `DOCTORATE`, `DIPLOMA`).
+6. Cover-letter generation takes `vacancy_context(ResolvedVacancy)` (title/company/description from the selected job). It is not Agoda-hardcoded.
+7. Company-specific facts belong in profile YAML: `prior_affiliations` (e.g. Deloitte), `question_overrides` (e.g. engineering blog). The Greenhouse adapter only discovers, interacts, and reads back.
+8. Office/hybrid is ApplicationPolicy, not location. A Yes on “3 days in the Amsterdam office” does not fill current location as Amsterdam and does not answer Dutch work authorization.
+9. Required privacy acknowledgements are classified separately from marketing. “Acknowledge/Confirm” alone is not enough; it must sit in privacy-notice / data-processing / data-transfer context.
+10. Latest `data/target_company_analysis_cache.json` (196 entries) has 36 Adyen rows. The only Adyen `APPLY_NOW` Java IC role is `7342887` Software Engineer (Java) - Unified Platform, Amsterdam.
+11. Adyen Point of Data Transfer is Greenhouse API type `multi_value_multi_select` with a single Acknowledge/Confirm option (`question_*[]`), not a Yes/No select. Job-board DOM is a visually hidden checkbox + label, often without `.field` / `[class*=question]` wrappers.
+12. After Greenhouse accepts Submit, some employers (Adyen on `7342887`) present an email verification challenge. That is a post-submit verification/challenge boundary, not an autofill or required-field failure. Do not automate or bypass it in Stage 1.
 
-### Agoda 7044713 fifth smoke findings (this follow-up)
+### Adyen vacancy ranking (TASK-075)
 
-Live form `target_company:greenhouse:agoda` / `7044713` selected:
+Preferred for the second smoke test:
 
-- **Diploma** for "What is your highest academic level?"
+1. **Software Engineer (Java) - Unified Platform** `7342887` — Amsterdam, ordinary IC, Java, platform/distributed-systems relevance, cached `APPLY_NOW`. Best match for “would the product actually apply?”
+2. Senior Software Engineer (Java) - Financial Products `7573921` — Amsterdam, SENIOR, Java, cached `CHECK_MANUALLY`.
+3. Java Software Engineer - Payments `7369512` — Amsterdam, ordinary IC, payments, cached `CHECK_MANUALLY`.
+4. Java Software Engineer - CX `6761873` — Amsterdam, ordinary IC, cached `CHECK_MANUALLY`.
+5. Software Engineer (Java) - Screening Team `7342892` — Amsterdam, ordinary IC, cached `CHECK_MANUALLY`.
 
-Expected:
-
-- **Master's Degree**
-
-Candidate education facts:
-
-- completed Russian higher education specialist degree (master-equivalent for ATS)
-- completed postgraduate / aspirantura studies
-- no dissertation defense
-- no awarded PhD / Candidate of Sciences / doctorate
-
-7044713 is retained as a **manual** Greenhouse smoke-test vacancy because it exercises a rich application form. It is not a suitable automatic application candidate (Lead / SKIP).
+Rejected for this smoke: Staff/Lead/Junior; Bengaluru/Madrid/Chicago/San Francisco/Brazil roles; SKIP recommendations.
 
 ---
 
@@ -174,20 +199,17 @@ Candidate education facts:
 
 | ID | Required user action |
 |---|---|
-| Spec 18–19 | Run the Agoda 7044713 command below and visually confirm Master's Degree (not Diploma / Doctorate) and the other listed fields |
 | Stage 2 | Explicitly allow Telegram autofill messages/buttons |
 | OQ-006 / TASK-045 | Request Workday if wanted |
-| TASK-048 | Request auto-submit if wanted |
-| Local profile | Overlay education flags and remaining policy fields from `candidate_profile.example.yaml` (agents must not read the local file unless a task requires it) |
+| TASK-048 | Request auto-submit if wanted. Adyen smoke Submit was **manual**; post-submit email verification must not be bypassed |
 
 ---
 
 ## Next step
 
-User: run this live smoke test (do not click Submit):
+Stage 1 Greenhouse live smoke is complete for Agoda and Adyen. No further Adyen
+headed re-run is required for TASK-075.
 
-```bash
-uv run python -m app autofill target_company:greenhouse:agoda 7044713
-```
-
-See `docs/autofill_smoke.md` for the expected visible values and the fields that should stay unresolved.
+Next product work waits on an explicit request (Stage 2 Telegram autofill,
+Workday, or auto-submit). Do not automate the Adyen post-submit email
+verification challenge.

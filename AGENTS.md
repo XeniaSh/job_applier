@@ -53,6 +53,26 @@ Important areas:
   - Runtime state only: SQLite database, lock files, caches, and debug files.
   - Do not put static configuration into `data/`.
 
+## Local progress state (`PROGRESS.md`)
+
+`PROGRESS.md` is local persistent agent/runtime development state.
+
+It may contain vacancy IDs, smoke-test history, application decisions, and other
+operational details that must not appear in this public repository.
+
+Rules:
+
+- It is intentionally gitignored and is not part of the public project.
+- Agents must read it when it exists.
+- Agents may update it during development (current task, last verified task, status).
+- Agents must NEVER add, stage, commit, or force-add `PROGRESS.md` (`git add -f` included).
+- The public template is `PROGRESS.example.md`. Keep that file generic and portfolio-safe.
+- If `PROGRESS.md` is absent, reconstruct current state from `PLAN.md` and the
+  repository, then initialize a new local `PROGRESS.md` from `PROGRESS.example.md`.
+
+Do not put real vacancy IDs, application history, candidate information, or
+smoke-test operational details into `PROGRESS.example.md` or other tracked files.
+
 ## Important design principles
 
 ### Keep changes small
@@ -300,6 +320,8 @@ After making changes, report:
 4. remaining known issues;
 5. suggested next step.
 
+Also update local `PROGRESS.md` when it exists. Never commit that file.
+
 ## Do not do these unless explicitly requested
 
 - Do not wire new watchers into the main `run` loop.
@@ -323,6 +345,7 @@ Git / remote safety rules:
   - git log
   - git branch
 - You may create local commits only if explicitly required by the task.
+- NEVER add, stage, commit, or force-add `PROGRESS.md`.
 - NEVER run:
   - git push
   - git push --force

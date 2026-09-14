@@ -3,7 +3,9 @@
 This document is the intended product behavior for JobApplier.
 It is the source of truth for autonomous development.
 
-Implementation status lives in `PLAN.md` and `PROGRESS.md`, not here.
+Public implementation status lives in `PLAN.md`, not here.
+Local agent/runtime progress lives in gitignored `PROGRESS.md`
+(see `PROGRESS.example.md`).
 Do not treat missing code as a reason to drop a requirement.
 
 ---
@@ -1088,7 +1090,8 @@ The second must not silently become a submitted application.
 ## 36. Open Questions
 
 These points are required by the product but are not fully specified.
-Do not silently invent a product decision. Record the chosen implementation in `PROGRESS.md`.
+Do not silently invent a product decision. Record the chosen implementation in
+local `PROGRESS.md` (gitignored; never commit that file).
 
 ### OQ-001 — Vacancy resolve source for Stage 1
 

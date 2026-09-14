@@ -12,12 +12,14 @@ Implement exactly one PLAN task at a time. A new task is a new iteration, but no
 
 ## How to use this plan
 
-1. Read `PRODUCT_SPEC.md`, `AGENTS.md`, and this file.
+1. Read `PRODUCT_SPEC.md`, `AGENTS.md`, this file, and local `PROGRESS.md` if it exists.
 2. Pick the first `todo` task whose dependencies are `done` and that is not blocked.
 3. Implement only that task. Do not start a second task before this one is verified.
 4. Run the verification listed on the task.
 5. Mark the task done **only if verification succeeds**. If verification fails, fix it or stop with a genuine blocker; do not mark it done.
-6. Update `PROGRESS.md` (current task, last verified task, status).
+6. Update local gitignored `PROGRESS.md` (current task, last verified task, status).
+   If it is missing, copy `PROGRESS.example.md` and reconstruct state from this plan
+   and the repository. Never commit `PROGRESS.md`.
 7. Then select the next eligible `todo` task and continue automatically.
 8. Do **not** stop merely because one task is complete.
 
@@ -180,7 +182,7 @@ Suggested default for unspecified product questions, until the user overrides th
 | OQ-005 resume | Candidate Profile `default_resume` path; optional `--resume` later if needed |
 | OQ-009 Playwright | Fail CLI with setup instructions if browser binaries are missing |
 
-Record any deviation in `PROGRESS.md`.
+Record any deviation in local `PROGRESS.md` (never commit that file).
 
 ---
 

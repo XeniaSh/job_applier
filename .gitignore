@@ -17,3 +17,5 @@ data/target_company_analysis_cache.json
 **/.DS_Store
 candidate_profile.local.yaml
 candidate_profile.local.*
+PROGRESS.md
+
