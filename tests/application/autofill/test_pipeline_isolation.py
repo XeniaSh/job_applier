@@ -51,3 +51,11 @@ def test_telegram_prepare_does_not_call_autofill_or_greenhouse() -> None:
     assert "app.application.autofill.greenhouse" not in text
     assert "app.application.autofill.service" not in text
 
+
+def test_review_session_registry_has_no_submit_capability() -> None:
+    """The 'Done reviewing' handoff only ever closes a browser session; it
+    must never gain a code path that could submit a form."""
+    text = Path("app/application/autofill/review_session.py").read_text(encoding="utf-8")
+    assert "submit" not in text.lower()
+    assert "playwright" not in text.lower()
+

@@ -20,18 +20,30 @@ def build_prepare_application_service(
     lifecycle: ApplicationLifecycleLookup,
     *,
     on_ready: Callable[[AutofillResult], None] | None = None,
+    wait_for_review: Callable[[], None] | None = None,
 ) -> PrepareApplicationService:
+    """Wire the production AutofillService.
+
+    `wait_for_review` overrides the default terminal-`input()` browser
+    handoff. The Telegram-triggered path must pass one (see
+    `app.application.autofill.review_session`); leaving it unset keeps the
+    original foreground behavior for any other caller.
+    """
     from app.application.autofill.answers import ApplicationAnswerGenerator
     from app.application.autofill.cover_letter import AutofillCoverLetterProvider
     from app.application.autofill.resolver import DefaultVacancyResolver
     from app.application.autofill.service import AutofillService
 
     llm_client = _optional_llm_client()
+    autofill_kwargs: dict[str, object] = {}
+    if wait_for_review is not None:
+        autofill_kwargs["wait_for_review"] = wait_for_review
     autofill = AutofillService(
         resolver=DefaultVacancyResolver(),
         on_ready=on_ready,
         answer_generator=ApplicationAnswerGenerator(llm_client) if llm_client else None,
         cover_letter_provider=AutofillCoverLetterProvider(llm_client) if llm_client else None,
+        **autofill_kwargs,
     )
     return PrepareApplicationService(autofill, lifecycle)
 

@@ -85,3 +85,16 @@ def test_autofill_cli_exits_nonzero_on_failure(monkeypatch) -> None:
     )
     assert result.exit_code == 1
     assert "Autofill failed." in result.output
+
+
+def test_diagnostic_cli_still_uses_default_terminal_review_handoff() -> None:
+    """The Telegram-triggered path overrides `wait_for_review` (see
+    review_session.py); the foreground diagnostic CLI must keep using
+    AutofillService's builtin `input()`-based handoff unchanged, since a
+    developer running it directly has a real terminal to press Enter in.
+    """
+    from pathlib import Path
+
+    text = Path("app/application/autofill/cli.py").read_text(encoding="utf-8")
+    assert "wait_for_review" not in text
+    assert "review_session" not in text

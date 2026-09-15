@@ -45,6 +45,7 @@ from app.telegram.client import (
     APPLICATION_PREPARE_BUTTON_TEXT,
     build_action_buttons,
     parse_callback_data,
+    parse_review_done_session_id,
 )
 from app.telegram.models import TelegramMessageRef
 
@@ -112,8 +113,17 @@ class _FakeClient:
     def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
         self.answers.append((callback_query_id, text))
 
-    def send_text_message(self, text: str, *, chat_id: str | None = None, reply_to_message_id: int | None = None):
-        self.texts.append({"text": text, "chat_id": chat_id, "reply_to": reply_to_message_id})
+    def send_text_message(
+        self,
+        text: str,
+        *,
+        chat_id: str | None = None,
+        reply_to_message_id: int | None = None,
+        buttons: list | None = None,
+    ):
+        self.texts.append(
+            {"text": text, "chat_id": chat_id, "reply_to": reply_to_message_id, "buttons": buttons}
+        )
         return TelegramMessageRef(chat_id=str(chat_id or "222"), message_id=99)
 
     def edit_message_text(self, **kwargs) -> None:
@@ -437,3 +447,192 @@ def test_handler_does_not_import_original_vacancy_object(tmp_path: Path) -> None
     assert not hasattr(vacancy, "description")
     assert autofill.calls[0][:2] == (SOURCE, EXTERNAL_ID)
     assert "Java backend services" not in client.texts[0]["text"]
+
+
+# --- "Done reviewing" browser handoff (production wiring path) ---
+#
+# These tests exercise the real cli.py dispatch (`service is None`, so
+# `build_prepare_application_service` actually runs) with a fake autofill
+# runner standing in for AutofillService/Playwright, monkeypatched at the
+# same seam `tests/application/autofill/test_cli.py` uses for the diagnostic
+# CLI. This is the only way to reach the review-session wiring in
+# `_dispatch_target_company_application_prepare` without a real browser.
+
+
+class _HandoffAutofill:
+    """Stands in for AutofillService: drives on_ready/wait_for_review exactly
+    like the real browser handoff, without Playwright."""
+
+    def __init__(self) -> None:
+        self.on_ready = None
+        self.wait_for_review = None
+        self.calls: list[tuple[str, str, bool]] = []
+        self.finished = False
+
+    def run(self, source: str, external_id: str, *, keep_open: bool = True):
+        self.calls.append((source, external_id, keep_open))
+        result = stage1_autofill_result(
+            source=source,
+            external_id=external_id,
+            application_url=URL,
+            status=AutofillStatus.READY_FOR_REVIEW,
+            filled_fields=[
+                AutofillFieldResult(
+                    label="First name",
+                    classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                )
+            ],
+            resume_uploaded=True,
+        )
+        if self.on_ready is not None:
+            self.on_ready(result)
+        if keep_open and self.wait_for_review is not None:
+            self.wait_for_review()
+        self.finished = True
+        return result
+
+
+def _fake_build_prepare_application_service(lifecycle, *, on_ready=None, wait_for_review=None):
+    runner = _HandoffAutofill()
+    runner.on_ready = on_ready
+    runner.wait_for_review = wait_for_review
+    service = PrepareApplicationService(runner, lifecycle)
+    return service, runner
+
+
+def _wait_until(predicate, *, timeout: float = 2.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition was not met before timeout")
+
+
+def test_completed_message_includes_done_reviewing_button(monkeypatch, tmp_path: Path) -> None:
+    holder: dict[str, object] = {}
+
+    def fake_builder(lifecycle, *, on_ready=None, wait_for_review=None):
+        service, runner = _fake_build_prepare_application_service(
+            lifecycle, on_ready=on_ready, wait_for_review=wait_for_review
+        )
+        holder["runner"] = runner
+        return service
+
+    monkeypatch.setattr(
+        "app.application.explicit_prepare_runtime.build_prepare_application_service",
+        fake_builder,
+    )
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _FakeClient()
+
+    cli_module._process_callback_update(
+        update=_callback_update(),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+        application_prepare_service=None,
+        application_prepare_cache=cache,
+        application_prepare_sync=False,
+    )
+
+    _wait_until(lambda: len(client.texts) > 0)
+    message = client.texts[0]
+    assert message["text"].startswith("Preparation completed.")
+    buttons = message["buttons"]
+    assert buttons is not None
+    session_id = parse_review_done_session_id(buttons[0][0].callback_data)
+    assert session_id
+
+    runner = holder["runner"]
+    # The runner is parked inside wait_for_review(); the browser is still
+    # "open" (run() has not returned) until "Done reviewing" is tapped.
+    assert runner.calls == [(SOURCE, EXTERNAL_ID, True)]
+
+    cli_module._process_callback_update(
+        update=_callback_update(data=f"revdone:{session_id}"),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+    )
+    assert client.answers[-1] == ("cb-prep", "Closing the browser now.")
+
+    # A duplicate tap is graceful either way (already closed, or the
+    # session was already discarded once the worker thread finished).
+    cli_module._process_callback_update(
+        update=_callback_update(data=f"revdone:{session_id}"),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+    )
+    assert client.answers[-1][1] in {"Already closed.", "This review session is no longer available."}
+
+
+def test_two_concurrent_prepares_have_independent_done_reviewing_sessions(monkeypatch, tmp_path: Path) -> None:
+    runners: list[_HandoffAutofill] = []
+
+    def fake_builder(lifecycle, *, on_ready=None, wait_for_review=None):
+        service, runner = _fake_build_prepare_application_service(
+            lifecycle, on_ready=on_ready, wait_for_review=wait_for_review
+        )
+        runners.append(runner)
+        return service
+
+    monkeypatch.setattr(
+        "app.application.explicit_prepare_runtime.build_prepare_application_service",
+        fake_builder,
+    )
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _FakeClient()
+
+    for message_id in (50, 51):
+        cli_module._process_callback_update(
+            update={
+                "callback_query": {
+                    "id": f"cb-{message_id}",
+                    "data": f"{APPLICATION_PREPARE_ACTION}:tcg.agoda:{EXTERNAL_ID}",
+                    "message": {"chat": {"id": "222"}, "message_id": message_id, "text": "Agoda"},
+                }
+            },
+            client=client,
+            storage=storage,
+            configured_chat_id="222",
+            allowed_chat_ids=frozenset({"222"}),
+            application_prepare_service=None,
+            application_prepare_cache=cache,
+            application_prepare_sync=False,
+        )
+
+    _wait_until(lambda: len(client.texts) >= 2)
+    session_ids = [
+        parse_review_done_session_id(text["buttons"][0][0].callback_data) for text in client.texts
+    ]
+    assert len(set(session_ids)) == 2
+
+    cli_module._process_callback_update(
+        update=_callback_update(data=f"revdone:{session_ids[0]}"),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+    )
+    _wait_until(lambda: runners[0].finished)
+
+    # Closing the first session must never touch the second's open browser.
+    assert runners[1].finished is False
+
+    cli_module._process_callback_update(
+        update=_callback_update(data=f"revdone:{session_ids[1]}"),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+    )
+    _wait_until(lambda: runners[1].finished)

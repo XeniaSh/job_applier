@@ -1244,6 +1244,83 @@ wire Telegram UI in the same change.
 
 ---
 
+## Stage 1P — Telegram-triggered browser review handoff + safe failure text
+
+An audit of the already-completed Stage 2 Telegram → Prepare → Autofill wiring
+(TASK-037..039, TASK-078, TASK-079) found two real gaps not previously
+tracked: the browser handoff used builtin `input()` even for the
+Telegram-triggered background thread, and FAILED/NEEDS_MANUAL_INTERVENTION
+detail was collapsed into a bare "Preparation failed." string before
+reaching Telegram. This stage fixes both without touching the underlying
+Stage 2 wiring, ATS adapter, or any recommendation/lifecycle gate.
+
+### TASK-083 — Session-identified browser review handoff for Telegram
+
+- **Status:** done
+- **Depends on:** TASK-037..039
+- **Goal:** Replace the terminal-`input()` browser handoff for the
+  Telegram-triggered prepare path with an explicit Telegram "Done reviewing"
+  action, keyed by an opaque per-run session id, so multiple concurrent
+  preparations never share stdin and closing one session never closes
+  another.
+- **Area:** `app/application/autofill/review_session.py` (new,
+  Telegram/ATS-agnostic registry), `app/application/explicit_prepare_runtime.py`
+  (injectable `wait_for_review`), `app/telegram/client.py` (Done-reviewing
+  button + callback-data helpers), `app/cli.py` (`_dispatch_target_company_application_prepare`
+  wiring, `_handle_review_done_callback`, shutdown-time `close_all()` /
+  `wait_all_discarded()`). Diagnostic CLI (`app/application/autofill/cli.py`)
+  is untouched and keeps the original `input()` handoff.
+- **Acceptance criteria:**
+  - Telegram-triggered `AutofillService.run` never calls builtin `input()`.
+  - The browser stays open (no `session.close()`) until "Done reviewing" is
+    tapped for that specific session id.
+  - Two concurrent preparations get independent session ids; closing one
+    never touches the other's browser.
+  - A duplicate "Done reviewing" tap, or one for an unknown/already-closed
+    session, answers gracefully (no exception, no hang).
+  - `run` shuts down cleanly: pending sessions are signaled and given a
+    bounded grace period to close before the process exits.
+  - No auto-submit; no new code path can click Submit.
+- **Verification:** `tests/application/autofill/test_review_session.py`,
+  `tests/application/autofill/test_review_handoff.py`,
+  `tests/test_telegram_target_company_prepare.py` (Done-reviewing cases),
+  `tests/application/autofill/test_pipeline_isolation.py` (submit-capability
+  scan), `tests/application/autofill/test_cli.py` (diagnostic CLI unchanged).
+
+### TASK-084 — Safe Telegram text for autofill failure / manual intervention
+
+- **Status:** done
+- **Depends on:** TASK-037..039
+- **Goal:** Stop collapsing `FAILED` results into a bare "Preparation
+  failed." and `NEEDS_MANUAL_INTERVENTION` into a bare "Manual review
+  needed." Map a coded `AutofillFailureReason` (not raw exception text) to a
+  concise, safe, actionable Telegram message, and surface the known
+  CAPTCHA/Cloudflare/login challenge token when present.
+- **Area:** `app/application/autofill/models.py` (`AutofillFailureReason`,
+  `AutofillResult.failure_reason`), `app/application/autofill/service.py`
+  (sets the reason on every FAILED path), `app/telegram/application_prepare.py`
+  (`format_application_prepare_failed_text`, challenge label in
+  `format_application_prepare_completed_text`).
+- **Acceptance criteria:**
+  - `UNSUPPORTED_FORM` explains that automatic filling is not supported for
+    this ATS/form yet.
+  - Browser setup failure (including a missing Chromium install) explains
+    that browser setup failed, without leaking the raw Playwright exception
+    text.
+  - A generic/unexpected error never leaks exception class names or message
+    text into Telegram; that detail stays in `logger.exception` /
+    `log_autofill_result`.
+  - A detected security challenge names the challenge type
+    (CAPTCHA / Cloudflare / login) when known, and stays generic-but-safe for
+    an unrecognized token.
+  - Unresolved-required-field count summary is unchanged (not regressed).
+  - CLI diagnostic summary output (`render_autofill_summary`) is unchanged.
+- **Verification:** `tests/test_application_prepare_formatting.py`,
+  `tests/application/autofill/test_service.py` (failure_reason per
+  exception type).
+
+---
+
 ## Explicitly out of scope unless requested
 
 - Rewriting LinkedIn parser, matcher, or Telegram prepare flow

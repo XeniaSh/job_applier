@@ -140,10 +140,13 @@ class TelegramClient:
         *,
         chat_id: str | None = None,
         reply_to_message_id: int | None = None,
+        buttons: list[list[TelegramInlineButton]] | None = None,
     ) -> TelegramMessageRef:
         payload: dict[str, object] = {"chat_id": str(chat_id or self._chat_id), "text": text}
         if reply_to_message_id is not None and reply_to_message_id > 0:
             payload["reply_to_message_id"] = int(reply_to_message_id)
+        if buttons is not None:
+            payload["reply_markup"] = {"inline_keyboard": _serialize_buttons(buttons)}
         data = self._post_json("sendMessage", payload=payload, read_timeout=15.0)
         result = data.get("result", {})
         return TelegramMessageRef(
@@ -421,6 +424,40 @@ _TARGET_COMPANY_GREENHOUSE_CODE_PREFIX = "tcg."
 _PREPARE_SUPPORTED_SOURCES = frozenset({"linkedin-email"})
 APPLICATION_PREPARE_ACTION = "prepapp"
 APPLICATION_PREPARE_BUTTON_TEXT = "Prepare application"
+
+REVIEW_DONE_ACTION = "revdone"
+REVIEW_DONE_BUTTON_TEXT = "✅ Done reviewing"
+REVIEW_DONE_CALLBACK_PREFIX = f"{REVIEW_DONE_ACTION}:"
+
+
+def build_review_done_buttons(session_id: str) -> list[list[TelegramInlineButton]]:
+    """Button attached to a Telegram-triggered prepare's completion message.
+
+    Unlike `build_action_buttons`, this callback carries an opaque review
+    session id rather than a vacancy source + external_id: a browser review
+    handoff is identified by the specific AutofillService run that opened it,
+    not by the vacancy (the same vacancy could in principle be prepared more
+    than once with independent open browsers).
+    """
+    return [
+        [TelegramInlineButton(text=REVIEW_DONE_BUTTON_TEXT, callback_data=review_done_callback_data(session_id))]
+    ]
+
+
+def review_done_callback_data(session_id: str) -> str:
+    value = f"{REVIEW_DONE_CALLBACK_PREFIX}{session_id}"
+    if len(value.encode("utf-8")) > 64:
+        raise ValueError("callback_data exceeds Telegram limit.")
+    return value
+
+
+def parse_review_done_session_id(value: str) -> str:
+    if not value.startswith(REVIEW_DONE_CALLBACK_PREFIX):
+        raise ValueError("Not a review-done callback.")
+    session_id = value[len(REVIEW_DONE_CALLBACK_PREFIX) :].strip()
+    if not session_id:
+        raise ValueError("Missing review session id.")
+    return session_id
 
 
 def source_supports_prepare(source: str) -> bool:

@@ -18,6 +18,7 @@ from app.application.autofill.greenhouse import GreenhouseAdapter, GreenhouseFor
 from app.application.autofill.logging import log_autofill_result
 from app.application.autofill.summary import format_privacy_acknowledgement_report
 from app.application.autofill.models import (
+    AutofillFailureReason,
     AutofillFieldResult,
     AutofillResult,
     AutofillStatus,
@@ -72,18 +73,34 @@ class AutofillService:
             session.open(vacancy.application_url)
             result = self._fill_open_page(vacancy, profile, resume_path, session)
         except VacancyResolveError as exc:
-            result = _failed(source, external_id, str(exc), vacancy)
+            result = _failed(
+                source, external_id, str(exc), vacancy, reason=AutofillFailureReason.VACANCY_RESOLVE_FAILED
+            )
         except CandidateProfileLoadError as exc:
-            result = _failed(source, external_id, str(exc), vacancy)
+            result = _failed(
+                source, external_id, str(exc), vacancy, reason=AutofillFailureReason.PROFILE_LOAD_FAILED
+            )
         except ResumeResolutionError as exc:
-            result = _failed(source, external_id, str(exc), vacancy)
+            result = _failed(
+                source, external_id, str(exc), vacancy, reason=AutofillFailureReason.RESUME_RESOLUTION_FAILED
+            )
         except BrowserSetupError as exc:
-            result = _failed(source, external_id, str(exc), vacancy)
+            result = _failed(
+                source, external_id, str(exc), vacancy, reason=AutofillFailureReason.BROWSER_SETUP_FAILED
+            )
         except GreenhouseFormError as exc:
-            result = _failed(source, external_id, str(exc), vacancy)
+            result = _failed(
+                source, external_id, str(exc), vacancy, reason=AutofillFailureReason.UNSUPPORTED_FORM
+            )
         except Exception as exc:
             logger.exception("Autofill failed for %s %s", source, external_id)
-            result = _failed(source, external_id, f"Unexpected autofill error: {exc}", vacancy)
+            result = _failed(
+                source,
+                external_id,
+                f"Unexpected autofill error: {exc}",
+                vacancy,
+                reason=AutofillFailureReason.UNEXPECTED_ERROR,
+            )
 
         if session is not None:
             should_handoff = keep_open and result.status in {
@@ -127,6 +144,7 @@ class AutofillService:
                 application_url=vacancy.application_url,
                 status=AutofillStatus.FAILED,
                 warnings=["UNSUPPORTED_FORM"],
+                failure_reason=AutofillFailureReason.UNSUPPORTED_FORM,
             )
 
         discovered = self._adapter.discover_fields(page)
@@ -318,6 +336,8 @@ def _failed(
     external_id: str,
     warning: str,
     vacancy: ResolvedVacancy | None,
+    *,
+    reason: AutofillFailureReason,
 ) -> AutofillResult:
     return stage1_autofill_result(
         source=source,
@@ -325,6 +345,7 @@ def _failed(
         application_url=None if vacancy is None else vacancy.application_url,
         status=AutofillStatus.FAILED,
         warnings=[warning],
+        failure_reason=reason,
     )
 
 

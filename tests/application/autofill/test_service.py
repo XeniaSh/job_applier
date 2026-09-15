@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.application.autofill.browser import BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.models import AutofillStatus
+from app.application.autofill.models import AutofillFailureReason, AutofillStatus
 from app.application.autofill.resolver import ResolvedVacancy, VacancyResolveError
 from app.application.autofill.service import AutofillService
 from app.application.candidate_profile import CandidateProfile
@@ -151,3 +152,67 @@ def test_service_returns_failed_for_unsupported_source() -> None:
     assert result.status is AutofillStatus.FAILED
     assert result.submit_performed is False
     assert any("Unsupported vacancy source" in item for item in result.warnings)
+    assert result.failure_reason is AutofillFailureReason.VACANCY_RESOLVE_FAILED
+
+
+class _UnsupportedFormAdapter(_FakeAdapter):
+    def recognize(self, page: object) -> bool:
+        _ = page
+        return False
+
+
+def test_service_unsupported_form_sets_failure_reason() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_UnsupportedFormAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=True)
+    assert result.status is AutofillStatus.FAILED
+    assert result.failure_reason is AutofillFailureReason.UNSUPPORTED_FORM
+    assert "UNSUPPORTED_FORM" in result.warnings
+    # An unsupported form is never left open for a nonexistent "review".
+    assert session.closed is True
+
+
+def _raising_browser_factory():
+    raise BrowserSetupError("Playwright browser binaries are missing. Install Chromium with: uv run playwright install chromium")
+
+
+def test_service_browser_setup_failure_sets_failure_reason() -> None:
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_FakeAdapter(),
+        browser_factory=_raising_browser_factory,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=True)
+    assert result.status is AutofillStatus.FAILED
+    assert result.failure_reason is AutofillFailureReason.BROWSER_SETUP_FAILED
+
+
+class _ChallengeAdapter(_FakeAdapter):
+    def detect_challenge(self, page: object) -> str | None:
+        _ = page
+        return "captcha"
+
+
+def test_service_security_challenge_needs_manual_intervention() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_ChallengeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=True)
+    assert result.status is AutofillStatus.NEEDS_MANUAL_INTERVENTION
+    assert result.failure_reason is None
+    assert any("captcha" in warning for warning in result.warnings)
+    # Manual intervention still keeps the browser open for the user.
+    assert session.closed is True  # closed only after wait_for_review() returns (fake resolves immediately)

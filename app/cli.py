@@ -105,6 +105,7 @@ from app.storage.telegram_delivery import (
 )
 from app.telegram.client import (
     APPLICATION_PREPARE_ACTION,
+    REVIEW_DONE_CALLBACK_PREFIX,
     TelegramClient,
     TelegramMessageNotModifiedError,
     TelegramRequestError,
@@ -115,8 +116,10 @@ from app.telegram.client import (
     build_prepare_failed_buttons,
     build_prepared_application_buttons,
     build_ready_text,
+    build_review_done_buttons,
     map_source_to_code,
     parse_callback_data,
+    parse_review_done_session_id,
     source_supports_application_prepare,
     validate_linkedin_job_url,
 )
@@ -130,8 +133,10 @@ from app.telegram.application_prepare import (
     FAILED_TEXT,
     STARTING_TEXT,
     format_application_prepare_completed_text,
+    format_review_done_response_text,
     run_explicit_application_prepare,
 )
+from app.application.autofill.review_session import default_review_registry
 from app.telegram.formatter import (
     card_display_sections,
     format_archived_vacancy_html,
@@ -142,6 +147,7 @@ from app.telegram.formatter import (
 from app.telegram.models import (
     ApplicationHistoryRecord,
     TelegramDeliveryRecord,
+    TelegramInlineButton,
     TelegramResumeCacheRecord,
     TelegramVacancyCard,
 )
@@ -2464,6 +2470,23 @@ def run_pipeline(
                 _run_log("Cleanup worker joined", component="main")
         except Exception as exc:  # noqa: BLE001
             _run_log(f"Cleanup join failed: {exc}", component="main")
+        _run_log("Signaling open review sessions", component="main")
+        try:
+            review_registry = default_review_registry()
+            signaled = review_registry.close_all()
+            if signaled:
+                _run_log(f"Closing {signaled} open review session(s)", component="main")
+                closed = review_registry.wait_all_discarded(timeout=_REVIEW_SESSION_CLOSE_TIMEOUT_SECONDS)
+                if closed:
+                    _run_log("All review sessions closed", component="main")
+                else:
+                    _run_log(
+                        "Some review sessions did not close before shutdown timeout; "
+                        "leaving them to the daemon exit",
+                        component="main",
+                    )
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"Review session shutdown failed: {exc}", component="main")
         try:
             close_telegram_client = getattr(telegram_client, "close", None)
             if callable(close_telegram_client):
@@ -3115,6 +3138,10 @@ _PIPELINE_STOP_CHECK_SECONDS = 0.2
 
 # How long shutdown waits for an in-flight pipeline cycle before giving up on it.
 _PIPELINE_JOIN_TIMEOUT_SECONDS = 60.0
+
+# How long shutdown waits for open browser review sessions (Telegram-triggered
+# "Prepare application") to actually close after being signaled.
+_REVIEW_SESSION_CLOSE_TIMEOUT_SECONDS = 10.0
 
 
 def _deliver_pipeline_items(
@@ -3859,29 +3886,43 @@ def _dispatch_target_company_application_prepare(
     answer_once(STARTING_TEXT)
     service = prepare_service
     cache = analysis_cache
+    registry = default_review_registry()
 
     def work() -> None:
         nonlocal service, cache
         notified = {"sent": False}
+        session_id = registry.register(source=source, external_id=external_id)
 
-        def send_outcome(text: str) -> None:
+        def send_outcome(text: str, *, buttons: list[list[TelegramInlineButton]] | None = None) -> None:
             if notified["sent"]:
                 return
             client.send_text_message(
                 text,
                 chat_id=chat_id,
                 reply_to_message_id=message_id if message_id > 0 else None,
+                buttons=buttons,
             )
             notified["sent"] = True
 
         def on_ready(result) -> None:
-            send_outcome(format_application_prepare_completed_text(result))
+            # The autofill runner is about to block this thread in
+            # wait_for_review (registry.wait_for_done) until the user taps
+            # "Done reviewing", so the browser is genuinely still open when
+            # this message arrives.
+            send_outcome(
+                format_application_prepare_completed_text(result),
+                buttons=build_review_done_buttons(session_id),
+            )
 
         try:
             if service is None:
                 from app.application.explicit_prepare_runtime import build_prepare_application_service
 
-                service = build_prepare_application_service(storage, on_ready=on_ready)
+                service = build_prepare_application_service(
+                    storage,
+                    on_ready=on_ready,
+                    wait_for_review=lambda: registry.wait_for_done(session_id),
+                )
             if cache is None:
                 cache = TargetCompanyAnalysisCache(DEFAULT_TARGET_COMPANY_ANALYSIS_CACHE_PATH)
                 cache.load()
@@ -3904,6 +3945,15 @@ def _dispatch_target_company_application_prepare(
                 send_outcome(FAILED_TEXT)
             except Exception:  # noqa: BLE001
                 pass
+        finally:
+            # By the time run_explicit_application_prepare has returned, any
+            # browser the autofill runner opened is already closed — either
+            # it never reached the review handoff (FAILED), or
+            # wait_for_done() already unblocked it. Dropping the entry here
+            # is what makes a stale/duplicate
+            # "Done reviewing" tap resolve to NOT_FOUND instead of lingering
+            # forever.
+            registry.discard(session_id)
 
     if sync:
         work()
@@ -3913,6 +3963,28 @@ def _dispatch_target_company_application_prepare(
         name=f"tc-prepare:{source}:{external_id}",
         daemon=True,
     ).start()
+
+
+def _handle_review_done_callback(
+    *,
+    client: TelegramClient,
+    callback_id: str,
+    callback_data: str,
+) -> None:
+    """Handle a 'Done reviewing' tap: close only the named browser session.
+
+    Idempotent and safe for an unknown/already-closed session id — Telegram
+    always gets an answered callback query either way.
+    """
+    try:
+        session_id = parse_review_done_session_id(callback_data)
+    except ValueError:
+        if callback_id:
+            client.answer_callback_query(callback_id, text="Некорректное действие")
+        return
+    outcome = default_review_registry().mark_done(session_id)
+    if callback_id:
+        client.answer_callback_query(callback_id, text=format_review_done_response_text(outcome))
 
 
 def _process_callback_update(
@@ -3973,6 +4045,10 @@ def _process_callback_update(
             client.answer_callback_query(callback_id, text="Действие недоступно для этого чата")
         return
     configured_chat_id = callback_chat_id
+
+    if callback_data.startswith(REVIEW_DONE_CALLBACK_PREFIX):
+        _handle_review_done_callback(client=client, callback_id=callback_id, callback_data=callback_data)
+        return
 
     try:
         action, source, external_id, action_token = parse_callback_data(callback_data)

@@ -11,6 +11,22 @@ class AutofillStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class AutofillFailureReason(StrEnum):
+    """Coded reason for a FAILED result, safe to surface to end users.
+
+    Kept separate from `warnings` (which may embed raw exception text meant
+    for logs/CLI) so user-facing surfaces like Telegram can map a stable code
+    to a safe message instead of pattern-matching free-text strings.
+    """
+
+    UNSUPPORTED_FORM = "UNSUPPORTED_FORM"
+    VACANCY_RESOLVE_FAILED = "VACANCY_RESOLVE_FAILED"
+    PROFILE_LOAD_FAILED = "PROFILE_LOAD_FAILED"
+    RESUME_RESOLUTION_FAILED = "RESUME_RESOLUTION_FAILED"
+    BROWSER_SETUP_FAILED = "BROWSER_SETUP_FAILED"
+    UNEXPECTED_ERROR = "UNEXPECTED_ERROR"
+
+
 class FieldClassification(StrEnum):
     SUPPORTED_DETERMINISTIC = "SUPPORTED_DETERMINISTIC"
     UNKNOWN_REQUIRED = "UNKNOWN_REQUIRED"
@@ -48,6 +64,7 @@ class AutofillResult(BaseModel):
     resume_uploaded: bool = False
     cover_letter_filled: bool = False
     submit_performed: bool = False
+    failure_reason: AutofillFailureReason | None = None
 
 
 def stage1_autofill_result(
@@ -66,6 +83,7 @@ def stage1_autofill_result(
     resume_uploaded: bool = False,
     cover_letter_filled: bool = False,
     submit_performed: bool = False,
+    failure_reason: AutofillFailureReason | None = None,
 ) -> AutofillResult:
     """Build a Stage 1 result. Submit is always false."""
     _ = submit_performed
@@ -84,6 +102,7 @@ def stage1_autofill_result(
         resume_uploaded=resume_uploaded,
         cover_letter_filled=cover_letter_filled,
         submit_performed=False,
+        failure_reason=failure_reason,
     )
 
 
