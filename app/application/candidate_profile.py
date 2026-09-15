@@ -10,7 +10,11 @@ _COUNTRY_ALIASES = {
     "united states": "united states",
     "united states of america": "united states",
     "uk": "united kingdom",
+    "u.k.": "united kingdom",
+    "u.k": "united kingdom",
     "gb": "united kingdom",
+    "great britain": "united kingdom",
+    "britain": "united kingdom",
     "united kingdom": "united kingdom",
     "de": "germany",
     "germany": "germany",
@@ -18,12 +22,38 @@ _COUNTRY_ALIASES = {
     "netherlands": "netherlands",
     "th": "thailand",
     "thailand": "thailand",
+    "pl": "poland",
+    "poland": "poland",
 }
 
 
 def normalize_country_name(value: str) -> str:
     cleaned = " ".join(value.strip().lower().split())
     return _COUNTRY_ALIASES.get(cleaned, cleaned)
+
+
+def countries_mentioned(text: str) -> list[str]:
+    """Canonical country names mentioned in free text. Does not infer from relocation."""
+    haystack = " ".join((text or "").lower().split())
+    if not haystack:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    for alias, canonical in sorted(_COUNTRY_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
+        if not re.search(rf"\b{re.escape(alias)}\b", haystack):
+            continue
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        found.append(canonical)
+    return found
+
+
+def _strip_leading_the(value: str) -> str:
+    cleaned = " ".join(value.strip().split())
+    if cleaned.lower().startswith("the "):
+        return cleaned[4:].strip()
+    return cleaned
 
 
 ACADEMIC_HIGH_SCHOOL = "HIGH_SCHOOL"
@@ -165,14 +195,42 @@ class ProfessionalLinks(BaseModel):
     linkedin: str | None = None
     github: str | None = None
     website: str | None = None
+    gitlab_username: str | None = None
+    open_source_urls: list[str] = Field(default_factory=list)
 
-    @field_validator("linkedin", "github", "website")
+    @field_validator("linkedin", "github", "website", "gitlab_username")
     @classmethod
     def optional_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
         cleaned = value.strip()
         return cleaned or None
+
+    @field_validator("open_source_urls", mode="before")
+    @classmethod
+    def coerce_open_source_urls(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        return value
+
+    @field_validator("open_source_urls")
+    @classmethod
+    def normalize_open_source_urls(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            text = " ".join(item.strip().split())
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(text)
+        return cleaned
 
 
 class SalaryExpectations(BaseModel):
@@ -201,9 +259,10 @@ class Employment(BaseModel):
     doctorate_awarded: bool | None = None
     professional_tech_stack: list[str] = Field(default_factory=list)
     preferred_fields_of_interest: list[str] = Field(default_factory=list)
+    primary_programming_language: str | None = None
     salary_expectations: SalaryExpectations | None = None
 
-    @field_validator("current_title", "notice_period", "highest_academic_level")
+    @field_validator("current_title", "notice_period", "highest_academic_level", "primary_programming_language")
     @classmethod
     def optional_stripped_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -245,12 +304,19 @@ class Employment(BaseModel):
             doctorate_awarded=self.doctorate_awarded,
         )
 
+    def primary_language(self) -> str | None:
+        """Strongest explicit professional language. Does not dump the full stack."""
+        if self.primary_programming_language:
+            return self.primary_programming_language
+        return self.professional_tech_stack[0] if self.professional_tech_stack else None
+
 
 class CountryWorkAuthorization(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     country: str
-    authorized: bool
+    authorized: bool | None = None
+    requires_sponsorship: bool | None = None
 
     @field_validator("country")
     @classmethod
@@ -474,6 +540,13 @@ class ApplicationPolicy(BaseModel):
         default_factory=PrivacyAcknowledgementPolicy
     )
     default_no_undeclared_affiliations: bool = True
+    has_employment_or_post_employment_restrictions: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the candidate is subject to employment agreements or "
+            "post-employment restrictions. Unset means do not answer."
+        ),
+    )
     prior_affiliations: list[PriorAffiliation] = Field(default_factory=list)
     application_source_preference: list[str] = Field(
         default_factory=lambda: list(DEFAULT_APPLICATION_SOURCE_PREFERENCE)
@@ -590,6 +663,41 @@ class CandidateProfile(BaseModel):
                 return item.authorized
         return None
 
+    def sponsorship_required_for(self, country: str | None) -> bool | None:
+        """Country-specific visa-sponsorship need. Unset means do not answer.
+
+        Does not use relocation willingness, citizenship, or a global
+        destination sponsorship flag.
+        """
+        if not country:
+            return None
+        needle = normalize_country_name(country)
+        if not needle:
+            return None
+        for item in self.work_eligibility.work_authorizations:
+            if normalize_country_name(item.country) != needle:
+                continue
+            if item.requires_sponsorship is not None:
+                return item.requires_sponsorship
+        return None
+
+    def sponsorship_answer_for_scope(
+        self,
+        scope: str,
+        named_country: str | None = None,
+    ) -> tuple[bool | None, str | None]:
+        """Return (answer, referenced_country) for a parsed sponsorship scope.
+
+        ``current`` uses residence country only. ``country`` uses the named
+        country. ``generic`` may use the global requires_visa_sponsorship flag.
+        """
+        if scope == "current":
+            country = self.identity.country
+            return self.sponsorship_required_for(country), country
+        if scope == "country":
+            return self.sponsorship_required_for(named_country), named_country
+        return self.explicit_requires_visa_sponsorship(), None
+
     def explicit_requires_visa_sponsorship(self) -> bool | None:
         return self.work_eligibility.requires_visa_sponsorship
 
@@ -621,6 +729,26 @@ class CandidateProfile(BaseModel):
     def awarded_academic_level(self) -> str | None:
         """ATS-independent awarded degree token such as MASTERS or DOCTORATE."""
         return self.employment.awarded_academic_level()
+
+    def primary_programming_language(self) -> str | None:
+        return self.employment.primary_language()
+
+    def gitlab_username_for_autofill(self) -> str | None:
+        raw = self.professional_links.gitlab_username
+        if not raw:
+            return None
+        cleaned = raw.strip().lstrip("@")
+        lowered = cleaned.lower()
+        marker = "gitlab.com/"
+        if marker in lowered:
+            path = cleaned[lowered.index(marker) + len(marker):]
+            path = path.split("?", 1)[0].strip("/")
+            first = path.split("/", 1)[0].strip()
+            return first or None
+        return cleaned or None
+
+    def open_source_urls_for_autofill(self) -> list[str]:
+        return list(self.professional_links.open_source_urls)
 
     def relevant_experience_years(self) -> float | None:
         if self.employment.years_of_relevant_experience is not None:
@@ -670,6 +798,41 @@ class CandidateProfile(BaseModel):
         if self.application_policy.default_no_undeclared_affiliations:
             return False
         return None
+
+    def employment_restrictions_answer(self) -> bool | None:
+        """Explicit employment-agreement / post-employment-restriction fact.
+
+        Unset means do not answer. This is not a generic legal-compliance default.
+        """
+        return self.application_policy.has_employment_or_post_employment_restrictions
+
+    def resides_in_any(self, places: list[str]) -> bool | None:
+        """Whether current residence matches any named place.
+
+        Uses CandidateProfile country and current_location only. Does not infer
+        from relocation willingness, citizenship, or work authorization.
+        """
+        keys = self._residence_keys()
+        if not keys:
+            return None
+        for place in places:
+            wanted = normalize_country_name(_strip_leading_the(place))
+            if wanted and wanted in keys:
+                return True
+        return False
+
+    def _residence_keys(self) -> set[str]:
+        keys: set[str] = set()
+        if self.identity.country:
+            keys.add(normalize_country_name(self.identity.country))
+        location = self.identity.current_location or ""
+        if location.strip():
+            keys.add(normalize_country_name(location))
+            for part in re.split(r"[,/;|]", location):
+                cleaned = normalize_country_name(_strip_leading_the(part))
+                if cleaned:
+                    keys.add(cleaned)
+        return {item for item in keys if item}
 
     def application_source_preference(self) -> list[str]:
         return list(self.application_policy.application_source_preference)

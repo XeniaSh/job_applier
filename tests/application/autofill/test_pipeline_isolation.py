@@ -42,3 +42,12 @@ def test_greenhouse_adapter_does_not_import_orchestration() -> None:
     assert "prepare_application" not in text
     assert "PrepareApplicationService" not in text
     assert "PrepareIntent" not in text
+
+
+def test_telegram_prepare_does_not_call_autofill_or_greenhouse() -> None:
+    text = Path("app/telegram/application_prepare.py").read_text(encoding="utf-8")
+    assert "AutofillService" not in text
+    assert "explicit_prepare_runtime" not in text
+    assert "app.application.autofill.greenhouse" not in text
+    assert "app.application.autofill.service" not in text
+

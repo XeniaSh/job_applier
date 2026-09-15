@@ -47,6 +47,7 @@ def _profile(**overrides: object) -> CandidateProfile:
         "application_policy": {
             "relocation": {"willing": True},
             "default_no_undeclared_affiliations": True,
+            "has_employment_or_post_employment_restrictions": False,
             "prior_affiliations": [{"organization": "Deloitte", "associated": False}],
             "newsletter_opt_in": False,
             "sms_interview_updates": False,
@@ -229,11 +230,24 @@ def test_gender_country_sms_newsletter_overrides_and_booking() -> None:
         profile = _profile()
         fields = adapter.discover_fields(session.page)
 
-        gender = classify_field(_field(fields, "Gender"), profile)
+        gender = classify_field(_field(fields, "Gender*"), profile)
+        assert gender.field.required is True
         assert gender.fill is True
         assert adapter.fill_field(session.page, gender) is True
         assert adapter.read_back(session.page, gender.field) == "Prefer not to disclose"
         assert adapter.read_back(session.page, gender.field) != "Female"
+
+        optional_gender_field = next(
+            item for item in fields if item.label.strip() == "Gender" and not item.required
+        )
+        optional_gender = classify_field(optional_gender_field, profile)
+        assert optional_gender.fill is False
+        assert optional_gender.value is None
+        assert adapter.fill_field(session.page, optional_gender) is False
+        optional_visible = adapter.read_back(session.page, optional_gender.field) or ""
+        assert "Decline" not in optional_visible
+        assert "Female" not in optional_visible
+        assert "Male" not in optional_visible
 
         country = classify_field(_field(fields, "country/region are you currently based"), profile)
         assert country.kind is QuestionKind.COUNTRY
@@ -288,6 +302,139 @@ def test_boolean_react_select_maps_false_to_visible_no() -> None:
         assert relationship_label.strip() == "No"
         assert adapter.read_back(session.page, relationship.field) == "No"
         assert session.page.locator("#relationship").input_value() != "false"
+    finally:
+        session.close()
+
+
+def test_country_residence_located_in_restrictions_and_consulting_affiliation() -> None:
+    session = _open(REACT_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        profile = _profile()
+        fields = adapter.discover_fields(session.page)
+
+        country = classify_field(_field(fields, "current country of residence"), profile)
+        assert country.kind is QuestionKind.COUNTRY
+        assert country.value == "Uzbekistan"
+        assert adapter.fill_field(session.page, country) is True
+        assert adapter.read_back(session.page, country.field) == "Uzbekistan"
+
+        located = classify_field(_field(fields, "located in the UK or Poland"), profile)
+        assert located.kind is QuestionKind.LOCATED_IN
+        assert located.value in {False, "No"}
+        assert adapter.fill_field(session.page, located) is True
+        assert adapter.read_back(session.page, located.field) == "No"
+
+        restrictions = classify_field(
+            _field(fields, "employment agreements and/or post-employment"),
+            profile,
+        )
+        assert restrictions.kind is QuestionKind.EMPLOYMENT_RESTRICTIONS
+        assert restrictions.value in {False, "No"}
+        assert adapter.fill_field(session.page, restrictions) is True
+        assert adapter.read_back(session.page, restrictions.field) == "No"
+
+        consulted = classify_field(_field(fields, "previously worked at or consulted"), profile)
+        assert consulted.kind is QuestionKind.PRIOR_AFFILIATION
+        assert adapter.fill_field(session.page, consulted) is True
+        assert adapter.read_back(session.page, consulted.field) == "No"
+        assert session.page.evaluate("window.__submitClicked") is False
+        assert session.page.evaluate("window.__formSubmitted") is False
+    finally:
+        session.close()
+
+
+def test_primary_language_oss_gitlab_username_and_current_location_visa() -> None:
+    session = _open(REACT_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        profile = _profile(
+            work_eligibility={
+                "citizenship": ["Germany"],
+                "requires_visa_sponsorship": True,
+                "work_authorizations": [
+                    {"country": "Netherlands", "authorized": False, "requires_sponsorship": True},
+                ],
+            }
+        )
+        fields = adapter.discover_fields(session.page)
+
+        language = classify_field(_field(fields, "Select your primary programming language"), profile)
+        assert language.kind is QuestionKind.PRIMARY_LANGUAGE
+        assert language.value == "Java"
+        assert adapter.fill_field(session.page, language) is True
+        assert adapter.read_back(session.page, language.field) == "Java"
+
+        oss = classify_field(_field(fields, "open source projects"), profile)
+        assert oss.kind is QuestionKind.OPEN_SOURCE_LINKS
+        assert oss.fill is False
+        assert adapter.fill_field(session.page, oss) is False
+        assert adapter.read_back(session.page, oss.field) in {None, ""}
+
+        with_urls = _profile(
+            professional_links={
+                "open_source_urls": ["https://github.com/ada-example-test/job-applier"],
+            }
+        )
+        oss_filled = classify_field(_field(fields, "open source projects"), with_urls)
+        assert oss_filled.fill is True
+        assert adapter.fill_field(session.page, oss_filled) is True
+        assert "job-applier" in (adapter.read_back(session.page, oss_filled.field) or "")
+
+        gitlab = classify_field(_field(fields, "GitLab username"), profile)
+        assert gitlab.kind is QuestionKind.GITLAB_USERNAME
+        assert gitlab.fill is False
+        assert adapter.fill_field(session.page, gitlab) is False
+        assert adapter.read_back(session.page, gitlab.field) in {None, ""}
+
+        visa = classify_field(_field(fields, "visa to remain in your current location"), profile)
+        assert visa.kind is QuestionKind.VISA_SPONSORSHIP
+        assert visa.fill is False
+        assert visa.value is None
+        assert visa.unresolved_reason == (
+            "current-location sponsorship requires country-specific fact for Uzbekistan"
+        )
+        assert adapter.fill_field(session.page, visa) is False
+        visible = adapter.read_back(session.page, visa.field) or ""
+        assert "Netherlands" not in visible
+        assert "Highly Skilled" not in visible
+        assert session.page.evaluate("window.__submitClicked") is False
+        assert session.page.evaluate("window.__formSubmitted") is False
+    finally:
+        session.close()
+
+
+def test_primary_language_textarea_java_survives_react_readback() -> None:
+    session = _open(REACT_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        profile = _profile(
+            employment={
+                "years_of_experience": 7,
+                "highest_academic_level": "Master's",
+                "postgraduate_studies_completed": True,
+                "doctorate_awarded": False,
+                "professional_tech_stack": ["Kotlin", "Spring Boot"],
+                "primary_programming_language": "Java",
+                "open_to_relocation": True,
+            }
+        )
+        fields = adapter.discover_fields(session.page)
+        language = classify_field(
+            _field(fields, "primary programming language and/or framework"),
+            profile,
+        )
+        assert language.field.field_type == "textarea"
+        assert language.field.required is True
+        assert language.kind is QuestionKind.PRIMARY_LANGUAGE
+        assert language.value == "Java"
+        assert adapter.fill_field(session.page, language) is True
+        editor = session.page.locator("#primary_language_text")
+        assert editor.input_value() == "Java"
+        assert editor.get_attribute("data-react-value") == "Java"
+        assert adapter.read_back(session.page, language.field) == "Java"
+        assert session.page.evaluate("window.__submitClicked") is False
+        assert session.page.evaluate("window.__formSubmitted") is False
     finally:
         session.close()
 

@@ -212,7 +212,11 @@ class AutofillService:
                     )
             if item.classification is FieldClassification.UNKNOWN_REQUIRED:
                 unresolved_required.append(record)
+                if item.unresolved_reason:
+                    warnings.append(item.unresolved_reason)
             elif item.classification is FieldClassification.UNKNOWN_OPTIONAL:
+                if item.kind is QuestionKind.GITLAB_USERNAME:
+                    continue
                 unresolved_optional.append(record)
 
         for item in resume_items:
@@ -332,6 +336,7 @@ def _field_result(item: ClassifiedField) -> AutofillFieldResult:
         required=item.field.required,
         name=item.field.name,
         generated=item.generated,
+        note=item.unresolved_reason,
     )
 
 
@@ -430,10 +435,16 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
         if item.kind in {
             QuestionKind.YEARS_EXPERIENCE,
             QuestionKind.FIELD_OF_INTEREST,
+            QuestionKind.PRIMARY_LANGUAGE,
+            QuestionKind.OPEN_SOURCE_LINKS,
+            QuestionKind.GITLAB_USERNAME,
             QuestionKind.RELOCATION,
             QuestionKind.OFFICE_WORK,
             QuestionKind.EMPLOYEE_RELATIONSHIP,
             QuestionKind.PRIOR_AFFILIATION,
+            QuestionKind.EMPLOYMENT_RESTRICTIONS,
+            QuestionKind.LOCATED_IN,
+            QuestionKind.VISA_SPONSORSHIP,
             QuestionKind.APPLICATION_SOURCE,
             QuestionKind.PRIVACY_CONSENT,
             QuestionKind.NEWSLETTER,

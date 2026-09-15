@@ -110,3 +110,24 @@ def test_summary_skips_blank_labels() -> None:
     assert "- Country*" in text
     assert "- \n" not in text
     assert text.count("- ") >= 1
+
+
+def test_summary_includes_current_location_sponsorship_reason() -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:gitlab",
+        external_id="1",
+        status=AutofillStatus.NEEDS_MANUAL_INTERVENTION,
+        unresolved_required_fields=[
+            AutofillFieldResult(
+                label="Will you now or in the future require sponsorship for a visa to remain in your current location?",
+                classification=FieldClassification.UNKNOWN_REQUIRED,
+                required=True,
+                note="current-location sponsorship requires country-specific fact for Uzbekistan",
+            )
+        ],
+        warnings=["current-location sponsorship requires country-specific fact for Uzbekistan"],
+    )
+    text = render_autofill_summary(result)
+    assert "current-location sponsorship requires country-specific fact for Uzbekistan" in text
+    assert "Needs review:" in text
+    assert "Netherlands" not in text

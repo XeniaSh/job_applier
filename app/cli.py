@@ -104,6 +104,7 @@ from app.storage.telegram_delivery import (
     TelegramDeliveryStorage,
 )
 from app.telegram.client import (
+    APPLICATION_PREPARE_ACTION,
     TelegramClient,
     TelegramMessageNotModifiedError,
     TelegramRequestError,
@@ -116,6 +117,7 @@ from app.telegram.client import (
     build_ready_text,
     map_source_to_code,
     parse_callback_data,
+    source_supports_application_prepare,
     validate_linkedin_job_url,
 )
 from app.telegram.destinations import (
@@ -123,6 +125,12 @@ from app.telegram.destinations import (
     TelegramDestinationConfigError,
     configured_telegram_chat_ids,
     resolve_telegram_chat_id,
+)
+from app.telegram.application_prepare import (
+    FAILED_TEXT,
+    STARTING_TEXT,
+    format_application_prepare_completed_text,
+    run_explicit_application_prepare,
 )
 from app.telegram.formatter import (
     card_display_sections,
@@ -2208,6 +2216,7 @@ def run_pipeline(
                 timing_logger=_component_log("poller") if verbose else None,
                 undo_window_seconds=settings.undo_window_seconds,
                 cleanup_scheduler=cleanup_scheduler,
+                application_prepare_sync=False,
             )
             if prepare_requests > 0:
                 _run_log("Prepare request received", component="poller")
@@ -2503,6 +2512,7 @@ def poll_telegram_actions(
                     artifacts_dir=settings.prepared_artifacts_dir,
                     timing_logger=None,
                     undo_window_seconds=settings.undo_window_seconds,
+                    application_prepare_sync=False,
                 )
             except TelegramRequestError as exc:
                 typer.secho(f"Ошибка Telegram polling: {exc}", err=True, fg=typer.colors.RED)
@@ -3830,6 +3840,81 @@ def preview_linkedin_email(
     typer.echo(f"Parsing errors: {parsing_errors}")
 
 
+def _dispatch_target_company_application_prepare(
+    *,
+    source: str,
+    external_id: str,
+    client: TelegramClient,
+    storage: TelegramDeliveryStorage,
+    chat_id: str,
+    message_id: int,
+    answer_once: Callable[[str | None], None],
+    prepare_service: object | None,
+    analysis_cache: TargetCompanyAnalysisCache | None,
+    sync: bool,
+) -> None:
+    if not source_supports_application_prepare(source):
+        answer_once("Preparation is not available for this vacancy.")
+        return
+    answer_once(STARTING_TEXT)
+    service = prepare_service
+    cache = analysis_cache
+
+    def work() -> None:
+        nonlocal service, cache
+        notified = {"sent": False}
+
+        def send_outcome(text: str) -> None:
+            if notified["sent"]:
+                return
+            client.send_text_message(
+                text,
+                chat_id=chat_id,
+                reply_to_message_id=message_id if message_id > 0 else None,
+            )
+            notified["sent"] = True
+
+        def on_ready(result) -> None:
+            send_outcome(format_application_prepare_completed_text(result))
+
+        try:
+            if service is None:
+                from app.application.explicit_prepare_runtime import build_prepare_application_service
+
+                service = build_prepare_application_service(storage, on_ready=on_ready)
+            if cache is None:
+                cache = TargetCompanyAnalysisCache(DEFAULT_TARGET_COMPANY_ANALYSIS_CACHE_PATH)
+                cache.load()
+            outcome = run_explicit_application_prepare(
+                source=source,
+                external_id=external_id,
+                prepare_service=service,
+                recommendation_lookup=cache,
+                keep_open=True,
+            )
+            send_outcome(outcome.text)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Target company application prepare failed for %s:%s: %s",
+                source,
+                external_id,
+                exc,
+            )
+            try:
+                send_outcome(FAILED_TEXT)
+            except Exception:  # noqa: BLE001
+                pass
+
+    if sync:
+        work()
+        return
+    threading.Thread(
+        target=work,
+        name=f"tc-prepare:{source}:{external_id}",
+        daemon=True,
+    ).start()
+
+
 def _process_callback_update(
     *,
     update: dict,
@@ -3844,6 +3929,9 @@ def _process_callback_update(
     undo_window_seconds: int | None = None,
     received_at: float | None = None,
     cleanup_scheduler: "_CleanupScheduler | None" = None,
+    application_prepare_service: object | None = None,
+    application_prepare_cache: TargetCompanyAnalysisCache | None = None,
+    application_prepare_sync: bool = True,
 ) -> None:
     handler_started_at = time.monotonic()
     database_ms = 0.0
@@ -4031,6 +4119,19 @@ def _process_callback_update(
                     enqueue_reason="callback_prepare",
                     timing_logger=timing_logger,
                 )
+        elif action == APPLICATION_PREPARE_ACTION:
+            _dispatch_target_company_application_prepare(
+                source=source,
+                external_id=external_id,
+                client=client,
+                storage=storage,
+                chat_id=configured_chat_id,
+                message_id=message_id,
+                answer_once=answer_once,
+                prepare_service=application_prepare_service,
+                analysis_cache=application_prepare_cache,
+                sync=application_prepare_sync,
+            )
         elif action == "copy":
             get_preparation = getattr(storage, "get_preparation", None)
             prep = get_preparation(source, external_id) if callable(get_preparation) else None
@@ -6222,6 +6323,9 @@ def _poll_telegram_actions_once(
     undo_window_seconds: int | None = None,
     cleanup_scheduler: "_CleanupScheduler | None" = None,
     allowed_chat_ids: frozenset[str] | None = None,
+    application_prepare_service: object | None = None,
+    application_prepare_cache: TargetCompanyAnalysisCache | None = None,
+    application_prepare_sync: bool = True,
 ) -> tuple[int | None, int]:
     updates = client.get_updates(offset=offset, timeout=timeout)
     # Stamped once per batch: measures how long an update waited behind the
@@ -6254,6 +6358,9 @@ def _poll_telegram_actions_once(
                 undo_window_seconds=undo_window_seconds,
                 received_at=received_at,
                 cleanup_scheduler=cleanup_scheduler,
+                application_prepare_service=application_prepare_service,
+                application_prepare_cache=application_prepare_cache,
+                application_prepare_sync=application_prepare_sync,
             )
         except Exception as exc:  # noqa: BLE001
             if timing_logger is not None:

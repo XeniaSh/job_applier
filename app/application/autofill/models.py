@@ -28,6 +28,7 @@ class AutofillFieldResult(BaseModel):
     required: bool = False
     name: str | None = None
     generated: bool = False
+    note: str | None = None
 
 
 class AutofillResult(BaseModel):

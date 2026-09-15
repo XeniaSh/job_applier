@@ -81,3 +81,74 @@ def test_gender_disclosure_can_use_explicit_profile_value() -> None:
         application_policy={"prefer_not_to_disclose_gender": False},
     )
     assert profile.gender_for_autofill() == "female"
+
+
+def test_resides_in_any_uses_current_residence_only() -> None:
+    germany = _profile(application_policy={"relocation": {"willing": True}})
+    assert germany.resides_in_any(["UK", "Poland"]) is False
+    assert germany.resides_in_any(["Germany"]) is True
+    uk = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "London",
+            "country": "UK",
+        }
+    )
+    assert uk.resides_in_any(["the UK", "Poland"]) is True
+    empty = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": None,
+            "country": None,
+        }
+    )
+    assert empty.resides_in_any(["UK", "Poland"]) is None
+
+
+def test_employment_restrictions_answer_is_explicit_only() -> None:
+    unset = _profile()
+    assert unset.employment_restrictions_answer() is None
+    denied = _profile(
+        application_policy={"has_employment_or_post_employment_restrictions": False}
+    )
+    assert denied.employment_restrictions_answer() is False
+    restricted = _profile(
+        application_policy={"has_employment_or_post_employment_restrictions": True}
+    )
+    assert restricted.employment_restrictions_answer() is True
+
+
+def test_sponsorship_required_for_is_country_specific() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Tashkent, Uzbekistan",
+            "country": "Uzbekistan",
+        },
+        work_eligibility={
+            "citizenship": ["Germany"],
+            "requires_visa_sponsorship": True,
+            "work_authorizations": [
+                {"country": "Netherlands", "authorized": False, "requires_sponsorship": True},
+            ],
+        },
+        application_policy={"relocation": {"willing": True}},
+    )
+    assert profile.identity.country == "Uzbekistan"
+    assert profile.resides_in_any(["Uzbekistan"]) is True
+    assert profile.resides_in_any(["Netherlands"]) is False
+    assert profile.sponsorship_required_for("Uzbekistan") is None
+    assert profile.sponsorship_required_for("Netherlands") is True
+    assert profile.sponsorship_answer_for_scope("current") == (None, "Uzbekistan")
+    assert profile.sponsorship_answer_for_scope("generic") == (True, None)
+    assert profile.work_authorization_for("Uzbekistan") is None
+    assert profile.relocation_answer_for("Netherlands") is True

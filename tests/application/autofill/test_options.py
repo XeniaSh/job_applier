@@ -10,8 +10,11 @@ from app.application.autofill.options import (
     match_prefer_not_to_disclose_gender,
     match_years_option,
     match_yes_no,
+    parse_located_in_places,
     parse_max_choices,
     parse_relocation_destination,
+    parse_sponsorship_scope,
+    match_sponsorship_option,
     select_listed_options,
 )
 
@@ -21,6 +24,12 @@ def test_parse_max_choices_and_relocation_destination() -> None:
     assert parse_relocation_destination(
         "Are you currently based in Bangkok or open to relocate to Bangkok?"
     ) == "Bangkok"
+
+
+def test_parse_located_in_places_splits_named_countries() -> None:
+    assert parse_located_in_places("Are you located in the UK or Poland?") == ["UK", "Poland"]
+    assert parse_located_in_places("Do you reside in Germany?") == ["Germany"]
+    assert parse_located_in_places("Are you willing to relocate to the UK or Poland?") == []
 
 
 def test_years_and_academic_matching() -> None:
@@ -94,6 +103,9 @@ def test_match_gender_prefers_not_to_disclose_policy() -> None:
     assert match_prefer_not_to_disclose_gender(options) == "Prefer not to disclose"
     assert match_gender_option("prefer not to disclose", options) == "Prefer not to disclose"
     assert match_gender_option("prefer not to say", ["Prefer not to say", "Female"]) == "Prefer not to say"
+    assert match_prefer_not_to_disclose_gender(["Female", "Male", "Decline To Self Identify"]) == (
+        "Decline To Self Identify"
+    )
     assert match_prefer_not_to_disclose_gender(["Female", "Male"]) is None
 
 
@@ -132,3 +144,28 @@ def test_match_application_source_prefers_website_over_linkedin() -> None:
 def test_match_application_source_skips_forbidden_even_if_listed() -> None:
     options = ["Employee Referral", "Recruiter", "LinkedIn"]
     assert match_application_source(options, ["Employee Referral", "LinkedIn"]) == "LinkedIn"
+
+
+def test_parse_sponsorship_scope_distinguishes_current_location() -> None:
+    assert parse_sponsorship_scope(
+        "Will you now or in the future require sponsorship for a visa to remain in your current location?"
+    ) == ("current", None)
+    assert parse_sponsorship_scope("Will you now or in the future require visa sponsorship?") == (
+        "generic",
+        None,
+    )
+    assert parse_sponsorship_scope("Will you require visa sponsorship to work in the Netherlands?") == (
+        "country",
+        "netherlands",
+    )
+
+
+def test_match_sponsorship_option_does_not_pick_unrelated_hsm() -> None:
+    options = ["Yes, Netherlands Highly Skilled Migrant Visa", "No"]
+    assert match_sponsorship_option(True, options, referenced_country="uzbekistan") is None
+    assert match_sponsorship_option(True, options, referenced_country=None) is None
+    assert match_sponsorship_option(True, options, referenced_country="netherlands") == (
+        "Yes, Netherlands Highly Skilled Migrant Visa"
+    )
+    assert match_sponsorship_option(False, options, referenced_country="uzbekistan") == "No"
+    assert match_sponsorship_option(True, ["Yes", "No"], referenced_country=None) == "Yes"

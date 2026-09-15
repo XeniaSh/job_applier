@@ -341,7 +341,12 @@ def build_action_buttons(source: str, external_id: str, url: str) -> list[list[T
     skip_data = _callback_data("skip", compact_source, external_id)
     applied_data = _callback_data("applied", compact_source, external_id)
     rows: list[list[TelegramInlineButton]] = []
-    if source_supports_prepare(source):
+    if source_supports_application_prepare(source):
+        prepare_data = _callback_data(APPLICATION_PREPARE_ACTION, compact_source, external_id)
+        rows.append(
+            [TelegramInlineButton(text=APPLICATION_PREPARE_BUTTON_TEXT, callback_data=prepare_data)]
+        )
+    elif source_supports_prepare(source):
         prepare_data = _callback_data("prepare", compact_source, external_id)
         rows.append([TelegramInlineButton(text="🛠 Prepare", callback_data=prepare_data)])
     rows.append([TelegramInlineButton(text="✅ Applied", callback_data=applied_data)])
@@ -414,21 +419,33 @@ def build_ready_text(*, title: str, company: str | None, recommended_resume: str
 _TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX = "target_company:greenhouse:"
 _TARGET_COMPANY_GREENHOUSE_CODE_PREFIX = "tcg."
 _PREPARE_SUPPORTED_SOURCES = frozenset({"linkedin-email"})
+APPLICATION_PREPARE_ACTION = "prepapp"
+APPLICATION_PREPARE_BUTTON_TEXT = "Prepare application"
 
 
 def source_supports_prepare(source: str) -> bool:
-    """Return whether Prepare is offered for this vacancy source or compact code."""
+    """Return whether LinkedIn cover-letter Prepare is offered for this source."""
+    canonical = _canonical_source(source)
+    return canonical in _PREPARE_SUPPORTED_SOURCES
+
+
+def source_supports_application_prepare(source: str) -> bool:
+    """Return whether explicit Target Company application prepare is offered."""
+    canonical = _canonical_source(source)
+    return canonical.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX)
+
+
+def _canonical_source(source: str) -> str:
     normalized = str(source or "").strip()
     if not normalized:
-        return False
+        return ""
     try:
-        canonical = map_code_to_source(normalized)
+        return map_code_to_source(normalized)
     except ValueError:
         try:
-            canonical = map_code_to_source(map_source_to_code(normalized))
+            return map_code_to_source(map_source_to_code(normalized))
         except ValueError:
-            return False
-    return canonical in _PREPARE_SUPPORTED_SOURCES
+            return ""
 
 
 def map_source_to_code(source: str) -> str:
@@ -489,7 +506,7 @@ def parse_callback_data(value: str) -> tuple[str, str, str, str | None]:
         action, source_code, external_id, action_id = parts
     else:
         raise ValueError("Malformed callback data.")
-    if action not in {"skip", "prepare", "applied", "copy", "resume", "undo"}:
+    if action not in {"skip", "prepare", "applied", "copy", "resume", "undo", APPLICATION_PREPARE_ACTION}:
         raise ValueError("Unsupported callback action.")
     if not external_id.strip():
         raise ValueError("Invalid external id in callback data.")

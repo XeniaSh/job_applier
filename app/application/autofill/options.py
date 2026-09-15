@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import re
 
-from app.application.candidate_profile import canonical_academic_level
+from app.application.candidate_profile import (
+    canonical_academic_level,
+    countries_mentioned,
+    normalize_country_name,
+)
 
 _MAX_CHOICES_RE = re.compile(
     r"(?:select|choose|pick)\s+(?:the\s+)?(?:top|up to|at most)?\s*(\d+)",
@@ -12,6 +16,11 @@ _RELOCATE_RE = re.compile(
     r"(?:based in|relocate to|relocation to|move to)\s+([A-Za-z][A-Za-z .'-]+?)(?:\s+or\s+|\s*\?|$)",
     re.IGNORECASE,
 )
+_LOCATED_IN_RE = re.compile(
+    r"(?:currently\s+)?(?:located in|reside(?:s)? in|residing in|live in|living in)\s+(.+?)(?:\s*\?|$)",
+    re.IGNORECASE,
+)
+_PLACE_SPLIT_RE = re.compile(r"\s*(?:,|/|\bor\b|\band\b)\s*", re.IGNORECASE)
 _RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
 _PLUS_RE = re.compile(
     r"(?:more than|over|at least|minimum)?\s*(\d+(?:\.\d+)?)\s*(?:\+|or more|and above)?",
@@ -44,6 +53,121 @@ def parse_relocation_destination(text: str) -> str | None:
     if all(item.lower() == found[0].lower() for item in found):
         return found[0]
     return found[-1]
+
+
+def parse_located_in_places(text: str) -> list[str]:
+    """Extract named places from a current-residence presence question."""
+    match = _LOCATED_IN_RE.search(text or "")
+    if not match:
+        return []
+    blob = match.group(1).strip().rstrip("?.,")
+    places: list[str] = []
+    seen: set[str] = set()
+    for part in _PLACE_SPLIT_RE.split(blob):
+        cleaned = _strip_leading_the(part).strip(" ?.,!")
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        places.append(cleaned)
+    return places
+
+
+def _strip_leading_the(value: str) -> str:
+    cleaned = " ".join(value.strip().split())
+    if cleaned.lower().startswith("the "):
+        return cleaned[4:].strip()
+    return cleaned
+
+
+_CURRENT_LOCATION_SPONSORSHIP_TERMS = (
+    "current location",
+    "current country",
+    "current residence",
+    "remain in your current",
+    "remain in the current",
+    "where you currently live",
+    "where you currently reside",
+    "in your current location",
+)
+_VISA_PROGRAM_COUNTRIES = (
+    ("highly skilled migrant", "netherlands"),
+    ("hsm visa", "netherlands"),
+    ("h-1b", "united states"),
+    ("h1b", "united states"),
+    ("h1-b", "united states"),
+    ("tn visa", "united states"),
+    ("e-3", "united states"),
+    ("green card", "united states"),
+    ("skilled worker visa", "united kingdom"),
+)
+
+
+def parse_sponsorship_scope(text: str) -> tuple[str, str | None]:
+    """Classify a sponsorship question as current-location, named-country, or generic."""
+    haystack = " ".join((text or "").lower().split())
+    if any(term in haystack for term in _CURRENT_LOCATION_SPONSORSHIP_TERMS):
+        return "current", None
+    mentioned = countries_mentioned(haystack)
+    if len(mentioned) == 1:
+        return "country", mentioned[0]
+    if len(mentioned) > 1:
+        return "country", mentioned[-1]
+    return "generic", None
+
+
+def option_implied_country(option: str) -> str | None:
+    mentioned = countries_mentioned(option)
+    if mentioned:
+        return mentioned[0]
+    lowered = option.lower()
+    for term, country in _VISA_PROGRAM_COUNTRIES:
+        if term in lowered:
+            return country
+    return None
+
+
+def match_sponsorship_option(
+    value: bool,
+    options: list[str],
+    referenced_country: str | None = None,
+) -> str | None:
+    """Map a sponsorship boolean onto a Yes/No option without picking an unrelated visa.
+
+    Country-specific labels such as Netherlands HSM are used only when the
+    question's referenced country matches. Generic Yes is preferred.
+    """
+    labels = [item.strip() for item in options if item and item.strip()]
+    if not value:
+        return match_yes_no(False, labels) if labels else "No"
+    if not labels:
+        return "Yes"
+    exact = [
+        item
+        for item in labels
+        if item.lower().rstrip(".").strip() == "yes"
+    ]
+    if exact:
+        return exact[0]
+    referenced = normalize_country_name(referenced_country) if referenced_country else ""
+    safe: list[str] = []
+    for item in labels:
+        if not re.match(r"^(yes)\b", item.strip().lower()):
+            continue
+        implied = option_implied_country(item)
+        if implied and referenced and implied != referenced:
+            continue
+        if implied and not referenced:
+            continue
+        if implied and referenced and implied == referenced:
+            safe.append(item)
+            continue
+        if implied is None:
+            safe.append(item)
+    if not safe:
+        return None
+    generic = [item for item in safe if option_implied_country(item) is None]
+    return generic[0] if generic else safe[0]
 
 
 def label_matches(wanted: str, option: str) -> bool:
@@ -327,6 +451,7 @@ def match_prefer_not_to_disclose_gender(options: list[str]) -> str | None:
     preferred = (
         "prefer not to disclose",
         "prefer not to say",
+        "decline to self identify",
         "decline to self-identify",
         "do not wish",
         "don't wish",

@@ -69,6 +69,22 @@ def test_gender_policy_prefers_not_to_disclose() -> None:
     assert classified.classification is FieldClassification.SUPPORTED_DETERMINISTIC
 
 
+def test_optional_gender_is_sensitive_and_unfilled() -> None:
+    classified = classify_field(
+        DiscoveredField(
+            label="Gender",
+            field_type="select",
+            required=False,
+            options=["Decline To Self Identify", "Female", "Male"],
+        ),
+        _profile(),
+    )
+    assert classified.kind.value == "gender"
+    assert classified.fill is False
+    assert classified.value is None
+    assert classified.classification is FieldClassification.SENSITIVE_OPTIONAL
+
+
 def test_sensitive_optional_is_not_filled() -> None:
     classified = classify_field(
         DiscoveredField(label="Ethnicity", field_type="select", required=False),

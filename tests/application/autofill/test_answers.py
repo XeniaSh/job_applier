@@ -108,6 +108,48 @@ def test_unsafe_legal_question_is_not_sent_to_llm() -> None:
         options=["Yes", "No"],
     )
     assert generator.generate(sms, _profile()) is None
+    located = DiscoveredField(
+        label="Are you located in the UK or Poland?",
+        field_type="select",
+        options=["Yes", "No"],
+        required=True,
+    )
+    assert generator.generate(located, _profile()) is None
+    restrictions = DiscoveredField(
+        label="Are you subject to any employment agreements and/or post-employment restrictions?",
+        field_type="select",
+        options=["Yes", "No"],
+        required=True,
+    )
+    assert generator.generate(restrictions, _profile()) is None
+    consulted = DiscoveredField(
+        label="Have you previously worked at or consulted for GitLab?",
+        field_type="select",
+        options=["Yes", "No"],
+        required=True,
+    )
+    assert generator.generate(consulted, _profile()) is None
+    primary = DiscoveredField(
+        label="What is your primary programming language and/or framework?",
+        field_type="text",
+        required=True,
+    )
+    assert generator.generate(primary, _profile()) is None
+    oss = DiscoveredField(
+        label="Please share links of any open source projects you own or have made contributions to",
+        field_type="textarea",
+        required=True,
+    )
+    assert generator.generate(oss, _profile()) is None
+    gitlab = DiscoveredField(label="What is your GitLab username?", field_type="text")
+    assert generator.generate(gitlab, _profile()) is None
+    current_visa = DiscoveredField(
+        label="Will you now or in the future require sponsorship for a visa to remain in your current location?",
+        field_type="select",
+        options=["Yes, Netherlands Highly Skilled Migrant Visa", "No"],
+        required=True,
+    )
+    assert generator.generate(current_visa, _profile()) is None
     assert llm.calls == []
 
 

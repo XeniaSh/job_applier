@@ -21,6 +21,7 @@ class ClassifiedField:
     generated: bool = False
     max_choices: int | None = None
     inactive_conditional: bool = False
+    unresolved_reason: str | None = None
 
 
 def classify_field(field: DiscoveredField, profile: CandidateProfile) -> ClassifiedField:
@@ -43,6 +44,7 @@ def classify_field(field: DiscoveredField, profile: CandidateProfile) -> Classif
                 fill=True,
                 kind=mapped.kind,
                 country=mapped.country,
+                unresolved_reason=mapped.unresolved_reason,
             )
         unresolved = (
             FieldClassification.UNKNOWN_REQUIRED
@@ -56,6 +58,7 @@ def classify_field(field: DiscoveredField, profile: CandidateProfile) -> Classif
             fill=False,
             kind=mapped.kind,
             country=mapped.country,
+            unresolved_reason=mapped.unresolved_reason,
         )
 
     if mapped.kind is QuestionKind.SENSITIVE:
@@ -67,6 +70,7 @@ def classify_field(field: DiscoveredField, profile: CandidateProfile) -> Classif
             kind=mapped.kind,
             country=mapped.country,
             inactive_conditional=mapped.inactive_conditional,
+            unresolved_reason=mapped.unresolved_reason,
         )
 
     if mapped.inactive_conditional:
@@ -79,6 +83,7 @@ def classify_field(field: DiscoveredField, profile: CandidateProfile) -> Classif
             country=mapped.country,
             max_choices=mapped.max_choices,
             inactive_conditional=True,
+            unresolved_reason=mapped.unresolved_reason,
         )
 
     if mapped.fillable:
@@ -91,6 +96,7 @@ def classify_field(field: DiscoveredField, profile: CandidateProfile) -> Classif
             country=mapped.country,
             max_choices=mapped.max_choices,
             inactive_conditional=mapped.inactive_conditional,
+            unresolved_reason=mapped.unresolved_reason,
         )
 
     unresolved = (
@@ -107,4 +113,5 @@ def classify_field(field: DiscoveredField, profile: CandidateProfile) -> Classif
         country=mapped.country,
         max_choices=mapped.max_choices,
         inactive_conditional=mapped.inactive_conditional,
+        unresolved_reason=mapped.unresolved_reason,
     )

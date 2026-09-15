@@ -112,3 +112,37 @@ def test_cache_roundtrip_restores_analysis(tmp_path: Path) -> None:
     assert record.recommendation.label == "CHECK_MANUALLY"
     assert record.seniority.label == "UNKNOWN"
     assert loaded.get(_vacancy(description="changed")) is None
+    assert loaded.get_by_identity("target_company:greenhouse:adyen", "101") is not None
+    assert loaded.get_by_identity("target_company:greenhouse:adyen", "101").recommendation.label == (
+        "CHECK_MANUALLY"
+    )
+    assert loaded.get_by_identity("target_company:greenhouse:adyen", "999") is None
+    assert loaded.get_by_identity("target_company:greenhouse:other", "101") is None
+
+
+def test_identity_lookup_keeps_latest_analysis_across_description_change(tmp_path: Path) -> None:
+    cache_file = tmp_path / "cache.json"
+    cache = TargetCompanyAnalysisCache(cache_file)
+    vacancy = _vacancy()
+    cache.put(
+        vacancy,
+        evaluation=_evaluation(),
+        feasibility=_feasibility(),
+        recommendation=ApplicationRecommendation(label="CHECK_MANUALLY", reasons=["unclear"]),
+        seniority=SeniorityClassification(label="UNKNOWN", reasons=[]),
+    )
+    cache.put(
+        _vacancy(description="Java backend services and Kafka"),
+        evaluation=_evaluation(),
+        feasibility=_feasibility(),
+        recommendation=ApplicationRecommendation(label="APPLY_NOW", reasons=["clear fit"]),
+        seniority=SeniorityClassification(label="SENIOR", reasons=["title has senior"]),
+    )
+    cache.save()
+
+    loaded = TargetCompanyAnalysisCache(cache_file)
+    loaded.load()
+    record = loaded.get_by_identity("target_company:greenhouse:adyen", "101")
+    assert record is not None
+    assert record.recommendation.label == "APPLY_NOW"
+    assert loaded.get(vacancy) is None

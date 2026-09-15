@@ -12,15 +12,17 @@ from app.application.autofill.acknowledgements import (
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import (
     match_application_source,
-    match_gender_option,
     match_interest_option,
     match_option,
     match_prefer_not_to_disclose_gender,
     match_years_option,
     match_yes_no,
     match_affirmative_option,
+    match_sponsorship_option,
+    parse_located_in_places,
     parse_max_choices,
     parse_relocation_destination,
+    parse_sponsorship_scope,
 )
 from app.application.candidate_profile import CandidateProfile
 
@@ -41,7 +43,9 @@ class QuestionKind(StrEnum):
     COUNTRY = "country"
     LINKEDIN = "linkedin"
     GITHUB = "github"
+    GITLAB_USERNAME = "gitlab_username"
     WEBSITE = "website"
+    OPEN_SOURCE_LINKS = "open_source_links"
     RESUME = "resume"
     COVER_LETTER = "cover_letter"
     VISA_SPONSORSHIP = "visa_sponsorship"
@@ -50,12 +54,15 @@ class QuestionKind(StrEnum):
     YEARS_EXPERIENCE = "years_experience"
     ACADEMIC_LEVEL = "academic_level"
     TECH_STACK = "tech_stack"
+    PRIMARY_LANGUAGE = "primary_language"
     FIELD_OF_INTEREST = "field_of_interest"
     RELOCATION = "relocation"
     OFFICE_WORK = "office_work"
     EMPLOYEE_RELATIONSHIP = "employee_relationship"
     EMPLOYEE_RELATIONSHIP_DETAILS = "employee_relationship_details"
     PRIOR_AFFILIATION = "prior_affiliation"
+    EMPLOYMENT_RESTRICTIONS = "employment_restrictions"
+    LOCATED_IN = "located_in"
     APPLICATION_SOURCE = "application_source"
     PRIVACY_CONSENT = "privacy_consent"
     NEWSLETTER = "newsletter"
@@ -77,6 +84,8 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.EMPLOYEE_RELATIONSHIP,
         QuestionKind.EMPLOYEE_RELATIONSHIP_DETAILS,
         QuestionKind.PRIOR_AFFILIATION,
+        QuestionKind.EMPLOYMENT_RESTRICTIONS,
+        QuestionKind.LOCATED_IN,
         QuestionKind.APPLICATION_SOURCE,
         QuestionKind.PRIVACY_CONSENT,
         QuestionKind.NEWSLETTER,
@@ -91,12 +100,15 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.COUNTRY,
         QuestionKind.LINKEDIN,
         QuestionKind.GITHUB,
+        QuestionKind.GITLAB_USERNAME,
         QuestionKind.WEBSITE,
+        QuestionKind.OPEN_SOURCE_LINKS,
         QuestionKind.RESUME,
         QuestionKind.COVER_LETTER,
         QuestionKind.YEARS_EXPERIENCE,
         QuestionKind.ACADEMIC_LEVEL,
         QuestionKind.TECH_STACK,
+        QuestionKind.PRIMARY_LANGUAGE,
         QuestionKind.FIELD_OF_INTEREST,
         QuestionKind.RELOCATION,
         QuestionKind.OFFICE_WORK,
@@ -112,6 +124,7 @@ class MappedQuestion:
     fillable: bool = False
     max_choices: int | None = None
     inactive_conditional: bool = False
+    unresolved_reason: str | None = None
 
 
 def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQuestion:
@@ -140,9 +153,26 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         value = profile.professional_links.github
         return MappedQuestion(kind=QuestionKind.GITHUB, value=value, fillable=bool(value))
 
+    if _is_gitlab_username(text):
+        value = profile.gitlab_username_for_autofill()
+        return MappedQuestion(
+            kind=QuestionKind.GITLAB_USERNAME,
+            value=value,
+            fillable=bool(value),
+        )
+
     if _is_website(text):
         value = profile.website_for_autofill()
         return MappedQuestion(kind=QuestionKind.WEBSITE, value=value, fillable=bool(value))
+
+    if _is_open_source_links(text, field):
+        urls = profile.open_source_urls_for_autofill()
+        value = "\n".join(urls) if urls else None
+        return MappedQuestion(
+            kind=QuestionKind.OPEN_SOURCE_LINKS,
+            value=value,
+            fillable=bool(value),
+        )
 
     if _is_marketing(text):
         answer = profile.newsletter_opt_in_answer()
@@ -227,12 +257,29 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             fillable=answer is not None,
         )
 
+    if _is_employment_restriction(text):
+        answer = profile.employment_restrictions_answer()
+        return MappedQuestion(
+            kind=QuestionKind.EMPLOYMENT_RESTRICTIONS,
+            value=_mapped_choice(answer, field.options) if answer is not None else None,
+            fillable=answer is not None,
+        )
+
     if _is_sponsorship(text):
-        answer = profile.explicit_requires_visa_sponsorship()
+        scope, named = parse_sponsorship_scope(_search_text(field))
+        answer, country = profile.sponsorship_answer_for_scope(scope, named)
+        value: QuestionValue = None
+        if answer is not None:
+            if field.options:
+                value = match_sponsorship_option(answer, field.options, country)
+            else:
+                value = answer
         return MappedQuestion(
             kind=QuestionKind.VISA_SPONSORSHIP,
-            value=answer,
-            fillable=answer is not None,
+            value=value,
+            country=country,
+            fillable=value is not None,
+            unresolved_reason=_sponsorship_unresolved_reason(scope, country, answer, value),
         )
 
     if _is_work_authorization(text):
@@ -267,6 +314,17 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         if not level:
             return MappedQuestion(kind=QuestionKind.ACADEMIC_LEVEL, fillable=False)
         return MappedQuestion(kind=QuestionKind.ACADEMIC_LEVEL, value=level, fillable=True)
+
+    if _is_primary_language(text):
+        language = profile.primary_programming_language()
+        if not language:
+            return MappedQuestion(kind=QuestionKind.PRIMARY_LANGUAGE, fillable=False)
+        value = match_option(language, field.options) if field.options else language
+        return MappedQuestion(
+            kind=QuestionKind.PRIMARY_LANGUAGE,
+            value=value,
+            fillable=bool(value),
+        )
 
     if _is_tech_stack(text):
         max_choices = parse_max_choices(text)
@@ -351,6 +409,15 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         value = _country_value(field, profile)
         return MappedQuestion(kind=QuestionKind.COUNTRY, value=value, fillable=bool(value))
 
+    if _is_located_in(text):
+        places = parse_located_in_places(_search_text(field))
+        answer = profile.resides_in_any(places) if places else None
+        return MappedQuestion(
+            kind=QuestionKind.LOCATED_IN,
+            value=_mapped_choice(answer, field.options) if answer is not None else None,
+            fillable=answer is not None,
+        )
+
     if _is_identity_location(text):
         value = profile.identity.current_location
         return MappedQuestion(kind=QuestionKind.LOCATION, value=value, fillable=bool(value))
@@ -381,6 +448,18 @@ def _mapped_choice(answer: bool | None, options: list[str]) -> str | bool | None
     return answer
 
 
+def _sponsorship_unresolved_reason(
+    scope: str,
+    country: str | None,
+    answer: bool | None,
+    value: QuestionValue,
+) -> str | None:
+    if value is not None or answer is not None or scope != "current":
+        return None
+    place = country or "current residence"
+    return f"current-location sponsorship requires country-specific fact for {place}"
+
+
 def _override_value(answer: bool | str, field: DiscoveredField) -> QuestionValue:
     if isinstance(answer, bool):
         return _mapped_choice(answer, field.options)
@@ -390,14 +469,16 @@ def _override_value(answer: bool | str, field: DiscoveredField) -> QuestionValue
 
 
 def _gender_value(field: DiscoveredField, profile: CandidateProfile) -> str | None:
-    wanted = profile.gender_for_autofill()
-    if not wanted:
+    """Required gender uses a non-disclosure option. Optional gender is left blank.
+
+    Never fills ``sensitive.gender``.
+    """
+    _ = profile
+    if not field.required:
         return None
     if field.options:
-        if profile.application_policy.prefer_not_to_disclose_gender:
-            return match_prefer_not_to_disclose_gender(field.options) or wanted
-        return match_gender_option(wanted, field.options)
-    return wanted
+        return match_prefer_not_to_disclose_gender(field.options)
+    return "prefer not to disclose"
 
 
 def _country_value(field: DiscoveredField, profile: CandidateProfile) -> str | None:
@@ -499,6 +580,8 @@ def _is_email(text: str, field: DiscoveredField) -> bool:
 def _is_website(text: str) -> bool:
     if "have you read" in text or "read our" in text:
         return False
+    if _is_open_source_links_text(text):
+        return False
     return any(term in text for term in ("website", "portfolio", "personal site", "homepage", "blog"))
 
 
@@ -506,6 +589,47 @@ def _is_github_specific(text: str) -> bool:
     if "github" not in text:
         return False
     return not _is_website(text)
+
+
+def _is_gitlab_username(text: str) -> bool:
+    if "gitlab" not in text:
+        return False
+    if _is_prior_affiliation(text) or _is_website(text) or _is_github_specific(text):
+        return False
+    return any(term in text for term in ("username", "user name", "handle", "userid", "user id"))
+
+
+def _is_open_source_links_text(text: str) -> bool:
+    return any(term in text for term in ("open source", "open-source", "opensource")) and any(
+        term in text for term in ("link", "url", "project", "contribution", "contributions")
+    )
+
+
+def _is_open_source_links(text: str, field: DiscoveredField) -> bool:
+    if not _is_open_source_links_text(text):
+        return False
+    if field.options and match_yes_no(True, field.options) and match_yes_no(False, field.options):
+        return False
+    return True
+
+
+def _is_primary_language(text: str) -> bool:
+    if _is_tech_stack(text):
+        return False
+    normalized = " ".join(text.replace("/", " ").replace("&", " ").split())
+    if "primary" not in normalized:
+        return False
+    if "programming language" in normalized:
+        return True
+    if "language" in normalized and "framework" in normalized:
+        return True
+    return any(
+        term in normalized
+        for term in (
+            "language and or framework",
+            "language or framework",
+        )
+    )
 
 
 def _is_linkedin_specific(text: str) -> bool:
@@ -672,6 +796,8 @@ def _is_prior_affiliation(text: str) -> bool:
         return False
     if _is_work_authorization(text) or _is_sponsorship(text) or _is_sensitive(text) or _is_gender(text):
         return False
+    if _is_years_experience(text) or "how many" in text:
+        return False
     return any(
         term in text
         for term in (
@@ -689,8 +815,66 @@ def _is_prior_affiliation(text: str) -> bool:
             "employed by a",
             "holdings group",
             "group of companies",
+            "previously worked at",
+            "previously worked for",
+            "worked at or consulted",
+            "consulted for",
+            "have you previously worked",
+            "former employee",
+            "previously employed",
+            "ever worked for",
+            "ever been employed",
         )
     )
+
+
+def _is_employment_restriction(text: str) -> bool:
+    """Employment agreements / post-employment restrictions only. Not criminal or certifications."""
+    if _is_work_authorization(text) or _is_sponsorship(text) or _is_sensitive(text):
+        return False
+    if any(
+        term in text
+        for term in (
+            "criminal",
+            "background check",
+            "export control",
+            "i certify",
+            "true and complete",
+            "conviction",
+        )
+    ):
+        return False
+    return any(
+        term in text
+        for term in (
+            "employment agreement",
+            "employment agreements",
+            "post-employment restriction",
+            "post-employment restrictions",
+            "post employment restriction",
+            "post employment restrictions",
+            "post-employment",
+        )
+    )
+
+
+def _is_located_in(text: str) -> bool:
+    """Factual current-residence presence, not relocation or work authorization."""
+    if _is_work_authorization(text) or _is_sponsorship(text) or _is_relocation(text):
+        return False
+    if any(
+        term in text
+        for term in (
+            "authoriz",
+            "eligible to work",
+            "right to work",
+            "citizen",
+            "nationality",
+            "visa",
+        )
+    ):
+        return False
+    return bool(parse_located_in_places(text))
 
 
 def _is_application_source(text: str) -> bool:
@@ -781,6 +965,16 @@ def _is_llm_forbidden_text(text: str) -> bool:
         "data transfer",
         "background check",
         "criminal",
+        "employment agreement",
+        "post-employment",
+        "consulted for",
+        "previously worked",
+        "located in",
+        "country of residence",
+        "open source",
+        "open-source",
+        "primary programming",
+        "gitlab username",
     )
     return any(term in text for term in terms)
 
@@ -835,7 +1029,13 @@ def _is_identity_country(text: str, field: DiscoveredField) -> bool:
     label = field.label.strip().lower().rstrip("*").strip()
     if label in {"country", "country/region", "country of residence", "phone country"}:
         return True
-    if "country" in text and ("currently based" in text or "current" in text and "based" in text):
+    if "country of residence" in text or "current country of residence" in text:
+        return True
+    if "country" in text and any(
+        term in text for term in ("reside", "residence", "currently live", "currently living")
+    ):
+        return True
+    if "country" in text and ("currently based" in text or ("current" in text and "based" in text)):
         return True
     if "country/region" in text and ("current" in text or "based" in text):
         return True

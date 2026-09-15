@@ -69,7 +69,15 @@ def format_privacy_acknowledgement_report(trace: dict[str, object]) -> str:
 
 
 def _label_lines(fields: list[AutofillFieldResult]) -> list[str]:
-    labels = [item.label.strip() for item in fields if item.label.strip()]
-    if not labels:
+    if not fields:
         return ["- None"]
-    return [f"- {label}" for label in labels]
+    lines: list[str] = []
+    for item in fields:
+        label = item.label.strip()
+        if not label:
+            continue
+        if item.note:
+            lines.append(f"- {label} ({item.note})")
+        else:
+            lines.append(f"- {label}")
+    return lines or ["- None"]

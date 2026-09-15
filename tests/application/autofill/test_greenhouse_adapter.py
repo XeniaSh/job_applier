@@ -155,7 +155,7 @@ def test_radio_sponsorship_and_unmapped_checkbox() -> None:
         fields = adapter.discover_fields(session.page)
         sponsorship = _field(fields, "visa sponsorship")
         classified = classify_field(sponsorship, profile)
-        assert classified.value is False
+        assert classified.value in {False, "No"}
         assert adapter.fill_field(session.page, classified) is True
         assert adapter.read_back(session.page, sponsorship) == "No"
 

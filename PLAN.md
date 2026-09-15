@@ -107,7 +107,7 @@ These product capabilities already work. Schedule only additive tasks, not repla
 - Analysis cache: `data/target_company_analysis_cache.json`
 - Wired into `run` when `TELEGRAM__TARGET_COMPANIES_CHAT_ID` is set
 - Separate Telegram destination; no fallback to LinkedIn chat
-- Prepare button is intentionally hidden for Target Companies and generic Greenhouse
+- Target Company Greenhouse cards expose explicit **Prepare application** (`prepapp:tcg.<board>:<id>` → `PrepareApplicationService` with `PrepareIntent.EXPLICIT`). LinkedIn **🛠 Prepare** is unchanged. Generic Greenhouse still has no prepare button.
 
 ### C. Shared / supporting
 
@@ -142,7 +142,7 @@ These product capabilities already work. Schedule only additive tasks, not repla
 ### Incomplete — keep, do not replace
 
 - Candidate data is split across markdown, skills YAML, and constraints YAML. Fine for analysis; insufficient for autofill.
-- `PreparationService` supports only `linkedin-email` cover-letter/resume packages. Target Companies has `PrepareApplicationService` (TASK-078/079) that gates on recommendation **and** `application_history` APPLIED, then delegates to `AutofillService`. Telegram “Prepare application” is still Stage 2.
+- `PreparationService` supports only `linkedin-email` cover-letter/resume packages. Target Companies uses `PrepareApplicationService` (TASK-078/079) plus Telegram **Prepare application** (TASK-037..039) with `PrepareIntent.EXPLICIT`.
 - `application_answers` in preparation is a no-op placeholder.
 - `data/prepared/` has no retention policy.
 - Many Target Companies in YAML are `custom` / `lever` / `ashby` / `smartrecruiters` / `manual`. Only Greenhouse watcher exists.
@@ -152,7 +152,6 @@ These product capabilities already work. Schedule only additive tasks, not repla
 
 ### Intentionally later
 
-- Stage 2 Telegram → Autofill
 - Stage 3 LLM custom questions
 - Stage 4 additional ATS watchers/adapters
 - Stage 5 auto-submit
@@ -236,6 +235,10 @@ TASK-078 recommendation → prepare/autofill orchestration
 TASK-079 application_history APPLIED gate on PrepareApplicationService
     ↓
 TASK-037..039 Stage 2 Telegram
+    ↓
+TASK-080 GitLab unanswered required questions
+    ↓
+TASK-081 GitLab primary language / OSS / current-location visa
     ↓
 (Stage 3 LLM remaining polish, if any)
     ↓
@@ -715,7 +718,7 @@ Do not start until Stage 1 CLI is verified.
 
 ### TASK-037 — Telegram Autofill action for Target Company Greenhouse
 
-- **Status:** todo
+- **Status:** done
 - **Depends on:** TASK-033, TASK-078, TASK-079
 - **Goal:** Add a Telegram action that starts autofill for `target_company:greenhouse:*` using stored source+id. Call `PrepareApplicationService` with `PrepareIntent.EXPLICIT`; do not call AutofillService from Telegram directly.
 - **Area:** `app/telegram/`, CLI callback handling
@@ -728,7 +731,7 @@ Do not start until Stage 1 CLI is verified.
 
 ### TASK-038 — Telegram action uses internal vacancy resolve
 
-- **Status:** todo
+- **Status:** done
 - **Depends on:** TASK-037, TASK-009
 - **Goal:** Callback loads vacancy via VacancyResolver, not card text.
 - **Area:** callback handler
@@ -736,10 +739,11 @@ Do not start until Stage 1 CLI is verified.
   - Handler passes source+external_id to resolver.
   - No HTML/card parsing for autofill inputs.
 - **Verification:** Handler unit test with fake resolver.
+- **Implementation note:** Telegram does not import VacancyResolver or Greenhouse. It passes `source + external_id` into `PrepareApplicationService`; `AutofillService.run` resolves the vacancy. Recommendation is loaded with `TargetCompanyAnalysisCache.get_by_identity` (durable JSON, survives restart). Missing recommendation is `UNKNOWN` and fail-closes in the application layer.
 
 ### TASK-039 — Target Companies callback tests
 
-- **Status:** todo
+- **Status:** done
 - **Depends on:** TASK-038
 - **Goal:** Cover destination chat, compact `tcg.<board>` source, and failure answer to the user.
 - **Area:** `tests/test_telegram_*.py` style tests
@@ -1196,6 +1200,47 @@ wire Telegram UI in the same change.
   - Manual CLI autofill does not consult recommendation or application history.
   - No Telegram UI. No Greenhouse fill changes. No schema change.
 - **Verification:** Focused unit tests with a fake AutofillService plus tmp SQLite history lookup. No live browser.
+
+### TASK-080 — Fill remaining GitLab Greenhouse required questions from known facts
+
+- **Status:** done
+- **Depends on:** TASK-052, TASK-054..061
+- **Goal:** Fill four previously unanswered required Greenhouse questions when CandidateProfile/policy already has the facts: current country of residence, location-derived “located in X or Y?”, explicit employment/post-employment restrictions, and prior employment/consulting affiliation wording.
+- **Area:** `CandidateProfile` / `ApplicationPolicy`, semantic mapper in `questions.py`, option parsing, Greenhouse boolean-choice fill/readback. No GitLab-specific adapter selectors. No auto-submit. Do not infer citizenship, work authorization, or location from relocation willingness.
+- **Acceptance criteria:**
+  - “What is your current country of residence?” maps from `identity.country`.
+  - “Are you located in the UK or Poland?” is a generic location-derived yes/no from current residence only.
+  - Employment-agreement / post-employment-restriction questions use an explicit profile fact; unset does not invent an answer; unrelated criminal/background/export-control/certify questions stay unanswered.
+  - “Have you previously worked at or consulted for …?” uses the existing prior-affiliation policy (default No).
+  - Greenhouse adapter has no company-name special case.
+- **Verification:** Focused mapper, profile, option, and Playwright React-control tests. No live GitLab browser in this task.
+
+### TASK-081 — Primary language, open-source links, GitLab username, current-location visa
+
+- **Status:** done
+- **Depends on:** TASK-080
+- **Goal:** Fill remaining GitLab required professional questions from explicit profile facts, and stop answering current-location visa/sponsorship questions from an unrelated destination visa option such as Netherlands HSM.
+- **Area:** CandidateProfile professional links / employment / country-specific `requires_sponsorship`, semantic mapper, sponsorship option matching. No GitLab-specific adapter selectors. No auto-submit. Do not infer citizenship from residence.
+- **Acceptance criteria:**
+  - Primary programming language/framework uses the strongest explicit language (Java), not a stack dump.
+  - Open-source project links use only explicit `open_source_urls`; missing URLs stay unresolved; GitHub/website are not invented substitutes.
+  - GitLab username fills only when explicit; optional absence is not an error.
+  - “sponsorship for a visa to remain in your current location” is not answered from global/NL destination sponsorship policy.
+  - Generic relocation questions still use the existing relocation policy.
+- **Verification:** Focused mapper, profile, option, live-choice, and Playwright tests. No live GitLab browser.
+
+### TASK-082 — GitLab primary-language fill, current-location sponsorship diagnostics, optional gender
+
+- **Status:** done
+- **Depends on:** TASK-081
+- **Goal:** Make an explicit `employment.primary_programming_language` value reach a required free-text primary language/framework control; keep current-location sponsorship unresolved without an Uzbekistan-specific fact and explain why; leave optional Gender untouched while required Gender still selects a non-disclosure option.
+- **Area:** Semantic mapper, Greenhouse text/React fill + readback, autofill summary notes. No GitLab-specific adapter selectors. No auto-submit. Do not answer current-location sponsorship from the global flag or a Netherlands fact.
+- **Acceptance criteria:**
+  - Required free-text “primary programming language and/or framework” fills Java from CandidateProfile and survives React interaction/readback.
+  - Current-location sponsorship with residence Uzbekistan does not consume a Netherlands country-specific fact; missing Uzbekistan fact stays unresolved with reason `current-location sponsorship requires country-specific fact for Uzbekistan`.
+  - Optional Gender remains untouched; required Gender selects Prefer not to disclose / Decline to self identify / equivalent. Requiredness comes from discovered field metadata (`required` / `aria-required`), not label guessing. Actual `sensitive.gender` is never filled.
+  - Existing required Agoda Gender* behavior still works.
+- **Verification:** Focused mapper, classifier, option, summary, live-choice, and Playwright React-control tests. No live GitLab browser.
 
 ---
 

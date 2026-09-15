@@ -16,6 +16,7 @@ from app.application.autofill.options import (
     match_gender_option,
     match_option,
     match_prefer_not_to_disclose_gender,
+    match_sponsorship_option,
     match_years_option,
     select_listed_options,
 )
@@ -37,6 +38,8 @@ _BOOLEAN_CHOICE_KINDS = frozenset(
         QuestionKind.OFFICE_WORK,
         QuestionKind.EMPLOYEE_RELATIONSHIP,
         QuestionKind.PRIOR_AFFILIATION,
+        QuestionKind.EMPLOYMENT_RESTRICTIONS,
+        QuestionKind.LOCATED_IN,
         QuestionKind.APPLICATION_SOURCE,
         QuestionKind.NEWSLETTER,
         QuestionKind.SMS_UPDATES,
@@ -216,7 +219,14 @@ class GreenhouseAdapter:
                     return True
                 return _fill_combobox(page, locator, str(classified.value))
             if classified.kind in _MENU_CHOICE_KINDS or isinstance(classified.value, bool):
-                ok = _fill_choice(page, locator, field, classified.value, kind=classified.kind)
+                ok = _fill_choice(
+                    page,
+                    locator,
+                    field,
+                    classified.value,
+                    kind=classified.kind,
+                    referenced_country=classified.country,
+                )
                 if classified.kind is QuestionKind.PRIVACY_CONSENT:
                     self.last_privacy_trace = {
                         "discovered": True,
@@ -232,6 +242,8 @@ class GreenhouseAdapter:
                 return ok
             if classified.kind is QuestionKind.PHONE:
                 return _fill_phone(page, locator, str(classified.value), classified.country)
+            if classified.kind is QuestionKind.PRIMARY_LANGUAGE:
+                return _fill_primary_language(page, locator, field, str(classified.value))
             if classified.kind is QuestionKind.YEARS_EXPERIENCE:
                 return _fill_years(page, locator, field, classified.value)
             if classified.kind is QuestionKind.ACADEMIC_LEVEL:
@@ -435,6 +447,9 @@ def _discover_control(
         )
     field_type = _field_type(tag, input_type, locator)
     label = _control_label(page, locator)
+    heading = _question_heading(locator)
+    if heading and _looks_like_control_name(label):
+        label = heading
     context = ""
     context_required = False
     if field_type == "checkbox":
@@ -656,6 +671,56 @@ def _control_label(page: Page, locator: Locator) -> str:
     return name
 
 
+def _looks_like_control_name(label: str) -> bool:
+    cleaned = " ".join((label or "").split())
+    if not cleaned:
+        return True
+    if "[" in cleaned and "]" in cleaned:
+        return True
+    return bool(re.match(r"^(question|job_application)[_-]?\d*$", cleaned, re.I))
+
+
+_QUESTION_HEADING_JS = """el => {
+    const firstLine = (text) => String(text || '').replace(/\\s+/g, ' ').trim();
+    const tooBroad = (text) => text.length > 240;
+    let node = el.parentElement;
+    for (let i = 0; i < 6 && node; i++) {
+        const direct = node.matches && node.matches('label')
+            ? node
+            : node.querySelector(':scope > label, :scope > legend, :scope > .input-label, :scope > [class*="field-label"]');
+        if (direct && direct !== el) {
+            const text = firstLine(direct.innerText || '');
+            if (text && !tooBroad(text)) return text;
+        }
+        const prev = node.previousElementSibling;
+        if (prev && prev !== el) {
+            const text = firstLine(prev.innerText || '');
+            if (text && text.length > 12 && !tooBroad(text)) return text;
+        }
+        const marker = String(node.className || '') + ' ' + String(node.tagName || '');
+        if (/FIELDSET|SECTION|question|field/i.test(marker)) {
+            const heading = node.querySelector('label, legend, p, h2, h3, h4, [class*="label"]');
+            if (heading && heading !== el && !heading.contains(el)) {
+                const text = firstLine(heading.innerText || '');
+                if (text && !tooBroad(text)) return text;
+            }
+        }
+        node = node.parentElement;
+    }
+    return '';
+}"""
+
+
+def _question_heading(locator: Locator) -> str:
+    try:
+        raw = locator.evaluate(_QUESTION_HEADING_JS)
+    except PlaywrightError:
+        return ""
+    if not isinstance(raw, str):
+        return ""
+    return " ".join(raw.split())
+
+
 def _radio_group_label(page: Page, locator: Locator, name: str) -> str:
     legend = locator.evaluate(
         """el => {
@@ -746,6 +811,30 @@ def _resume_file_locator(page: Page, field: DiscoveredField) -> Locator:
     return _field_locator(page, field).first
 
 
+def _fill_primary_language(page: Page, locator: Locator, field: DiscoveredField, value: str) -> bool:
+    """Fill a primary language/framework answer as text unless the control is a menu."""
+    wanted = value.strip()
+    if not wanted:
+        return False
+    if field.field_type in {"select", "radio"}:
+        if _fill_choice(page, locator, field, wanted, kind=QuestionKind.PRIMARY_LANGUAGE):
+            return True
+        return _fill_text(page, locator, wanted)
+    if field.field_type == "combobox" or _is_combobox(locator, field):
+        if field.options and match_option(wanted, field.options):
+            if _fill_choice(page, locator, field, wanted, kind=QuestionKind.PRIMARY_LANGUAGE):
+                return True
+        typed = _fill_text(page, locator, wanted)
+        current = _input_value(locator)
+        if typed and wanted.lower() in current.lower():
+            return True
+        visible = react_controls.read_selected_label(page, locator) or ""
+        if wanted.lower() in visible.lower():
+            return True
+        return _fill_choice(page, locator, field, wanted, kind=QuestionKind.PRIMARY_LANGUAGE)
+    return _fill_text(page, locator, wanted)
+
+
 def _fill_text(page: Page, locator: Locator, value: str) -> bool:
     _write_input(locator, value)
     if page.url.startswith("file:"):
@@ -765,31 +854,62 @@ def _write_input(locator: Locator, value: str, *, sequential: bool = False) -> N
     locator.fill("", timeout=5_000)
     if sequential:
         locator.press_sequentially(value, delay=15, timeout=10_000)
+        _dispatch_value_events(locator, value)
+        if _input_value(locator).strip() != value.strip():
+            _set_native_value(locator, value)
         return
     locator.fill(value, timeout=5_000)
+    _dispatch_value_events(locator, value)
     if _input_value(locator).strip() != value.strip():
-        try:
-            locator.evaluate(
-                """(el, next) => {
-                    const tag = (el.tagName || '').toLowerCase();
-                    const proto = tag === 'textarea'
-                        ? Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')
-                        : Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
-                            || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
-                    if (proto && proto.set) {
-                        proto.set.call(el, next);
-                    } else if (el.isContentEditable) {
-                        el.textContent = next;
-                    } else {
-                        el.value = next;
-                    }
+        _set_native_value(locator, value)
+
+
+def _dispatch_value_events(locator: Locator, value: str) -> None:
+    try:
+        locator.evaluate(
+            """(el, next) => {
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                try {
+                    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: next, inputType: 'insertText' }));
+                } catch (err) {
                     el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                }""",
-                value,
-            )
-        except PlaywrightError:
-            pass
+                }
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""",
+            value,
+        )
+    except PlaywrightError:
+        pass
+
+
+def _set_native_value(locator: Locator, value: str) -> None:
+    try:
+        locator.evaluate(
+            """(el, next) => {
+                const tag = (el.tagName || '').toLowerCase();
+                const proto = tag === 'textarea'
+                    ? Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')
+                    : Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+                        || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+                if (proto && proto.set) {
+                    proto.set.call(el, next);
+                } else if (el.isContentEditable) {
+                    el.textContent = next;
+                } else {
+                    el.value = next;
+                }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                try {
+                    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: next, inputType: 'insertText' }));
+                } catch (err) {
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""",
+            value,
+        )
+    except PlaywrightError:
+        pass
 
 
 def _fill_phone(page: Page, locator: Locator, value: str, country: str | None) -> bool:
@@ -1007,8 +1127,20 @@ def _fill_choice(
     value: object,
     *,
     kind: QuestionKind | None = None,
+    referenced_country: str | None = None,
 ) -> bool:
     if isinstance(value, bool):
+        if kind is QuestionKind.VISA_SPONSORSHIP:
+            live = list(field.options or [])
+            if not live and not _is_native_select(locator):
+                live = react_controls.open_menu(page, locator)
+                react_controls.dismiss_menu(page)
+            matched = match_sponsorship_option(value, live, referenced_country)
+            if matched is None:
+                return False
+            if field.field_type == "radio":
+                return _fill_radio(page, field, matched)
+            return react_controls.select_single_option(page, locator, matched)
         if field.field_type == "radio":
             return _fill_radio(page, field, value)
         return react_controls.select_yes_no(page, locator, value, field.options)
@@ -1020,12 +1152,21 @@ def _fill_choice(
     live = react_controls.open_menu(page, locator)
     match = wanted
     if live:
-        match = _live_choice_match(wanted, live, kind) or wanted
+        matched = _live_choice_match(wanted, live, kind, referenced_country)
+        if kind is QuestionKind.VISA_SPONSORSHIP and matched is None and _semantic_bool(wanted) is not None:
+            react_controls.dismiss_menu(page)
+            return False
+        match = matched or wanted
     react_controls.dismiss_menu(page)
     return react_controls.select_single_option(page, locator, match)
 
 
-def _live_choice_match(wanted: str, live: list[str], kind: QuestionKind | None) -> str | None:
+def _live_choice_match(
+    wanted: str,
+    live: list[str],
+    kind: QuestionKind | None,
+    referenced_country: str | None = None,
+) -> str | None:
     if kind is QuestionKind.APPLICATION_SOURCE:
         return match_application_source(
             live,
@@ -1035,6 +1176,11 @@ def _live_choice_match(wanted: str, live: list[str], kind: QuestionKind | None) 
         return match_prefer_not_to_disclose_gender(live) or match_gender_option(wanted, live)
     if kind is QuestionKind.ACADEMIC_LEVEL:
         return match_academic_option(wanted, live)
+    if kind is QuestionKind.VISA_SPONSORSHIP:
+        semantic = _semantic_bool(wanted)
+        if semantic is None:
+            return match_option(wanted, live)
+        return match_sponsorship_option(semantic, live, referenced_country)
     semantic = _semantic_bool(wanted)
     if semantic is not None:
         from app.application.autofill.options import match_yes_no
@@ -1518,9 +1664,16 @@ def _all_file_input_names(page: Page) -> list[str]:
 
 def _input_value(locator: Locator) -> str:
     try:
-        return locator.input_value()
+        typed = locator.input_value()
     except PlaywrightError:
-        return ""
+        typed = ""
+    if typed:
+        return typed
+    try:
+        react = locator.get_attribute("data-react-value") or ""
+    except PlaywrightError:
+        react = ""
+    return react
 
 
 def _visible_control_value(page: Page, locator: Locator) -> str | None:

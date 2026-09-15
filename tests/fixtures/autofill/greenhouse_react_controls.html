@@ -60,6 +60,17 @@
       <div id="gender-list" role="listbox" hidden></div>
     </div>
 
+    <div class="field" id="gender-optional-field">
+      <label id="gender-optional-label">Gender</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="gender_optional" aria-labelledby="gender-optional-label" role="combobox" aria-autocomplete="list">
+        </div>
+      </div>
+      <div id="gender-optional-list" role="listbox" hidden></div>
+    </div>
+
     <div class="field" id="country-based-field">
       <label id="country-based-label">In which country/region are you currently based?*</label>
       <div class="select__control">
@@ -171,6 +182,83 @@
         </div>
       </div>
       <div id="source-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="country-residence-field">
+      <label id="country-residence-label">What is your current country of residence?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="country_residence" aria-labelledby="country-residence-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="country-residence-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="located-in-field">
+      <label id="located-in-label">Are you located in the UK or Poland?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="located_in" aria-labelledby="located-in-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="located-in-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="employment-restrictions-field">
+      <label id="employment-restrictions-label">Are you subject to any employment agreements and/or post-employment restrictions with your current employer or a past employer?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="employment_restrictions" aria-labelledby="employment-restrictions-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="employment-restrictions-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="prior-consulting-field">
+      <label id="prior-consulting-label">Have you previously worked at or consulted for GitLab?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="prior_consulting" aria-labelledby="prior-consulting-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="prior-consulting-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="primary-language-field">
+      <label id="primary-language-label">Select your primary programming language</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="primary_language" aria-labelledby="primary-language-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="primary-language-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="primary-language-text-field">
+      <label>What is your primary programming language and/or framework?</label>
+      <textarea id="primary_language_text" name="job_application[answers][]" required></textarea>
+    </div>
+
+    <label for="open_source_links">Please share links of any open source projects you own or have made contributions to</label>
+    <textarea id="open_source_links" name="job_application[open_source]" required></textarea>
+
+    <label for="gitlab_username">What is your GitLab username?</label>
+    <input id="gitlab_username" name="job_application[gitlab_username]" type="text">
+
+    <div class="field" id="current-location-visa-field">
+      <label id="current-location-visa-label">Will you now or in the future require sponsorship for a visa to remain in your current location?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="current_location_visa" aria-labelledby="current-location-visa-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="current-location-visa-list" role="listbox" hidden></div>
     </div>
 
     <p>Resume/CV</p>
@@ -330,7 +418,12 @@
       "Doctorate Degree"
     ]);
     setupReactSingle("gender-field", "gender", "gender-list", ["Prefer not to disclose", "Female", "Genderqueer", "Male"]);
-    setupReactSingle("country-based-field", "country_based", "country-based-list", ["Germany", "Thailand", "Uzbekistan", "United States"]);
+    setupReactSingle("gender-optional-field", "gender_optional", "gender-optional-list", ["Decline To Self Identify", "Female", "Male"]);
+    setupReactSingle("country-based-field", "country_based", "country-based-list", ["Germany", "Thailand", "Uzbekistan", "United States", "United Kingdom", "Poland"]);
+    setupReactSingle("country-residence-field", "country_residence", "country-residence-list", ["Germany", "Thailand", "Uzbekistan", "United States", "United Kingdom", "Poland"]);
+    setupReactSingle("located-in-field", "located_in", "located-in-list", ["Yes", "No"]);
+    setupReactSingle("employment-restrictions-field", "employment_restrictions", "employment-restrictions-list", ["Yes", "No"]);
+    setupReactSingle("prior-consulting-field", "prior_consulting", "prior-consulting-list", ["Yes", "No"]);
     setupReactSingle("booking-field", "booking", "booking-list", ["Yes", "No"]);
     setupReactSingle("sms-field", "sms", "sms-list", ["Yes", "No"]);
     setupReactSingle("newsletter-field", "newsletter", "newsletter-list", ["Yes", "No"]);
@@ -350,6 +443,11 @@
       "University",
       "Other"
     ]);
+    setupReactSingle("primary-language-field", "primary_language", "primary-language-list", ["Java", "Python", "Go", "Ruby"]);
+    setupReactSingle("current-location-visa-field", "current_location_visa", "current-location-visa-list", [
+      "Yes, Netherlands Highly Skilled Migrant Visa",
+      "No"
+    ]);
 
     document.getElementById("resume_manual").addEventListener("click", function () {
       var editor = document.getElementById("resume_text");
@@ -362,6 +460,10 @@
     });
     document.getElementById("cover_letter_text").addEventListener("input", function (event) {
       event.target.setAttribute("data-react-value", event.target.value);
+    });
+    document.getElementById("primary_language_text").addEventListener("input", function (event) {
+      event.target.setAttribute("data-react-value", event.target.value);
+      event.target.value = event.target.value;
     });
   </script>
 </body>

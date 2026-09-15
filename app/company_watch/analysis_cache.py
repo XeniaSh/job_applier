@@ -64,6 +64,17 @@ class TargetCompanyAnalysisCache:
             return None
         return _record_from_entry(entry)
 
+    def get_by_identity(self, source: str, external_id: str) -> CachedTargetCompanyAnalysis | None:
+        """Return the latest cached analysis for canonical vacancy identity.
+
+        Telegram callbacks and other restart-safe callers have source +
+        external_id only. Description-hash lookup stays on get(vacancy).
+        """
+        entry = self._entry_for_identity(source, external_id)
+        if entry is None:
+            return None
+        return _record_from_entry(entry)
+
     def put(
         self,
         vacancy: NormalizedVacancy,
@@ -74,6 +85,7 @@ class TargetCompanyAnalysisCache:
         seniority: SeniorityClassification,
     ) -> None:
         desc_hash = vacancy_description_hash(vacancy)
+        self._drop_identity(vacancy.source, vacancy.external_id)
         entry: dict[str, object] = {
             "source": vacancy.source,
             "external_id": vacancy.external_id,
@@ -116,6 +128,28 @@ class TargetCompanyAnalysisCache:
         tmp_path = self.path.with_name(self.path.name + ".tmp")
         tmp_path.write_text(payload, encoding="utf-8")
         tmp_path.replace(self.path)
+
+    def _entry_for_identity(self, source: str, external_id: str) -> dict[str, object] | None:
+        wanted_source = str(source or "").strip()
+        wanted_id = str(external_id or "").strip()
+        if not wanted_source or not wanted_id:
+            return None
+        match: dict[str, object] | None = None
+        for entry in self._entries.values():
+            if entry.get("source") == wanted_source and entry.get("external_id") == wanted_id:
+                match = entry
+        return match
+
+    def _drop_identity(self, source: str, external_id: str) -> None:
+        wanted_source = str(source or "").strip()
+        wanted_id = str(external_id or "").strip()
+        stale = [
+            key
+            for key, entry in self._entries.items()
+            if entry.get("source") == wanted_source and entry.get("external_id") == wanted_id
+        ]
+        for key in stale:
+            del self._entries[key]
 
 
 def vacancy_description_hash(vacancy: NormalizedVacancy) -> str:

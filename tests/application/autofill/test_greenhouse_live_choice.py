@@ -8,6 +8,10 @@ def test_live_gender_match_uses_decline_semantics_not_exact_mapper_string() -> N
         _live_choice_match("Prefer not to disclose", live, QuestionKind.GENDER)
         == "I prefer not to say"
     )
+    assert (
+        _live_choice_match("prefer not to disclose", ["Decline To Self Identify", "Female"], QuestionKind.GENDER)
+        == "Decline To Self Identify"
+    )
 
 
 def test_live_academic_match_maps_masters_without_selecting_diploma() -> None:
@@ -20,4 +24,14 @@ def test_live_application_source_still_prefers_company_website() -> None:
     assert (
         _live_choice_match("Company Website", live, QuestionKind.APPLICATION_SOURCE)
         == "Company Website"
+    )
+
+
+def test_live_sponsorship_does_not_select_unrelated_netherlands_hsm() -> None:
+    live = ["Yes, Netherlands Highly Skilled Migrant Visa", "No"]
+    assert _live_choice_match("Yes", live, QuestionKind.VISA_SPONSORSHIP, "uzbekistan") is None
+    assert _live_choice_match("Yes", live, QuestionKind.VISA_SPONSORSHIP) is None
+    assert (
+        _live_choice_match("Yes", live, QuestionKind.VISA_SPONSORSHIP, "netherlands")
+        == "Yes, Netherlands Highly Skilled Migrant Visa"
     )

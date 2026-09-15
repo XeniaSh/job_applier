@@ -2,6 +2,8 @@ import httpx
 import pytest
 
 from app.telegram.client import (
+    APPLICATION_PREPARE_ACTION,
+    APPLICATION_PREPARE_BUTTON_TEXT,
     TelegramMessageNotModifiedError,
     TelegramClient,
     TelegramRequestError,
@@ -10,6 +12,7 @@ from app.telegram.client import (
     map_code_to_source,
     map_source_to_code,
     parse_callback_data,
+    source_supports_application_prepare,
     source_supports_prepare,
     validate_linkedin_job_url,
 )
@@ -153,6 +156,12 @@ def test_target_company_greenhouse_callback_round_trip() -> None:
         "739281",
         "abc12345",
     )
+    assert parse_callback_data("prepapp:tcg.agoda:6886113") == (
+        APPLICATION_PREPARE_ACTION,
+        full_agoda,
+        "6886113",
+        None,
+    )
     assert map_source_to_code("linkedin-email") == "li"
     assert map_source_to_code("greenhouse") == "gh"
     assert map_code_to_source("li") == "linkedin-email"
@@ -176,6 +185,11 @@ def test_prepare_is_hidden_for_target_companies_and_generic_greenhouse() -> None
     assert source_supports_prepare("tcg.agoda") is False
     assert source_supports_prepare("greenhouse") is False
     assert source_supports_prepare("gh") is False
+    assert source_supports_application_prepare("target_company:greenhouse:agoda") is True
+    assert source_supports_application_prepare("tcg.agoda") is True
+    assert source_supports_application_prepare("linkedin-email") is False
+    assert source_supports_application_prepare("greenhouse") is False
+    assert source_supports_application_prepare("gh") is False
 
     assert [button.text for row in linkedin for button in row] == [
         "🛠 Prepare",
@@ -183,14 +197,23 @@ def test_prepare_is_hidden_for_target_companies_and_generic_greenhouse() -> None
         "⏭ Skip",
         "🔗 Open vacancy",
     ]
-    for buttons in (target_full, target_code, generic):
+    assert linkedin[0][0].callback_data == "prepare:li:4439013108"
+    for buttons in (target_full, target_code):
         labels = [button.text for row in buttons for button in row]
         assert "🛠 Prepare" not in labels
-        assert labels == ["✅ Applied", "⏭ Skip", "🔗 Open vacancy"]
-        assert buttons[0][0].callback_data.endswith(":739281") or buttons[0][0].callback_data.endswith(":12")
-    assert target_full[0][0].callback_data == "applied:tcg.agoda:739281"
-    assert target_full[1][0].callback_data == "skip:tcg.agoda:739281"
-    assert target_code[0][0].callback_data == "applied:tcg.agoda:739281"
+        assert labels == [
+            APPLICATION_PREPARE_BUTTON_TEXT,
+            "✅ Applied",
+            "⏭ Skip",
+            "🔗 Open vacancy",
+        ]
+        assert buttons[0][0].callback_data == "prepapp:tcg.agoda:739281"
+        assert buttons[1][0].callback_data == "applied:tcg.agoda:739281"
+        assert buttons[2][0].callback_data == "skip:tcg.agoda:739281"
+    generic_labels = [button.text for row in generic for button in row]
+    assert "🛠 Prepare" not in generic_labels
+    assert APPLICATION_PREPARE_BUTTON_TEXT not in generic_labels
+    assert generic_labels == ["✅ Applied", "⏭ Skip", "🔗 Open vacancy"]
     assert generic[0][0].callback_data == "applied:gh:12"
     assert target_full[-1][0].url == url
     assert generic[-1][0].text == "🔗 Open vacancy"

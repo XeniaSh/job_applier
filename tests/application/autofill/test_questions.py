@@ -653,6 +653,49 @@ def test_unset_sensitive_gender_still_fills_prefer_not_to_disclose() -> None:
     assert mapped.value == "Prefer not to disclose"
 
 
+def test_optional_gender_is_left_untouched() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Gender",
+            required=False,
+            field_type="select",
+            options=["Decline To Self Identify", "Female", "Male"],
+        ),
+        _profile(sensitive={"gender": "Female"}),
+    )
+    assert mapped.kind is QuestionKind.GENDER
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+    starred_optional = map_question(
+        DiscoveredField(
+            label="Gender*",
+            required=False,
+            field_type="select",
+            options=["Prefer not to disclose", "Female", "Male"],
+        ),
+        _profile(sensitive={"gender": "Female"}),
+    )
+    assert starred_optional.fillable is False
+    assert starred_optional.value is None
+
+
+def test_required_gender_selects_decline_to_self_identify() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Gender",
+            required=True,
+            field_type="select",
+            options=["Female", "Male", "Decline To Self Identify"],
+        ),
+        _profile(sensitive={"gender": "Female"}),
+    )
+    assert mapped.kind is QuestionKind.GENDER
+    assert mapped.fillable is True
+    assert mapped.value == "Decline To Self Identify"
+    assert mapped.value != "Female"
+
+
 def test_booking_holdings_employment_defaults_to_no() -> None:
     mapped = map_question(
         DiscoveredField(
@@ -720,3 +763,372 @@ def test_question_override_recent_application_no() -> None:
     )
     assert mapped.kind is QuestionKind.QUESTION_OVERRIDE
     assert mapped.value == "No"
+
+
+def test_current_country_of_residence_uses_profile_country() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your current country of residence?",
+            required=True,
+            field_type="select",
+            options=["Germany", "Poland", "United Kingdom", "United States"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.COUNTRY
+    assert mapped.fillable is True
+    assert mapped.value == "Germany"
+
+
+def test_located_in_uk_or_poland_is_no_when_residence_is_elsewhere() -> None:
+    profile = _profile(application_policy={"relocation": {"willing": True}})
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you located in the UK or Poland?",
+            required=True,
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.LOCATED_IN
+    assert mapped.fillable is True
+    assert mapped.value == "No"
+
+
+def test_located_in_uk_or_poland_is_yes_when_residence_is_uk() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you located in the UK or Poland?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        _profile(
+            identity={
+                "first_name": "Ada",
+                "last_name": "Example",
+                "email": "ada.example@example.test",
+                "phone": "+15555550100",
+                "current_location": "London, United Kingdom",
+                "country": "United Kingdom",
+            }
+        ),
+    )
+    assert mapped.kind is QuestionKind.LOCATED_IN
+    assert mapped.value == "Yes"
+
+
+def test_located_in_does_not_use_relocation_or_work_auth() -> None:
+    profile = _profile(
+        application_policy={"relocation": {"willing": True}},
+        work_eligibility={
+            "citizenship": ["United Kingdom"],
+            "work_authorizations": [{"country": "United Kingdom", "authorized": True}],
+            "requires_visa_sponsorship": False,
+        },
+    )
+    located = map_question(
+        DiscoveredField(
+            label="Are you located in the UK or Poland?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    relocate = map_question(
+        DiscoveredField(
+            label="Would you be willing to relocate to the UK or Poland?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    work_auth = map_question(
+        DiscoveredField(label="Are you legally authorized to work in the United Kingdom?"),
+        profile,
+    )
+    assert located.kind is QuestionKind.LOCATED_IN
+    assert located.value == "No"
+    assert relocate.kind is QuestionKind.RELOCATION
+    assert relocate.value == "Yes"
+    assert work_auth.kind is QuestionKind.WORK_AUTHORIZATION
+    assert work_auth.value is True
+
+
+def test_employment_restrictions_fill_no_from_explicit_profile_fact() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label=(
+                "Are you subject to any employment agreements and/or post-employment "
+                "restrictions with your current employer or a past employer?"
+            ),
+            required=True,
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        _profile(application_policy={"has_employment_or_post_employment_restrictions": False}),
+    )
+    assert mapped.kind is QuestionKind.EMPLOYMENT_RESTRICTIONS
+    assert mapped.fillable is True
+    assert mapped.value == "No"
+
+
+def test_unset_employment_restrictions_are_not_invented() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you subject to any post-employment restrictions?",
+            required=True,
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.EMPLOYMENT_RESTRICTIONS
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_employment_restrictions_do_not_answer_unrelated_legal_questions() -> None:
+    profile = _profile(application_policy={"has_employment_or_post_employment_restrictions": False})
+    criminal = map_question(
+        DiscoveredField(
+            label="Have you been convicted of a criminal offense?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    certify = map_question(
+        DiscoveredField(
+            label="I certify that the information provided is true and complete.",
+            field_type="checkbox",
+            required=True,
+        ),
+        profile,
+    )
+    export_control = map_question(
+        DiscoveredField(
+            label="Are you subject to export control restrictions?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    assert criminal.kind is not QuestionKind.EMPLOYMENT_RESTRICTIONS
+    assert criminal.fillable is False
+    assert certify.fillable is False
+    assert export_control.kind is not QuestionKind.EMPLOYMENT_RESTRICTIONS
+    assert export_control.fillable is False
+
+
+def test_previously_worked_or_consulted_defaults_to_no() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Have you previously worked at or consulted for GitLab?",
+            required=True,
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.PRIOR_AFFILIATION
+    assert mapped.fillable is True
+    assert mapped.value == "No"
+    generic = map_question(
+        DiscoveredField(
+            label="Have you previously worked at or consulted for Acme?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        _profile(),
+    )
+    assert generic.kind is QuestionKind.PRIOR_AFFILIATION
+    assert generic.value == "No"
+
+
+def test_primary_programming_language_uses_java_not_full_stack() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your primary programming language and/or framework?",
+            required=True,
+            field_type="text",
+        ),
+        _profile(
+            employment={
+                "professional_tech_stack": ["Java", "Kotlin", "Spring Boot", "PostgreSQL"],
+                "primary_programming_language": "Java",
+            }
+        ),
+    )
+    assert mapped.kind is QuestionKind.PRIMARY_LANGUAGE
+    assert mapped.fillable is True
+    assert mapped.value == "Java"
+    assert "Kotlin" not in str(mapped.value)
+    assert "Spring" not in str(mapped.value)
+    fallback = map_question(
+        DiscoveredField(label="What is your primary programming language and/or framework?"),
+        _profile(employment={"professional_tech_stack": ["Java", "Kotlin"]}),
+    )
+    assert fallback.value == "Java"
+
+    slash = map_question(
+        DiscoveredField(
+            label="What is your primary programming language and / or framework?",
+            required=True,
+            field_type="textarea",
+        ),
+        _profile(employment={"primary_programming_language": "Java"}),
+    )
+    assert slash.kind is QuestionKind.PRIMARY_LANGUAGE
+    assert slash.value == "Java"
+
+
+def test_open_source_links_use_only_explicit_urls() -> None:
+    empty = map_question(
+        DiscoveredField(
+            label="Please share links of any open source projects you own or have made contributions to",
+            required=True,
+            field_type="textarea",
+        ),
+        _profile(),
+    )
+    assert empty.kind is QuestionKind.OPEN_SOURCE_LINKS
+    assert empty.fillable is False
+    assert empty.value is None
+
+    filled = map_question(
+        DiscoveredField(
+            label="Please share links of any open source projects you own or have made contributions to",
+            required=True,
+            field_type="textarea",
+        ),
+        _profile(
+            professional_links={
+                "github": "https://github.com/ada-example-test",
+                "website": "https://ada.example.test",
+                "open_source_urls": ["https://github.com/ada-example-test/job-applier"],
+            }
+        ),
+    )
+    assert filled.fillable is True
+    assert filled.value == "https://github.com/ada-example-test/job-applier"
+    assert filled.value != "https://github.com/ada-example-test"
+    assert filled.value != "https://ada.example.test"
+
+
+def test_optional_gitlab_username_stays_blank_when_missing() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your GitLab username?",
+            required=False,
+            field_type="text",
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.GITLAB_USERNAME
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_current_residence_is_not_citizenship_or_work_auth() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Tashkent, Uzbekistan",
+            "country": "Uzbekistan",
+        },
+        work_eligibility={
+            "citizenship": ["Germany"],
+            "work_authorizations": [],
+            "requires_visa_sponsorship": True,
+        },
+        application_policy={"relocation": {"willing": True}},
+    )
+    country = map_question(
+        DiscoveredField(
+            label="What is your current country of residence?",
+            required=True,
+            field_type="select",
+            options=["Germany", "Uzbekistan", "Netherlands"],
+        ),
+        profile,
+    )
+    citizenship = map_question(
+        DiscoveredField(label="What is your citizenship / nationality?", required=True),
+        profile,
+    )
+    assert country.kind is QuestionKind.COUNTRY
+    assert country.value == "Uzbekistan"
+    assert country.value != "Germany"
+    assert citizenship.fillable is False
+    assert profile.work_authorization_for("Uzbekistan") is None
+
+
+def test_current_location_sponsorship_does_not_use_netherlands_hsm() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Tashkent, Uzbekistan",
+            "country": "Uzbekistan",
+        },
+        work_eligibility={
+            "citizenship": ["Germany"],
+            "requires_visa_sponsorship": True,
+            "work_authorizations": [
+                {"country": "Netherlands", "authorized": False, "requires_sponsorship": True},
+            ],
+        },
+        application_policy={"relocation": {"willing": True}},
+    )
+    options = ["Yes, Netherlands Highly Skilled Migrant Visa", "No"]
+    current = map_question(
+        DiscoveredField(
+            label="Will you now or in the future require sponsorship for a visa to remain in your current location?",
+            required=True,
+            field_type="select",
+            options=options,
+        ),
+        profile,
+    )
+    generic = map_question(
+        DiscoveredField(
+            label="Will you now or in the future require visa sponsorship?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    relocate = map_question(
+        DiscoveredField(
+            label="Are you willing to relocate to the Netherlands?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    netherlands = map_question(
+        DiscoveredField(
+            label="Will you require visa sponsorship to work in the Netherlands?",
+            field_type="select",
+            options=options,
+        ),
+        profile,
+    )
+    assert current.kind is QuestionKind.VISA_SPONSORSHIP
+    assert current.fillable is False
+    assert current.value is None
+    assert current.unresolved_reason == (
+        "current-location sponsorship requires country-specific fact for Uzbekistan"
+    )
+    assert generic.kind is QuestionKind.VISA_SPONSORSHIP
+    assert generic.value == "Yes"
+    assert relocate.kind is QuestionKind.RELOCATION
+    assert relocate.value == "Yes"
+    assert netherlands.fillable is True
+    assert netherlands.value == "Yes, Netherlands Highly Skilled Migrant Visa"

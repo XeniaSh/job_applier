@@ -16,6 +16,8 @@ professional_links:
   linkedin: "https://www.linkedin.com/in/ada-example-test"
   github: "https://github.com/ada-example-test"
   website: "https://ada.example.test"
+  gitlab_username: null
+  open_source_urls: []
 
 employment:
   current_title: Backend Engineer
@@ -37,6 +39,7 @@ employment:
     - Spring Boot
     - PostgreSQL
     - Kafka
+  primary_programming_language: Java
   preferred_fields_of_interest:
     - Backend
     - Platform
@@ -52,6 +55,7 @@ work_eligibility:
   work_authorizations:
     - country: Germany
       authorized: true
+      requires_sponsorship: false
   requires_visa_sponsorship: false
 
 application_files:
@@ -76,6 +80,9 @@ application_policy:
   privacy_acknowledgement:
     auto_acknowledge_required: true
   default_no_undeclared_affiliations: true
+  # Factual only. Unset means do not answer. Do not reuse for criminal,
+  # background, export-control, or certification questions.
+  has_employment_or_post_employment_restrictions: false
   newsletter_opt_in: false
   sms_interview_updates: false
   prefer_not_to_disclose_gender: true

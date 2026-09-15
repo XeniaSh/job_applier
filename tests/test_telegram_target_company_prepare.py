@@ -1,0 +1,439 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import app.cli as cli_module
+from app.application.autofill.models import (
+    AutofillFieldResult,
+    AutofillStatus,
+    FieldClassification,
+    stage1_autofill_result,
+)
+from app.application.prepare_application import (
+    BLOCKED_ALREADY_APPLIED,
+    BLOCKED_SKIP,
+    BLOCKED_UNKNOWN,
+    PrepareApplicationService,
+    PrepareIntent,
+    RecommendedVacancy,
+)
+from app.collectors.vacancy_collector import NormalizedVacancy
+from app.company_watch.analysis_cache import TargetCompanyAnalysisCache
+from app.company_watch.application_recommendation import (
+    RECOMMENDATION_APPLY_NOW,
+    RECOMMENDATION_CHECK_MANUALLY,
+    RECOMMENDATION_SKIP,
+    ApplicationRecommendation,
+)
+from app.company_watch.feasibility import ApplicationFeasibility
+from app.company_watch.seniority import SeniorityClassification
+from app.models import (
+    Decision,
+    RecommendedCoverTemplate,
+    RecommendedResume,
+    VacancyEvaluation,
+)
+from app.storage.telegram_delivery import STATUS_APPLIED, TelegramDeliveryStorage
+from app.telegram.application_prepare import (
+    FAILED_TEXT,
+    STARTING_TEXT,
+    TelegramPrepareState,
+    run_explicit_application_prepare,
+)
+from app.telegram.client import (
+    APPLICATION_PREPARE_ACTION,
+    APPLICATION_PREPARE_BUTTON_TEXT,
+    build_action_buttons,
+    parse_callback_data,
+)
+from app.telegram.models import TelegramMessageRef
+
+
+SOURCE = "target_company:greenhouse:agoda"
+EXTERNAL_ID = "6886113"
+URL = "https://job-boards.greenhouse.io/agoda/jobs/6886113"
+
+
+class _FakeAutofill:
+    def __init__(self, *, status: AutofillStatus = AutofillStatus.READY_FOR_REVIEW) -> None:
+        self.calls: list[tuple[str, str, bool]] = []
+        self.status = status
+
+    def run(self, source: str, external_id: str, *, keep_open: bool = True):
+        self.calls.append((source, external_id, keep_open))
+        return stage1_autofill_result(
+            source=source,
+            external_id=external_id,
+            application_url=URL,
+            status=self.status,
+            filled_fields=[
+                AutofillFieldResult(
+                    label="First name",
+                    classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                ),
+                AutofillFieldResult(
+                    label="Email",
+                    classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                ),
+            ],
+            unresolved_required_fields=[
+                AutofillFieldResult(
+                    label="Why this role?",
+                    classification=FieldClassification.UNKNOWN_REQUIRED,
+                    required=True,
+                )
+            ],
+            resume_uploaded=True,
+        )
+
+
+class _RecordingPrepareService:
+    def __init__(self, inner: PrepareApplicationService) -> None:
+        self.inner = inner
+        self.calls: list[tuple[RecommendedVacancy, PrepareIntent, bool]] = []
+
+    def prepare(self, vacancy: RecommendedVacancy, *, intent: PrepareIntent, keep_open: bool = True):
+        self.calls.append((vacancy, intent, keep_open))
+        return self.inner.prepare(vacancy, intent=intent, keep_open=keep_open)
+
+
+class _ExplodingPrepareService:
+    def prepare(self, vacancy: RecommendedVacancy, *, intent: PrepareIntent, keep_open: bool = True):
+        _ = vacancy, intent, keep_open
+        raise RuntimeError("prepare exploded")
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.answers: list[tuple[str, str | None]] = []
+        self.texts: list[dict[str, object]] = []
+        self.edits: list[dict[str, object]] = []
+
+    def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
+        self.answers.append((callback_query_id, text))
+
+    def send_text_message(self, text: str, *, chat_id: str | None = None, reply_to_message_id: int | None = None):
+        self.texts.append({"text": text, "chat_id": chat_id, "reply_to": reply_to_message_id})
+        return TelegramMessageRef(chat_id=str(chat_id or "222"), message_id=99)
+
+    def edit_message_text(self, **kwargs) -> None:
+        self.edits.append(kwargs)
+
+    def edit_message_reply_markup(self, **kwargs) -> None:
+        _ = kwargs
+
+
+def _vacancy(*, description: str = "Java backend services") -> NormalizedVacancy:
+    return NormalizedVacancy(
+        source=SOURCE,
+        external_id=EXTERNAL_ID,
+        title="Java Backend Engineer",
+        company="Agoda",
+        location="Bangkok",
+        employment="Full-time",
+        description=description,
+        url=URL,
+        published_at="2026-09-05T10:00:00Z",
+    )
+
+
+def _evaluation() -> VacancyEvaluation:
+    return VacancyEvaluation(
+        decision=Decision.STRONG_MATCH,
+        summary="Strong Java backend role",
+        decision_reason="Java backend match",
+        matched_points=["java"],
+        match_percentage=86.0,
+        recommended_resume=RecommendedResume.JAVA,
+        recommended_cover_template=RecommendedCoverTemplate.GENERIC,
+    )
+
+
+def _feasibility() -> ApplicationFeasibility:
+    return ApplicationFeasibility(
+        label="UNCLEAR",
+        visa_sponsorship="unknown",
+        relocation_support="unknown",
+        remote_type="unknown",
+        work_authorization_requirement="unknown",
+        language_requirements=[],
+        location_restrictions=[],
+        warnings=[],
+    )
+
+
+def _seed_cache(
+    path: Path,
+    *,
+    recommendation: str,
+    vacancy: NormalizedVacancy | None = None,
+) -> TargetCompanyAnalysisCache:
+    cache = TargetCompanyAnalysisCache(path)
+    cache.put(
+        vacancy or _vacancy(),
+        evaluation=_evaluation(),
+        feasibility=_feasibility(),
+        recommendation=ApplicationRecommendation(label=recommendation, reasons=["test"]),
+        seniority=SeniorityClassification(label="SENIOR", reasons=["title has senior"]),
+    )
+    cache.save()
+    loaded = TargetCompanyAnalysisCache(path)
+    loaded.load()
+    return loaded
+
+
+def _callback_update(*, chat_id: str = "222", data: str | None = None) -> dict:
+    return {
+        "callback_query": {
+            "id": "cb-prep",
+            "data": data or f"{APPLICATION_PREPARE_ACTION}:tcg.agoda:{EXTERNAL_ID}",
+            "message": {
+                "chat": {"id": chat_id},
+                "message_id": 50,
+                "text": "Java Backend Engineer\nAgoda",
+                "reply_markup": {"inline_keyboard": [[{"text": "Open vacancy", "url": URL}]]},
+            },
+        }
+    }
+
+
+def _process(
+    *,
+    tmp_path: Path,
+    recommendation: str = RECOMMENDATION_APPLY_NOW,
+    autofill: _FakeAutofill | None = None,
+    history_status: str | None = None,
+    prepare_service=None,
+    data: str | None = None,
+    chat_id: str = "222",
+    allowed_chat_ids: frozenset[str] | None = None,
+    cache: TargetCompanyAnalysisCache | None = None,
+) -> tuple[_FakeClient, _FakeAutofill, object, TelegramDeliveryStorage]:
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    if history_status is not None:
+        storage.upsert_application_history(
+            source=SOURCE,
+            external_id=EXTERNAL_ID,
+            title="Java Backend Engineer",
+            company="Agoda",
+            location="Bangkok",
+            url=URL,
+            decision="STRONG_MATCH",
+            decision_reason="Java backend match",
+            recommended_resume="java",
+        )
+        storage.mark_history_status(
+            source=SOURCE,
+            external_id=EXTERNAL_ID,
+            status=history_status,
+            timestamp_field="applied_at" if history_status == STATUS_APPLIED else None,
+        )
+    runner = autofill if autofill is not None else _FakeAutofill()
+    inner = PrepareApplicationService(runner, storage)
+    service = prepare_service if prepare_service is not None else _RecordingPrepareService(inner)
+    lookup = cache if cache is not None else _seed_cache(tmp_path / "cache.json", recommendation=recommendation)
+    client = _FakeClient()
+    cli_module._process_callback_update(
+        update=_callback_update(chat_id=chat_id, data=data),
+        client=client,
+        storage=storage,
+        configured_chat_id=chat_id,
+        allowed_chat_ids=allowed_chat_ids or frozenset({chat_id}),
+        application_prepare_service=service,
+        application_prepare_cache=lookup,
+        application_prepare_sync=True,
+    )
+    return client, runner, service, storage
+
+
+def test_eligible_target_company_message_exposes_prepare_application() -> None:
+    buttons = build_action_buttons(SOURCE, EXTERNAL_ID, URL)
+    assert buttons[0][0].text == APPLICATION_PREPARE_BUTTON_TEXT
+    assert buttons[0][0].callback_data == f"{APPLICATION_PREPARE_ACTION}:tcg.agoda:{EXTERNAL_ID}"
+    parsed = parse_callback_data(buttons[0][0].callback_data)
+    assert parsed == (APPLICATION_PREPARE_ACTION, SOURCE, EXTERNAL_ID, None)
+    assert len(buttons[0][0].callback_data.encode("utf-8")) <= 64
+
+
+def test_callback_resolves_vacancy_and_recommendation_without_in_memory_object(tmp_path: Path) -> None:
+    cache_path = tmp_path / "cache.json"
+    _seed_cache(cache_path, recommendation=RECOMMENDATION_APPLY_NOW)
+    restarted = TargetCompanyAnalysisCache(cache_path)
+    restarted.load()
+    autofill = _FakeAutofill()
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    service = _RecordingPrepareService(PrepareApplicationService(autofill, storage))
+    outcome = run_explicit_application_prepare(
+        source=SOURCE,
+        external_id=EXTERNAL_ID,
+        prepare_service=service,
+        recommendation_lookup=restarted,
+        keep_open=True,
+    )
+    vacancy, intent, keep_open = service.calls[0]
+    assert vacancy.source == SOURCE
+    assert vacancy.external_id == EXTERNAL_ID
+    assert vacancy.recommendation == RECOMMENDATION_APPLY_NOW
+    assert intent is PrepareIntent.EXPLICIT
+    assert keep_open is True
+    assert outcome.state is TelegramPrepareState.COMPLETED
+    assert autofill.calls == [(SOURCE, EXTERNAL_ID, True)]
+    assert "Filled fields: 2" in outcome.text
+    assert "Unresolved required fields: 1" in outcome.text
+    assert "Manual review needed." in outcome.text
+
+
+def test_apply_now_explicit_prepare_succeeds_via_callback(tmp_path: Path) -> None:
+    client, autofill, service, _storage = _process(tmp_path=tmp_path, recommendation=RECOMMENDATION_APPLY_NOW)
+    assert client.answers == [("cb-prep", STARTING_TEXT)]
+    assert service.calls[0][1] is PrepareIntent.EXPLICIT
+    assert autofill.calls == [(SOURCE, EXTERNAL_ID, True)]
+    assert client.texts[0]["text"].startswith("Preparation completed.")
+    assert client.texts[0]["chat_id"] == "222"
+
+
+def test_check_manually_explicit_prepare_succeeds_via_callback(tmp_path: Path) -> None:
+    client, autofill, service, _storage = _process(
+        tmp_path=tmp_path,
+        recommendation=RECOMMENDATION_CHECK_MANUALLY,
+    )
+    assert service.calls[0][0].recommendation == RECOMMENDATION_CHECK_MANUALLY
+    assert service.calls[0][1] is PrepareIntent.EXPLICIT
+    assert autofill.calls == [(SOURCE, EXTERNAL_ID, True)]
+    assert "Preparation completed." in client.texts[0]["text"]
+
+
+def test_applied_stale_callback_is_blocked_and_autofill_not_reached(tmp_path: Path) -> None:
+    client, autofill, service, _storage = _process(
+        tmp_path=tmp_path,
+        recommendation=RECOMMENDATION_APPLY_NOW,
+        history_status=STATUS_APPLIED,
+    )
+    assert service.calls[0][1] is PrepareIntent.EXPLICIT
+    assert autofill.calls == []
+    assert client.texts[0]["text"] == BLOCKED_ALREADY_APPLIED
+
+
+def test_skip_callback_is_blocked(tmp_path: Path) -> None:
+    client, autofill, _service, _storage = _process(
+        tmp_path=tmp_path,
+        recommendation=RECOMMENDATION_SKIP,
+    )
+    assert autofill.calls == []
+    assert client.texts[0]["text"] == BLOCKED_SKIP
+
+
+def test_unknown_recommendation_fails_closed(tmp_path: Path) -> None:
+    empty = TargetCompanyAnalysisCache(tmp_path / "empty.json")
+    empty.load()
+    autofill = _FakeAutofill()
+    client, _runner, service, _storage = _process(
+        tmp_path=tmp_path,
+        cache=empty,
+        autofill=autofill,
+    )
+    assert service.calls[0][0].recommendation == "UNKNOWN"
+    assert service.calls[0][1] is PrepareIntent.EXPLICIT
+    assert autofill.calls == []
+    assert client.texts[0]["text"] == BLOCKED_UNKNOWN
+
+
+def test_malformed_identity_fails_safely(tmp_path: Path) -> None:
+    client, autofill, service, _storage = _process(
+        tmp_path=tmp_path,
+        data="prepapp:not-a-source",
+    )
+    assert service.calls == []
+    assert autofill.calls == []
+    assert client.answers == [("cb-prep", "Некорректное действие")]
+    assert client.texts == []
+
+
+def test_linkedin_or_generic_greenhouse_prepapp_fails_safely(tmp_path: Path) -> None:
+    client, autofill, service, _storage = _process(
+        tmp_path=tmp_path,
+        data="prepapp:li:4439013108",
+    )
+    assert service.calls == []
+    assert autofill.calls == []
+    assert client.answers == [("cb-prep", "Preparation is not available for this vacancy.")]
+    assert client.texts == []
+
+
+def test_preparation_failure_is_reported_safely(tmp_path: Path) -> None:
+    client, _autofill, _service, _storage = _process(
+        tmp_path=tmp_path,
+        prepare_service=_ExplodingPrepareService(),
+    )
+    assert client.answers == [("cb-prep", STARTING_TEXT)]
+    assert client.texts[0]["text"] == FAILED_TEXT
+
+
+def test_autofill_failed_status_is_reported_safely(tmp_path: Path) -> None:
+    autofill = _FakeAutofill(status=AutofillStatus.FAILED)
+    client, _runner, _service, _storage = _process(tmp_path=tmp_path, autofill=autofill)
+    assert autofill.calls == [(SOURCE, EXTERNAL_ID, True)]
+    assert client.texts[0]["text"] == FAILED_TEXT
+
+
+def test_wrong_chat_is_rejected(tmp_path: Path) -> None:
+    client, autofill, service, _storage = _process(
+        tmp_path=tmp_path,
+        chat_id="999",
+        allowed_chat_ids=frozenset({"222"}),
+    )
+    assert service.calls == []
+    assert autofill.calls == []
+    assert client.answers == [("cb-prep", "Действие недоступно для этого чата")]
+    assert client.texts == []
+
+
+def test_linkedin_prepare_behavior_is_unchanged(tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    storage.save_sent(
+        source="linkedin-email",
+        external_id="4439013109",
+        chat_id="123",
+        message_id=11,
+    )
+    autofill = _FakeAutofill()
+    service = _RecordingPrepareService(PrepareApplicationService(autofill, storage))
+    client = _FakeClient()
+    cli_module._process_callback_update(
+        update={
+            "callback_query": {
+                "id": "cb-li",
+                "data": "prepare:li:4439013109",
+                "message": {
+                    "chat": {"id": "123"},
+                    "message_id": 11,
+                    "reply_markup": {
+                        "inline_keyboard": [
+                            [{"text": "open", "url": "https://www.linkedin.com/jobs/view/4439013109/"}]
+                        ]
+                    },
+                },
+            }
+        },
+        client=client,
+        storage=storage,
+        configured_chat_id="123",
+        application_prepare_service=service,
+        application_prepare_cache=_seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW),
+        application_prepare_sync=True,
+    )
+    assert service.calls == []
+    assert autofill.calls == []
+    assert ("cb-li", "Добавлено в очередь на подготовку отклика") in client.answers
+    delivery = storage.get_delivery("linkedin-email", "4439013109")
+    assert delivery is not None
+    assert delivery.status == "PREPARE_REQUESTED"
+
+
+def test_handler_does_not_import_original_vacancy_object(tmp_path: Path) -> None:
+    client, autofill, service, _storage = _process(tmp_path=tmp_path)
+    vacancy, _intent, _keep_open = service.calls[0]
+    assert vacancy.__class__ is RecommendedVacancy
+    assert not hasattr(vacancy, "description")
+    assert autofill.calls[0][:2] == (SOURCE, EXTERNAL_ID)
+    assert "Java backend services" not in client.texts[0]["text"]

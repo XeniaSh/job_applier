@@ -31,6 +31,8 @@ def test_example_profile_yaml_loads_into_schema() -> None:
     assert profile.application_policy.privacy_acknowledgement.auto_acknowledge_required is True
     assert profile.application_policy.prior_affiliations[0].organization == "Deloitte"
     assert profile.application_policy.prior_affiliations[0].associated is False
+    assert profile.application_policy.has_employment_or_post_employment_restrictions is False
+    assert profile.employment_restrictions_answer() is False
     assert profile.application_policy.newsletter_opt_in is False
     assert profile.application_policy.sms_interview_updates is False
     assert profile.application_policy.prefer_not_to_disclose_gender is True
@@ -39,3 +41,6 @@ def test_example_profile_yaml_loads_into_schema() -> None:
     assert profile.question_override_answer("Have you applied in the past 6 months?") is False
     assert profile.application_consent.privacy_data_processing is True
     assert profile.website_for_autofill() == "https://ada.example.test"
+    assert profile.primary_programming_language() == "Java"
+    assert profile.gitlab_username_for_autofill() is None
+    assert profile.open_source_urls_for_autofill() == []
