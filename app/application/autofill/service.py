@@ -109,7 +109,23 @@ class AutofillService:
             }
             if should_handoff:
                 if self._on_ready is not None:
-                    self._on_ready(result)
+                    try:
+                        self._on_ready(result)
+                    except Exception:
+                        # A failed "ready" notification (e.g. a transient
+                        # Telegram send error) must not skip the browser
+                        # handoff below: the browser is genuinely still
+                        # open, and any review-session bookkeeping tied to
+                        # this run (see app.application.autofill.review_session)
+                        # must stay valid until the handoff actually
+                        # releases it. Losing the notification is still
+                        # logged; losing the handoff would silently orphan
+                        # an open browser with no way to close it.
+                        logger.exception(
+                            "on_ready notification failed for %s %s; continuing browser handoff",
+                            source,
+                            external_id,
+                        )
                 complete_browser_handoff(session, wait=self._wait_for_review)
             else:
                 session.close()

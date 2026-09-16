@@ -390,6 +390,47 @@ def test_cached_skip_is_excluded_before_ranking(monkeypatch, tmp_path: Path) -> 
     assert getattr(telegram.cards[0], "external_id") == "2"
 
 
+def test_unconfirmed_application_form_is_excluded_before_ranking(monkeypatch, tmp_path: Path) -> None:
+    # Discovered via Greenhouse (source=target_company:greenhouse:elastic), but
+    # the apply URL is a custom-domain embed, not Greenhouse's own hosted
+    # job-board shape -- see app.application.autofill.greenhouse_url.
+    unconfirmed = NormalizedVacancy(
+        source="target_company:greenhouse:elastic",
+        external_id="1",
+        title="Java Backend Engineer",
+        company="Elastic",
+        location="Remote",
+        employment="Full-time",
+        description="Java backend services",
+        url="https://jobs.elastic.co/jobs?gh_jid=1",
+        published_at="2026-09-05T10:00:00Z",
+    )
+    remaining = _vacancy(external_id="2", title="Office Coordinator")
+    analyzer = _CountingAnalyzer()
+    cache_path = tmp_path / "analysis_cache.json"
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[unconfirmed, remaining],
+        analyzer=analyzer,
+        analyze_limit=1,
+        analyze_limit_per_company=1,
+    )
+
+    assert result.dropped_unsupported_form == 1
+    assert result.selected == 1
+    assert len(analyzer.calls) == 1
+    assert "Office Coordinator" in analyzer.calls[0]
+    assert telegram.cards
+    assert getattr(telegram.cards[0], "external_id") == "2"
+
+    # Never recorded as SKIP, delivered, or any other recommendation state.
+    reloaded_cache = TargetCompanyAnalysisCache(cache_path)
+    reloaded_cache.load()
+    assert reloaded_cache.get(unconfirmed) is None
+    assert reloaded_cache.get_by_identity("target_company:greenhouse:elastic", "1") is None
+
+
 def test_lead_manager_skip_is_not_sent_while_senior_ic_is(monkeypatch, tmp_path: Path) -> None:
     lead = _vacancy(
         external_id="7044713",

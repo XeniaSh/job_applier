@@ -136,6 +136,7 @@ from app.telegram.application_prepare import (
     format_review_done_response_text,
     run_explicit_application_prepare,
 )
+from app.application.autofill.greenhouse_url import is_canonical_greenhouse_hosted_url
 from app.application.autofill.review_session import default_review_registry
 from app.telegram.formatter import (
     card_display_sections,
@@ -1058,6 +1059,7 @@ class _TargetCompaniesCycleResult:
     watched: int = 0
     dropped_delivered: int = 0
     dropped_cached_skip: int = 0
+    dropped_unsupported_form: int = 0
     selected: int = 0
     analyzed: int = 0
     cache_hits: int = 0
@@ -1179,6 +1181,17 @@ def _is_unchanged_cached_skip(
     return cached.recommendation.label == RECOMMENDATION_SKIP
 
 
+def _has_unconfirmed_application_form(vacancy: NormalizedVacancy) -> bool:
+    """Stage 1 delivery gate only: True when we cannot yet confirm the
+    application form is supported without a browser (see
+    `greenhouse_url.is_canonical_greenhouse_hosted_url`). This is not a
+    recommendation and must never be treated as SKIP — a custom-domain
+    Greenhouse embed may still work once an adapter/heuristic can confirm
+    it; we just can't tell before Telegram delivery today.
+    """
+    return not is_canonical_greenhouse_hosted_url(vacancy.url)
+
+
 def _target_companies_run_chat_id(settings: Settings) -> str:
     return str(settings.telegram.target_companies_chat_id or "").strip()
 
@@ -1236,6 +1249,7 @@ def _run_target_companies_cycle(
     candidates: list[NormalizedVacancy] = []
     dropped_delivered = 0
     dropped_cached_skip = 0
+    dropped_unsupported_form = 0
     for vacancy in watch_result.vacancies:
         if _target_company_already_delivered(
             deliveries,
@@ -1247,6 +1261,9 @@ def _run_target_companies_cycle(
             continue
         if _is_unchanged_cached_skip(vacancy, analysis_cache):
             dropped_cached_skip += 1
+            continue
+        if _has_unconfirmed_application_form(vacancy):
+            dropped_unsupported_form += 1
             continue
         candidates.append(vacancy)
 
@@ -1291,6 +1308,7 @@ def _run_target_companies_cycle(
         watched=len(watch_result.vacancies),
         dropped_delivered=dropped_delivered,
         dropped_cached_skip=dropped_cached_skip,
+        dropped_unsupported_form=dropped_unsupported_form,
         selected=len(to_analyze),
         analyzed=sum(1 for item in analyzed_items if item.evaluation is not None),
         cache_hits=analyze_stats.cache_hits,
@@ -1303,6 +1321,7 @@ def _run_target_companies_cycle(
         f"watched={result.watched} "
         f"dropped_delivered={result.dropped_delivered} "
         f"dropped_cached_skip={result.dropped_cached_skip} "
+        f"dropped_unsupported_form={result.dropped_unsupported_form} "
         f"selected={result.selected} "
         f"analyzed={result.analyzed} "
         f"cache_hits={result.cache_hits} "
@@ -3949,10 +3968,14 @@ def _dispatch_target_company_application_prepare(
             # By the time run_explicit_application_prepare has returned, any
             # browser the autofill runner opened is already closed — either
             # it never reached the review handoff (FAILED), or
-            # wait_for_done() already unblocked it. Dropping the entry here
-            # is what makes a stale/duplicate
-            # "Done reviewing" tap resolve to NOT_FOUND instead of lingering
-            # forever.
+            # wait_for_done() already unblocked it. This depends on the
+            # runner never skipping its browser handoff, even if the ready
+            # notification above fails to send (the autofill runner wraps
+            # its on_ready call so a failed notification cannot skip the
+            # handoff) — otherwise this discard would race ahead of a
+            # browser that is still genuinely open. Dropping
+            # the entry here is what makes a stale/duplicate "Done reviewing"
+            # tap resolve to NOT_FOUND instead of lingering forever.
             registry.discard(session_id)
 
     if sync:

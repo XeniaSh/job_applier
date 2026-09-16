@@ -101,6 +101,60 @@ def _make_service(session: _FakeSession, registry: ReviewSessionRegistry, sessio
     )
 
 
+def test_on_ready_failure_does_not_skip_browser_handoff(monkeypatch) -> None:
+    """Root-cause regression for the live Adyen bug: if the Telegram
+    notification (`on_ready`) raises -- e.g. a transient network error
+    sending the "Done reviewing" message -- the browser must still enter
+    the real wait_for_review handoff instead of being silently abandoned
+    while the caller (`work()` in app.cli) discards the registry entry as
+    if the browser were already closed.
+    """
+    monkeypatch.setattr(builtins, "input", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+
+    registry = ReviewSessionRegistry()
+    session = _FakeSession()
+    session_id = registry.register(source="target_company:greenhouse:agoda", external_id="1")
+
+    def _raising_on_ready(result: object) -> None:
+        _ = result
+        raise RuntimeError("simulated Telegram send failure")
+
+    service = AutofillService(
+        resolver=_FakeResolver("https://job-boards.greenhouse.io/agoda/jobs/1"),
+        profile_loader=_profile,
+        adapter=_FakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: registry.wait_for_done(session_id),
+        on_ready=_raising_on_ready,
+    )
+
+    result_box: dict[str, object] = {}
+
+    def run_it() -> None:
+        result_box["result"] = service.run("target_company:greenhouse:agoda", "1", keep_open=True)
+
+    thread = threading.Thread(target=run_it, daemon=True)
+    thread.start()
+    try:
+        time.sleep(0.1)
+        # The browser handoff must still be entered (thread still alive,
+        # waiting on the registry) even though on_ready blew up -- this is
+        # what makes the registry entry trustworthy: as long as the worker
+        # thread has not returned, the browser really is still open, and
+        # "Done reviewing" for this session_id must still work.
+        assert thread.is_alive()
+        assert session.closed is False
+
+        outcome = registry.mark_done(session_id)
+        assert outcome.value == "closed"
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+        # Only now, after the real handoff released, is the browser closed.
+        assert session.closed is True
+    finally:
+        thread.join(timeout=1.0)
+
+
 def test_telegram_triggered_run_never_calls_builtin_input(monkeypatch) -> None:
     def _forbidden_input(*args, **kwargs):  # noqa: ANN001, ANN002
         raise AssertionError("Telegram-triggered autofill must not block on builtin input()")
