@@ -1,49 +1,78 @@
 # Job Applier
 
-Job Applier is a local CLI service that reads LinkedIn Job Alert emails via IMAP, parses vacancy cards from email content (without scraping LinkedIn pages), evaluates fit using LLM extraction plus deterministic Python matching, sends relevant roles to Telegram, and helps prepare an application package (cover letter + selected resume). It tracks Skip/Prepare/Applied states in SQLite, while final submission on LinkedIn or external ATS remains manual.
+Job Applier is a local automation service with two parallel discovery paths — LinkedIn Job Alert emails read via IMAP ("current discovery") and a configured list of Target Companies' Greenhouse boards — both evaluated with LLM extraction plus deterministic Python matching and delivered to Telegram. For LinkedIn vacancies it helps prepare an application package (cover letter + selected resume) that you submit yourself. For Target Company Greenhouse vacancies it can additionally open a real headed browser, fill known application fields and upload your resume (Stage 1 autofill), and then wait for you to review and submit manually — the app never clicks Submit itself. It tracks lifecycle state (SENT / PREPARED / APPLIED / SKIPPED / …) in SQLite; final submission on LinkedIn or any external ATS always remains a manual, human action.
 
 ## Main Features
 
 - Continuous background mode via `uv run python -m app run`.
-- LinkedIn Job Alert ingestion from mailbox labels/folders through IMAP.
+- LinkedIn Job Alert ingestion from mailbox labels/folders through IMAP ("current discovery").
 - Structured vacancy parsing from email HTML with safe fallbacks.
-- Hybrid evaluation: LLM extracts structured facts; deterministic matcher makes final scoring/decision.
-- Telegram delivery with inline actions (`Skip`, `Prepare`, `Applied`, `Open LinkedIn`).
-- Cover letter generation and resume selection for requested applications.
+- Optional generic Greenhouse collector (`collect-greenhouse`, `GREENHOUSE_BOARDS`) delivered through the same LinkedIn/current-discovery Telegram destination.
+- Target Companies discovery from `config/target_companies.yaml`: a dedicated Greenhouse watcher, plus standalone Lever/Ashby/SmartRecruiters watchers that exist but are **not yet wired into `run` or Telegram**. Workday is not implemented.
+- Hybrid evaluation for every source: LLM extracts structured facts; a deterministic matcher makes the final `STRONG_MATCH` / `POTENTIAL_MATCH` / `IGNORE` decision. Target Companies additionally get a deterministic seniority/feasibility pass and an `APPLY_NOW` / `CHECK_MANUALLY` / `SKIP` application recommendation.
+- Two separate Telegram destinations: LinkedIn/current-discovery chat and a dedicated Target Companies chat (`TELEGRAM__TARGET_COMPANIES_CHAT_ID`) with no silent fallback between them.
+- LinkedIn cards: `Skip` / `Prepare` (cover letter + resume package, delivered back to Telegram) / `Applied` / `Open LinkedIn`.
+- Target Company Greenhouse cards: `Prepare application`, which runs Stage 1 Greenhouse autofill in a real headed Chromium browser — deterministic identity/eligibility/professional fields plus resume upload and, when possible, a generated cover letter — then leaves the browser open for you to review and submit yourself.
+- A diagnostic-only CLI, `autofill SOURCE EXTERNAL_ID`, runs the same Stage 1 autofill directly, bypassing recommendation/lifecycle gating.
 - Telegram resume caching by reusable `file_id` (first upload, then reuse).
-- SQLite state tracking for deliveries, statuses, and operational offsets.
+- SQLite state tracking for deliveries, application lifecycle, and operational offsets.
 - Debug commands for visibility and safe local state correction.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A[LinkedIn Job Alerts] --> B[Gmail Label / IMAP Mailbox]
-    B --> C[IMAP Collector]
-    C --> D[Email Parser]
-    D --> E[Title Filter]
+    subgraph LinkedIn current discovery
+        A[LinkedIn Job Alerts] --> B[Gmail Label / IMAP Mailbox]
+        B --> C[IMAP Collector]
+        C --> D[Email Parser]
+        D --> E[Title Filter]
+    end
+    subgraph Target Companies discovery
+        TC[config/target_companies.yaml] --> TW[Greenhouse Watcher]
+    end
     E --> F[LLM Extraction]
+    TW --> F
     F --> G[Deterministic Matcher]
+    G --> RC[Seniority / Feasibility / Recommendation]
     G --> H[SQLite State]
-    G --> I[Telegram Cards]
-    I --> J[Prepare Action]
-    J --> K[Application Preparation]
-    K --> I
+    G --> I1[Telegram: LinkedIn chat]
+    RC --> I2[Telegram: Target Companies chat]
+    I1 --> J[Prepare Action]
+    J --> K[Cover Letter + Resume Package]
+    K --> I1
     K --> H
+    I2 --> P[Prepare application Action]
+    P --> PA[PrepareApplicationService]
+    PA --> AF[AutofillService: headed Chromium, Greenhouse]
+    AF --> I2
 ```
 
-The LLM is used to extract structured vacancy information. Final scoring and decisioning are done by deterministic Python logic.
+The LLM is used to extract structured vacancy information and to write cover letters on both paths (LinkedIn `PreparationService`, and Target Company Greenhouse autofill via `AutofillCoverLetterProvider`); it may also draft optional answers for unknown Greenhouse custom questions, always flagged for review. Final scoring, matching, recommendation, and known-field mapping/classification are made by deterministic Python logic — the known-field mapper is deterministic, but not every value an autofill run places into the form is, since cover letters and generated custom-question answers come from the LLM. The LLM never decides whether or what to submit, and nothing in either path clicks Submit.
 
 ## End-to-End Workflow
+
+### LinkedIn / current discovery
 
 1. LinkedIn sends job alert emails.
 2. Job Applier reads the configured IMAP folder/label.
 3. Vacancy cards are parsed and normalized.
 4. The evaluator computes `STRONG_MATCH`, `POTENTIAL_MATCH`, or `IGNORE`.
-5. Relevant cards are sent to Telegram.
+5. Relevant cards are sent to the LinkedIn Telegram chat.
 6. You can mark cards as `Skip`, `Prepare`, or later `Applied`.
-7. On `Prepare`, Job Applier generates the cover letter, picks resume, sends package to Telegram, and updates status.
-8. Final application submission remains manual.
+7. On `Prepare`, Job Applier generates the cover letter, picks a resume, sends the package to Telegram, and updates status to `PREPARED`.
+8. Final application submission remains manual. `Applied` is a button you press yourself after you submit — the app does not detect or verify a real LinkedIn/ATS submission.
+
+### Target Companies (Greenhouse)
+
+1. The Greenhouse watcher fetches vacancies for each Greenhouse company listed in `config/target_companies.yaml`.
+2. The same LLM extraction + deterministic matcher runs, plus a seniority/feasibility pass, producing `APPLY_NOW`, `CHECK_MANUALLY`, or `SKIP`.
+3. Eligible cards are sent to the separate Target Companies Telegram chat.
+4. Tapping **Prepare application** calls `PrepareApplicationService` (blocks vacancies already `APPLIED`; blocks `SKIP`; requires an explicit tap for `CHECK_MANUALLY`), which calls `AutofillService`.
+5. `AutofillService` opens the Greenhouse application URL in a real headed Chromium window, fills the fields it can answer deterministically from your structured Candidate Profile, uploads your resume, and — when an LLM client is configured — fills a generated cover letter and, for eligible unknown professional questions, a short generated answer (always marked `generated` and flagged for manual review, never auto-submittable). Sensitive/demographic fields (gender, ethnicity, disability, veteran status, etc.) are left unfilled by default; a required Gender question specifically always gets a non-disclosure option and never reads `sensitive.gender`, even with no explicit configuration, while an optional Gender question is always left untouched. Required questions that remain unresolved (no deterministic fact, not LLM-eligible, or generation failed) are reported for manual completion, not guessed.
+6. A completion message with a **Done reviewing** button is sent to Telegram once filling finishes; the browser stays open until you tap it (or the process shuts down). Tapping it only closes that specific browser session — it never submits the form and never changes application status.
+7. You review the filled form yourself and click Submit in the browser if you want to apply. Job Applier does not verify with the ATS that a submission actually went through.
+8. There is no automatic `Applied` for this path yet; tap the Telegram card's `✅ Applied` action once you have actually submitted — it updates both the canonical `application_history` lifecycle and the Telegram delivery status. `telegram-reset` is a debug tool that only rewrites `telegram_deliveries` (Telegram card UI status); it does not touch `application_history`, so it is not equivalent to tapping `✅ Applied`.
 
 ## Requirements
 
@@ -53,6 +82,7 @@ The LLM is used to extract structured vacancy information. Final scoring and dec
 - IMAP mailbox access for LinkedIn alerts (Gmail supported).
 - OpenAI-compatible LLM endpoint.
 - Telegram bot and private chat.
+- Playwright Chromium (`uv run playwright install chromium`), only needed for Greenhouse Stage 1 autofill (`autofill` command / Target Companies "Prepare application").
 
 ## Quick Start
 
@@ -117,7 +147,7 @@ Never commit real secrets in `.env`.
 | `LINKEDIN_EMAIL_SEARCH_DAYS` | LinkedIn email collection | `7` | Lookback window in days | No |
 | `LINKEDIN_EMAIL_MARK_AS_READ` | LinkedIn email collection | `false` | Mark processed emails as read | No |
 | `TELEGRAM_BOT_TOKEN` | Telegram integration | `123456:ABC...` | Shared Bot API token from BotFather | Yes |
-| `TELEGRAM_CHAT_ID` | Telegram integration | `123456789` | Legacy LinkedIn/discovery chat ID; fallback for `TELEGRAM__LINKEDIN_CHAT_ID` | Potentially |
+| `TELEGRAM__CHAT_ID` | Telegram integration | `123456789` | Legacy LinkedIn/discovery chat ID; fallback for `TELEGRAM__LINKEDIN_CHAT_ID` (the flat form `TELEGRAM_CHAT_ID`, without the nested-settings `__` delimiter, is not a `Settings` key) | Potentially |
 | `TELEGRAM__LINKEDIN_CHAT_ID` | Telegram LinkedIn flow | `123456789` | Chat ID for LinkedIn/current discovery messages | Potentially |
 | `TELEGRAM__TARGET_COMPANIES_CHAT_ID` | Telegram Target Companies flow | `987654321` | Chat ID for Target Companies messages; no silent fallback to LinkedIn | Potentially |
 | `RESUMES_DIR` | Preparation pipeline | `resumes` | Directory with local resume PDFs | No |
@@ -181,7 +211,7 @@ uv run python -m app telegram-chat-id
 ```
 
 6. Put the LinkedIn/discovery chat ID into `TELEGRAM__LINKEDIN_CHAT_ID` (or keep using legacy `TELEGRAM__CHAT_ID`).
-7. For Target Companies messages, put a **different** chat ID into `TELEGRAM__TARGET_COMPANIES_CHAT_ID`. Do not omit it and expect LinkedIn channel fallback.
+7. For Target Companies messages, put a chat ID into `TELEGRAM__TARGET_COMPANIES_CHAT_ID`. Do not omit it and expect LinkedIn channel fallback — the code raises a config error instead. It does not require this chat id to differ from the LinkedIn one, but using the same chat mixes both card types together.
 8. Dry run card generation:
 
 ```bash
@@ -226,7 +256,29 @@ Notes:
   - first send uploads local PDF and stores Telegram `file_id`;
   - next sends reuse `file_id` without uploading bytes;
   - if local PDF changes (mtime/size), cache is invalidated and file uploads again.
-- Resume cache only optimizes Telegram delivery from this local app; final upload/selection in LinkedIn or ATS stays manual.
+- This resume cache is about Telegram delivery from `resume_profiles.yaml` (LinkedIn package flow / `send-linkedin-telegram`); it does not touch any ATS. Final submission on LinkedIn or an external ATS always stays manual — but Greenhouse Stage 1 autofill does automatically upload your `default_resume` (a separate file from the Candidate Profile YAML, see below) into the application form itself; only the final Submit click remains manual there.
+
+## Target Companies (Greenhouse) Setup
+
+1. List companies to watch in `config/target_companies.yaml` (Greenhouse-backed entries are watched today; `lever` / `ashby` / `smartrecruiters` / `custom` / `manual` entries are recognized by the config loader but have no watcher wired into `run` yet, except standalone Lever/Ashby/SmartRecruiters watcher modules that are not called from `run` or Telegram).
+2. Set `TELEGRAM__TARGET_COMPANIES_CHAT_ID`; there is no fallback to the LinkedIn chat if it is unset. The code does not require this chat id to differ from the LinkedIn one, but using the same chat mixes both card types together.
+3. Inspect discovery/analysis offline before enabling delivery:
+
+```bash
+uv run python -m app collect-target-companies-greenhouse --show-vacancies --limit 5
+uv run python -m app analyze-target-companies-greenhouse --company Agoda
+```
+
+4. `run` delivers Target Companies cards automatically once `TELEGRAM__TARGET_COMPANIES_CHAT_ID` is set.
+
+## Candidate Profile for Autofill
+
+Greenhouse Stage 1's known-field mapper reads a separate, structured YAML profile, not `candidate_profile.md`, `profiles/`, `resume_profiles.yaml`, or `config/candidate_constraints.yaml` (those remain inputs to LLM matching and resume selection). The one exception is cover-letter generation: `AutofillCoverLetterProvider` reuses the shared LLM cover-letter generator and, when present, also loads `candidate_profile.md` as extra generation context alongside the structured YAML profile.
+
+- `candidate_profile.example.yaml` — tracked in Git, synthetic/fake values, defines the schema.
+- `candidate_profile.local.yaml` — gitignored, real values, overlaid on top of the example at runtime when present. Never read or committed by coding agents.
+
+Sensitive/demographic fields (gender, ethnicity, disability, veteran status, etc.) are left unfilled by default. Gender specifically is never filled from `sensitive.gender`: a required Gender question always gets a non-disclosure option, and an optional Gender question is always left untouched, regardless of what the profile contains. Work authorization is per-country and explicit; a location alone never implies authorization or citizenship.
 
 ## Running the Background Service
 
@@ -259,14 +311,18 @@ See detailed table in [`docs/COMMANDS.md`](docs/COMMANDS.md).
 Primary commands:
 
 - `review`
-- `collect-hh`
+- `collect-hh` (HH collection stays CLI-only; not part of `run`)
 - `collect-linkedin-email`
+- `collect-greenhouse` (generic Greenhouse collector, separate from Target Companies)
+- `collect-target-companies-greenhouse`
+- `analyze-target-companies-greenhouse`
 - `preview-linkedin-email`
 - `list-imap-folders`
 - `send-linkedin-telegram`
 - `telegram-chat-id`
 - `poll-telegram-actions`
 - `prepare-telegram-applications`
+- `autofill SOURCE EXTERNAL_ID` (diagnostic-only Stage 1 Greenhouse autofill; ungated, headed Chromium, terminal Enter/Ctrl+C to close)
 - `telegram-cache-resumes`
 - `telegram-resume-cache`
 - `telegram-clear-resume-cache`
@@ -285,7 +341,9 @@ Use [`docs/COMMANDS.md`](docs/COMMANDS.md) as the complete technical reference.
 
 ## Status Lifecycle
 
-Primary path:
+`application_history` is the single canonical lifecycle table, keyed by `(source, external_id)`, shared by both LinkedIn and Target Companies vacancies.
+
+Primary LinkedIn path:
 
 `SENT` -> `PREPARE_REQUESTED` -> `PREPARED` -> `APPLIED`
 
@@ -294,6 +352,8 @@ Alternative states:
 - `SKIPPED`
 - `FAILED`
 - `PREPARATION_FAILED`
+
+For Target Company Greenhouse vacancies, `PREPARE_REQUESTED`/`PREPARED` in this table refer to the LinkedIn-style package flow and are not produced by the Greenhouse "Prepare application" autofill path — running Stage 1 autofill and completing the browser review does not by itself write any lifecycle row. `APPLIED` is always a manual user action, normally the Telegram `✅ Applied` button (`app.cli`'s callback handler writes both `application_history` and `telegram_deliveries` together), never inferred from a successful autofill/read-back or from clicking Submit in the browser; the app never queries the ATS to confirm a submission actually happened. The `telegram-reset` CLI command only calls `TelegramDeliveryStorage.set_status`, which updates `telegram_deliveries` alone — it does not write `application_history` and so does not achieve the same lifecycle effect as the `✅ Applied` button. `PrepareApplicationService` reads `APPLIED` back as a hard gate: once a `(source, external_id)` is `APPLIED`, Prepare/autofill for it is blocked for every recommendation and intent (the diagnostic CLI `autofill` command is the only ungated path).
 
 See transition details in [`docs/COMMANDS.md`](docs/COMMANDS.md).
 
@@ -325,11 +385,16 @@ Security and privacy practices are documented in [`docs/SECURITY.md`](docs/SECUR
 
 - LinkedIn alert emails may include incomplete vacancy descriptions.
 - Location eligibility often requires manual verification.
-- Final application submission is manual.
+- Final application submission is always manual; the app never clicks Submit and never verifies a submission against the ATS.
+- Greenhouse Stage 1 autofill fills fields it can answer deterministically from the structured Candidate Profile, plus resume upload and, when an LLM client is configured, a generated cover letter and short generated answers for eligible unknown professional questions (always marked `generated` and flagged for manual review, never auto-submittable); required questions that remain unresolved (no deterministic fact, not LLM-eligible, or generation failed) are reported for manual completion, not guessed.
+- Only Greenhouse has an autofill adapter. Lever/Ashby/SmartRecruiters/Workday/custom/manual Target Companies are discovered or configured at most; there is no autofill for them.
+- Lever/Ashby/SmartRecruiters standalone watcher modules exist but are not wired into `run` or Telegram.
+- If the Telegram "ready" notification for a Target Company autofill run fails to send (for example a transient network error), the headed browser stays open and the review session stays registered, but the "Done reviewing" button/message never reaches you and there is no automatic retry. Closing that browser window yourself does not release the session — nothing calls `registry.mark_done` for it — so the worker stays blocked until you restart the process (its best-effort shutdown cleanup releases any still-open sessions).
 - External ATS forms and flows vary by company.
 - LLM extraction can vary slightly across similar inputs.
-- HeadHunter API availability may produce `403` depending on conditions.
-- Service targets a single configured private Telegram chat.
+- HeadHunter API availability may produce `403` depending on conditions; HH collection is CLI-only and not part of `run`.
+- Auto-submit is not implemented anywhere in the app.
+- Service targets a single configured private Telegram chat per destination (LinkedIn and Target Companies).
 
 ## Development and Tests
 
@@ -343,8 +408,11 @@ Coverage focuses on behavior-level scenarios: parser robustness, deterministic m
 
 ```text
 app/
-  collectors/
+  collectors/          # LinkedIn email, generic Greenhouse
+  company_watch/        # Target Companies config, watchers, prefilter, feasibility, recommendation
   application/
+    autofill/            # Stage 1 Greenhouse autofill: browser, adapter, classifier, service, CLI
+    prepare_application.py
   storage/
   telegram/
   cli.py
@@ -353,16 +421,23 @@ docs/
   COMMANDS.md
   TROUBLESHOOTING.md
   SECURITY.md
+  autofill_smoke.md    # manual live-smoke runbook for Greenhouse autofill
 profiles/
 prompts/
 tests/
 data/
+candidate_profile.example.yaml   # autofill profile schema (fake data, tracked)
+candidate_profile.local.yaml     # autofill profile real overlay (gitignored, not read by agents)
 ```
 
 ## Roadmap
 
-- Better multi-source vacancy ingestion.
+- Wire Lever/Ashby/SmartRecruiters watchers into `run`/Telegram; add Workday if requested.
+- Additional ATS autofill adapters beyond Greenhouse.
+- Safe auto-submit policy computation for fully-resolved forms (not implemented yet); actually submitting on that policy is a separate, further step gated behind an explicit opt-in.
 - Improved location/work-authorization reasoning.
 - More customizable ranking and notification policies.
 - Better multi-chat Telegram support and role-based controls.
 - Optional web UI for operational visibility.
+
+See `PLAN.md` for the detailed, task-level work queue.

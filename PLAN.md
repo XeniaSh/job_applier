@@ -1,7 +1,8 @@
 # JobApplier — Implementation Plan
 
-This plan compares `PRODUCT_SPEC.md` with the repository as inspected on 2026-09-10.
-It is the work queue for autonomous development.
+This plan compares `PRODUCT_SPEC.md` with the repository as inspected on 2026-09-10,
+and re-audited on 2026-09-16 through TASK-086 (see `PROGRESS.md` for the current
+task/status/build details). It is the work queue for autonomous development.
 
 Do not start from a blank architecture.
 Prefer extending working code over rewriting it.
@@ -45,8 +46,9 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 - PDF generation: `fpdf2`
 - Tests: `pytest`, `respx`
 - Lint: `ruff`
-- Persistence: SQLite at `data/jobs.db`
-- No Playwright, no browser automation, no LangChain, no extra databases
+- Persistence: SQLite at `data/jobs.db`; `data/target_company_analysis_cache.json` (durable JSON, not SQLite)
+- Browser automation: Playwright (`BrowserSession`, Stage 1 Greenhouse autofill). Production runs headed by default; `BrowserSession(headed=False)` exists and is used by tests. Lazy-imported so ordinary collection/analysis does not require it.
+- No LangChain, no extra databases, no automated submit
 
 Entry point:
 
@@ -70,9 +72,9 @@ Main modules:
 
 ### Existing CLI commands
 
-`review`, `collect-hh`, `collect-linkedin-email`, `collect-greenhouse`, `collect-target-companies-greenhouse`, `analyze-target-companies-greenhouse`, `send-linkedin-telegram`, `prepare-telegram-applications`, `run`, Telegram debug/cache/history commands, IMAP preview/list/reset.
+`review`, `collect-hh`, `collect-linkedin-email`, `collect-greenhouse`, `collect-target-companies-greenhouse`, `analyze-target-companies-greenhouse`, `send-linkedin-telegram`, `prepare-telegram-applications`, `autofill`, `run`, Telegram debug/cache/history commands, IMAP preview/list/reset.
 
-There is no `autofill` command.
+`autofill SOURCE EXTERNAL_ID` (`app/application/autofill/cli.py`) is the diagnostic-only Stage 1 Greenhouse autofill entry point. It is intentionally ungated: it does not call `PrepareApplicationService`, does not consult recommendation or `application_history`/`APPLIED`, and blocks the terminal on builtin `input()` (Enter/Ctrl+C) instead of a Telegram button.
 
 ---
 
@@ -108,6 +110,7 @@ These product capabilities already work. Schedule only additive tasks, not repla
 - Wired into `run` when `TELEGRAM__TARGET_COMPANIES_CHAT_ID` is set
 - Separate Telegram destination; no fallback to LinkedIn chat
 - Target Company Greenhouse cards expose explicit **Prepare application** (`prepapp:tcg.<board>:<id>` → `PrepareApplicationService` with `PrepareIntent.EXPLICIT`). LinkedIn **🛠 Prepare** is unchanged. Generic Greenhouse still has no prepare button.
+- Target Companies delivery gate (TASK-085): vacancies whose Greenhouse-discovered apply URL is not the canonical `*.greenhouse.io/.../jobs/<id>` shape (custom-domain embeds, e.g. Elastic-style) are dropped from candidate selection before analysis (`is_canonical_greenhouse_hosted_url`, `app/application/autofill/greenhouse_url.py`) rather than delivered or persisted as `SKIP`; they are simply re-evaluated next cycle. No company is blacklisted by name.
 
 ### C. Shared / supporting
 
@@ -121,41 +124,66 @@ These product capabilities already work. Schedule only additive tasks, not repla
 - `.env.example`, `.gitignore` for `.env` / `data/` / resume PDFs
 - `.cursorignore` for `.env`, resume binaries, SQLite, `data/`
 
+### D. Stage 1 Greenhouse autofill (Stage 1A–1P)
+
+- Structured `CandidateProfile` YAML (`candidate_profile.example.yaml` tracked, `candidate_profile.local.yaml` gitignored overlay) — ATS-independent, explicit-only (no legal/citizenship inference from location or relocation willingness)
+- `DefaultVacancyResolver`: live Greenhouse board refetch by `target_company:greenhouse:<board>` + external id; other sources fail as unsupported
+- Playwright `BrowserSession` (headed by default in production; `headed=False` is supported and used by tests): no `submit()` method anywhere in the adapter surface. Production Stage 1 always builds its result via the `stage1_autofill_result` factory, which discards any caller-supplied `submit_performed` and hardcodes `False`; `Stage1AutofillResult`'s validator likewise coerces `True` back to `False`. The plain `AutofillResult` model itself has no such guard, so this is a factory/subclass guarantee, not a property of every `AutofillResult` instance.
+- `GreenhouseAdapter`: form recognition, CAPTCHA/Cloudflare/login challenge detection (→ `NEEDS_MANUAL_INTERVENTION`, no bypass), field discovery, fill + read-back for text/select/radio/checkbox/file-upload/React controls (including React multi-select persistence and the Cover Letter "Enter manually" editor)
+- Question mapping/classification (`SUPPORTED_DETERMINISTIC` / `UNKNOWN_REQUIRED` / `UNKNOWN_OPTIONAL` / `SENSITIVE_OPTIONAL` / `UNSUPPORTED`) covering identity, links, resume, phone (country-code vs national number), academic level, tech-stack top-N, gender (`_gender_value` never reads `sensitive.gender`: required Gender always selects a non-disclosure option, optional Gender is always left untouched), relocation/office/hybrid willingness, employee-relationship/prior-affiliation defaults, application-source preference, newsletter/SMS policy, privacy/data-transfer acknowledgements, cover letter (deterministic mapping only; cover letter and unknown-question answers below are LLM-generated, not deterministic)
+- Optional LLM-generated answers for unknown custom questions (`ApplicationAnswerGenerator`): always marked `generated`, always needs-review, never for legal/sensitive/factual-personal questions. Choice-type answers (select/radio/combobox/multiselect with real options) are matched against those visible options only; eligible free-text questions instead get a generated free-text answer, which is still flagged for manual review, not auto-submittable
+- `AutofillService.run`: resolve → profile → resume → browser → adapter → result orchestration; result renderer (`render_autofill_summary`) and PII-safe logging (`log_autofill_result`)
+- Fixture-only test suite (`tests/fixtures/autofill/`, `tests/application/autofill/`); no live Greenhouse in pytest
+- Manual smoke-test runbook (`docs/autofill_smoke.md`); two real Greenhouse smoke tests already completed and reported by the user (Agoda `7044713`, Adyen `7342887` — submitted, do not reuse)
+
+### E. Stage 2 Telegram → Prepare → Autofill
+
+- `app/application/prepare_application.py` (`PrepareApplicationService`, `PrepareIntent`): gates on `application_history` `APPLIED` (blocks every intent) then on recommendation (`SKIP` always blocked, `CHECK_MANUALLY` only via `EXPLICIT`, `APPLY_NOW` allowed for both), then calls `AutofillService.run`. Diagnostic CLI `autofill` does not consult this gate.
+- Target Company Greenhouse **Prepare application** button → `run_explicit_application_prepare` → recommendation from `TargetCompanyAnalysisCache.get_by_identity` → `PrepareApplicationService.prepare(..., intent=EXPLICIT)`
+- `AutofillFailureReason` (`UNSUPPORTED_FORM`, `BROWSER_SETUP_FAILED`, `VACANCY_RESOLVE_FAILED`, `PROFILE_LOAD_FAILED`, `RESUME_RESOLUTION_FAILED`, `UNEXPECTED_ERROR`) drives safe, actionable Telegram failure/manual-intervention text; raw exception text never reaches Telegram
+- `ReviewSessionRegistry` (`app/application/autofill/review_session.py`): per-run session id, Telegram/ATS-agnostic; browser stays open until the Telegram **"Done reviewing"** button (`revdone:<session_id>`) is tapped for that specific session (calls `registry.mark_done`), or `run` shutdown's best-effort `close_all()`/`wait_all_discarded()`. A failed `on_ready` Telegram send is caught so it cannot skip the browser handoff. Manually closing the Chromium window itself does not call `mark_done` and does not release `wait_for_done()` — the worker thread stays blocked until a delivered "Done reviewing" tap or process shutdown. See open items in Stage 1Q below.
+- "Done reviewing" (or the diagnostic CLI's terminal Enter/Ctrl+C) only closes that browser session; it never submits and never writes `application_history`. `✅ Applied` remains a separate, always-manual Telegram card action.
+
 ---
 
 ## Gaps vs PRODUCT_SPEC
 
-### Missing — Stage 1 autofill (main remaining work)
+### Done — Stage 1 autofill, Stage 2 Telegram wiring, Stage 3 LLM answers
+
+Everything listed below was the "main remaining work" as of 2026-09-10 and is now implemented and tested (fixtures + two real live Greenhouse smoke tests; see section D/E above and `PROGRESS.md`):
 
 - Structured Candidate Profile YAML (`example` + `local`)
 - Autofill layer (`AutofillService`, result model, field classification)
-- Playwright / browser session
-- Greenhouse ATS adapter (discover, fill, upload, read-back)
-- Submit guard
-- CLI `autofill source external_id`
+- Playwright / headed browser session
+- Greenhouse ATS adapter (discover, fill, upload, read-back, React controls, challenge detection)
+- Submit guard (no `submit()` anywhere in the adapter surface; `submit_performed` is force-`False`)
+- CLI `autofill SOURCE EXTERNAL_ID` (diagnostic-only, ungated)
 - Vacancy resolver for autofill by `source + external_id`
-- CAPTCHA / login handoff
-- Autofill summary UX
-- Autofill tests on fixtures
-- Manual smoke test on a real Greenhouse form
+- CAPTCHA / login handoff (`NEEDS_MANUAL_INTERVENTION`, no bypass)
+- Autofill summary UX + PII-safe logging
+- Autofill tests on fixtures; no live Greenhouse in pytest
+- Manual smoke-test runbook, exercised live twice by the user (Agoda, Adyen)
+- Stage 2: Telegram **Prepare application** → `PrepareApplicationService` → `AutofillService`, session-identified browser review handoff, safe failure/manual-intervention text
+- Stage 3: optional LLM-generated answers for unknown custom questions, always needs-review
 
 ### Incomplete — keep, do not replace
 
-- Candidate data is split across markdown, skills YAML, and constraints YAML. Fine for analysis; insufficient for autofill.
-- `PreparationService` supports only `linkedin-email` cover-letter/resume packages. Target Companies uses `PrepareApplicationService` (TASK-078/079) plus Telegram **Prepare application** (TASK-037..039) with `PrepareIntent.EXPLICIT`.
-- `application_answers` in preparation is a no-op placeholder.
-- `data/prepared/` has no retention policy.
-- Many Target Companies in YAML are `custom` / `lever` / `ashby` / `smartrecruiters` / `manual`. Only Greenhouse watcher exists.
+- `PreparationService` supports only `linkedin-email` cover-letter/resume packages. Target Companies uses `PrepareApplicationService` (TASK-078/079) plus Telegram **Prepare application** (TASK-037..039) with `PrepareIntent.EXPLICIT`. These remain two separate mechanisms; do not merge them.
+- `application_answers` in the LinkedIn `PreparationService` (not the Stage 1 autofill answer generator) is a no-op placeholder.
+- `data/prepared/` retention (TASK-049) is a fixed 14-day age rule for LinkedIn cover-letter artifacts only; there is no CLI command to trigger cleanup on demand.
+- Lever/Ashby/SmartRecruiters watchers exist (`app/company_watch/watchers/`, TASK-042..044) but are standalone: not called from `run` or Telegram, so those Target Companies entries are not actually delivered yet. `custom` / `manual` entries have no watcher. Only the Greenhouse watcher is wired end-to-end. There is no autofill adapter for any ATS other than Greenhouse.
 - Generic Greenhouse jobs in `run` are delivered to the LinkedIn Telegram destination. This matches “current discovery”, not Target Companies.
-- HH exists as CLI-only collection.
+- HH exists as CLI-only collection (`OQ-007`), not part of `run`.
 - Root `candidate_profile.md` is tracked in Git and may contain personal search context. Do not relocate unless requested (`OQ-010`).
+- Open `on_ready`-notification-failure gap in the Telegram review handoff: if the completion notification fails to send, the browser and `ReviewSessionRegistry` entry stay open (correctly), but the "Done reviewing" button/message never reaches the user and there is no retry. Not fixed; do not claim it is.
+- A live retest of the TASK-086 fix has not been performed by an agent; only the user's own report exists.
 
 ### Intentionally later
 
-- Stage 3 LLM custom questions
-- Stage 4 additional ATS watchers/adapters
-- Stage 5 auto-submit
-- Workday (`OQ-006`, also forbidden by current `AGENTS.md`)
+- TASK-046: additional-ATS autofill adapters (beyond Greenhouse), one per iteration; depends on TASK-033 (done) and the matching watcher existing — Lever/Ashby/SmartRecruiters watchers (TASK-042..044) already exist, so this task has no unmet dependency, it simply has not been picked up yet
+- TASK-047: auto-submit policy computation only (no submit action); depends on TASK-033 and TASK-041 (both done), so it also has no unmet dependency
+- TASK-048: auto-submit execution — forbidden until it is both built on a done TASK-047 and explicitly requested; the "requires an explicit request" gate applies to TASK-048, not to computing the TASK-047 policy itself
+- Workday (`OQ-006`), including TASK-045 — blocked on an explicit user request
 
 ---
 
@@ -239,6 +267,14 @@ TASK-037..039 Stage 2 Telegram
 TASK-080 GitLab unanswered required questions
     ↓
 TASK-081 GitLab primary language / OSS / current-location visa
+    ↓
+TASK-082 GitLab primary-language fill / current-location sponsorship diagnostics / optional gender
+    ↓
+TASK-083..084 Stage 1P Telegram review handoff + safe failure text
+    ↓
+TASK-085 Stage 1Q Target Companies unconfirmed-form delivery gate
+    ↓
+TASK-086 Stage 1Q on_ready exception-safety fix (real live-E2E bug)
     ↓
 (Stage 3 LLM remaining polish, if any)
     ↓
@@ -1321,6 +1357,49 @@ Stage 2 wiring, ATS adapter, or any recommendation/lifecycle gate.
 
 ---
 
+## Stage 1Q — Target Companies delivery gate + real live-E2E bugfix (2026-09-15/16)
+
+An audit of the already-wired Telegram → Prepare → Autofill pipeline found one
+more Target Companies delivery gap (unconfirmed-form embeds), and the user's
+first live Telegram "Done reviewing" smoke test found one real bug in the
+already-shipped TASK-083 review handoff. This stage fixes both. Two related
+items surfaced by this audit are recorded as open below, deliberately without
+a task number or a prescribed fix.
+
+### TASK-085 — Target Companies delivery gate for unconfirmed Greenhouse forms
+
+- **Status:** done
+- **Depends on:** none (audit of existing Target Companies candidate selection)
+- **Goal:** Stop selecting Target Companies vacancies whose Greenhouse-discovered apply URL is not Greenhouse's own canonical hosted job-board shape (custom-domain embeds, e.g. Elastic-style), so `AutofillService` does not run against a page `GreenhouseAdapter.recognize` has not been confirmed to handle. Per `greenhouse_url.py`'s own docstring, a non-canonical URL is *unconfirmed*, not *unsupported* — the embed could still work; the check simply cannot tell without loading the page in a browser.
+- **Area:** `app/application/autofill/greenhouse_url.py` (new, pure — `is_canonical_greenhouse_hosted_url`, no browser/LLM/network), `_run_target_companies_cycle` candidate-selection loop (third pre-selection drop, alongside `_target_company_already_delivered` / `_is_unchanged_cached_skip`)
+- **Acceptance criteria:**
+  - Only `NormalizedVacancy.url` (already known from discovery) is inspected; no extra fetch.
+  - Non-canonical-shape vacancies are dropped from that cycle's candidates before analysis/delivery — not persisted as `SKIP`, not delivered, no recommendation recorded. Re-evaluated next cycle.
+  - New `dropped_unsupported_form` counter on `_TargetCompaniesCycleResult`, logged in the existing "Target companies: ..." summary line.
+  - No company is blacklisted by name; the check is generic to any non-`*.greenhouse.io/.../jobs/<id>` apply URL.
+  - `greenhouse.py`/adapter recognition, LinkedIn delivery, and recommendation policy are unchanged.
+- **Verification:** Unit tests for `is_canonical_greenhouse_hosted_url` plus a `_run_target_companies_cycle` test asserting the drop and counter.
+
+### TASK-086 — `on_ready` exception-safety fix (real live-E2E bug, Adyen Senior Java Engineer)
+
+- **Status:** done
+- **Depends on:** TASK-083, TASK-084
+- **Goal:** Fix a real bug the user hit on their first live Telegram "Done reviewing" smoke test: a failed `on_ready` Telegram send (transient network error) let the exception propagate out of `AutofillService.run` before the real browser handoff (`complete_browser_handoff`/`wait_for_review`) was ever entered, so the browser stayed open (nothing called `session.close()`) but the caller's `finally: registry.discard(session_id)` still removed the review-session entry — the next "Done reviewing" tap then answered `NOT_FOUND` for a browser that was genuinely still open.
+- **Area:** `app/application/autofill/service.py` (`AutofillService.run`)
+- **Acceptance criteria:**
+  - The `on_ready(result)` call is wrapped in try/except; a failed notification is logged (`on_ready notification failed for ...; continuing browser handoff`) and never skips `complete_browser_handoff`.
+  - A failed notification never causes premature discard of the registry entry while the browser is genuinely open. (The entry still stays registered until `mark_done`/`close_all`; `ReviewSessionRegistry.wait_for_done` does not itself monitor whether the browser process is still running, so a manually closed Chromium window is not detected as such — see the still-open `on_ready` notification-failure gap in `PROGRESS.md`.)
+  - No change to the diagnostic CLI's `input()`-based handoff.
+- **Verification:** New real-lifecycle test (`tests/test_review_session_real_lifecycle.py`) drives the actual production wiring (`build_prepare_application_service`, not a hand-rolled fake) with only browser/LLM/network faked, so it exercises the same path that failed live. Full suite re-run (see `PROGRESS.md` Build/test status).
+- **Note:** The real Adyen/Agoda outcomes referenced in `PROGRESS.md` (successful autofill, manual Submit, email verification) are the user's own reports from the live session, not independently re-verified by an agent.
+
+### Open items from this audit (not fixed here, no task number assigned)
+
+1. **Live retest of the TASK-086 fix.** The exact scenario that found the TASK-086 bug (trigger **Prepare application** on a non-`APPLIED` Target Company Greenhouse vacancy, not Adyen `7342887`; confirm the completion message + "Done reviewing" button arrive, the browser stays open, and tapping the button closes it, including a second/duplicate tap) has **not** been re-verified live since TASK-086 landed — do not claim it has. This needs a human, not an agent.
+2. **`on_ready` notification-failure gap.** If the `on_ready` Telegram send fails, the browser handoff and `ReviewSessionRegistry` entry are correctly kept alive, but the "Done reviewing" button/message never reaches the user and there is no retry before `wait_for_review()` blocks. The session is then only released by a delivered "Done reviewing" tap or by `run` shutdown's best-effort `close_all()` — manually closing the Chromium window does not release it. Not designed or started here; no retry-vs-re-request approach is prescribed.
+
+---
+
 ## Explicitly out of scope unless requested
 
 - Rewriting LinkedIn parser, matcher, or Telegram prepare flow
@@ -1338,4 +1417,26 @@ Stage 2 wiring, ATS adapter, or any recommendation/lifecycle gate.
 
 ## Suggested first implementation iteration
 
-Start at **TASK-001**, then continue through subsequent eligible tasks in the same run using the workflow above.
+TASK-001 through TASK-044, TASK-049, and TASK-051 through TASK-086 are done
+(see status fields above and `PROGRESS.md` for the verified build/test
+baseline). The remaining tasks are not all done and are not all equally
+blocked:
+
+- TASK-045 (Workday watcher) is `blocked` on an explicit user request
+  (`OQ-006`).
+- TASK-046 (additional autofill adapters) is `todo` with no unmet
+  dependency: it depends on TASK-033 (done) and a matching watcher, and
+  Lever/Ashby/SmartRecruiters watchers (TASK-042..044) already exist.
+- TASK-047 (auto-submit policy computation only) is `todo` with no unmet
+  dependency: it depends on TASK-033 and TASK-041 (both done).
+- TASK-048 (auto-submit execution) is `todo` and depends on TASK-047 being
+  done plus an explicit user request to enable submit.
+- TASK-050 (optional vacancy snapshot store) is `todo`, gated on TASK-009's
+  live resolve first proving insufficient.
+
+The Stage 1Q audit above also left two items open without an assigned task
+number or priority — a live retest of the TASK-086 fix, and the
+`on_ready`-notification-failure gap — see that section and `PROGRESS.md` for
+details. For a fresh run, read `PROGRESS.md` first for current blockers,
+then pick the next eligible task per the workflow and dependency notes
+above.

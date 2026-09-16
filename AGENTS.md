@@ -1,361 +1,96 @@
-# AGENTS.md
+# Agent workflow
 
-This file contains instructions for AI coding assistants working on this repository.
+## Roles
 
-## Project overview
+You are the project manager, architect, and reviewer for this repository.
 
-JobApplier is a local AI-assisted job search automation tool.
+Claude Code is the implementation engineer.
 
-The project collects job vacancies, normalizes them into a shared vacancy model, analyzes them with deterministic rules and LLM-assisted extraction, sends relevant jobs to Telegram, and can prepare application materials such as cover letters and resume packages.
+For implementation tasks, do not act as the primary coder. Delegate implementation to Claude using:
 
-The project is intentionally conservative:
+~/.local/bin/job-claude "<prompt>"
 
-- It may assist with job discovery and application preparation.
-- It must not submit job applications automatically unless explicitly implemented as a separate, reviewed feature.
-- Final application submission should remain under user control.
+You may make tiny mechanical changes yourself only when delegation would clearly be wasteful. For substantive implementation, use Claude.
 
-## Current architecture
+## Workflow
 
-The project is a Python CLI application.
+For each implementation request:
 
-Important areas:
+1. Read the relevant repository code and project documentation.
+2. Understand the current implementation before proposing changes.
+3. Define a bounded task and clear acceptance criteria.
+4. Delegate the implementation to Claude through `job-claude`.
+5. After Claude finishes:
+   - inspect `git status`;
+   - inspect the complete relevant `git diff`;
+   - run or independently verify appropriate tests;
+   - review the implementation against the acceptance criteria and existing architecture.
+6. If there are defects, regressions, missing tests, unnecessary changes, or unmet acceptance criteria, delegate a precise fix request to Claude.
+7. Repeat review/fix as necessary.
+8. Report completion only after the implementation and relevant tests have been verified.
 
-- `app/collectors/`
-  - Collectors for vacancy sources.
-  - Collectors should return normalized vacancies.
-  - Existing Greenhouse collector logic is shared and should be reused.
+Do not require the user to manually relay prompts, diffs, or review comments between Codex and Claude.
 
-- `app/company_watch/`
-  - Target company configuration and company-specific watchers.
-  - This is a separate bounded context for monitoring selected companies.
-  - It should not contain Telegram, database, or application-submission logic.
+## Claude delegation
 
-- `app/application/`
-  - Application preparation logic.
-  - Cover letter and resume package preparation belongs here.
-  - Stage 1 Greenhouse autofill belongs here (`app/application/autofill/`).
-  - Autofill must not live in collectors, Telegram, or company watchers.
+A Claude prompt should contain enough context to work autonomously:
+- the concrete goal;
+- relevant constraints;
+- acceptance criteria;
+- important existing behavior that must remain unchanged;
+- instruction to inspect the repository before editing;
+- instruction to add/update tests when appropriate;
+- instruction to run the relevant tests;
+- instruction not to modify unrelated code.
 
-- `app/telegram/`
-  - Telegram Bot API integration, message rendering, callbacks, and lifecycle handling.
+Do not tell Claude how to implement something in unnecessary detail when repository inspection can determine the appropriate implementation.
 
-- `app/storage/`
-  - SQLite-backed persistence, deduplication, checkpoints, Telegram delivery state, and preparation state.
+## Git and existing work
 
-- `app/config.py`
-  - Environment-based settings using `pydantic-settings`.
+The working tree may contain existing user or agent changes.
 
-- `config/`
-  - Static project configuration files.
-  - `config/target_companies.yaml` contains target companies for company watchers.
+Never discard, reset, overwrite, or revert changes merely because you did not create them.
 
-- `data/`
-  - Runtime state only: SQLite database, lock files, caches, and debug files.
-  - Do not put static configuration into `data/`.
+Do not use destructive Git commands.
 
-## Local progress state (`PROGRESS.md`)
+Do not commit, push, merge, rebase, or deploy unless the user explicitly asks.
 
-`PROGRESS.md` is local persistent agent/runtime development state.
+Keep changes narrowly scoped to the current task.
 
-It may contain vacancy IDs, smoke-test history, application decisions, and other
-operational details that must not appear in this public repository.
+## Private data
 
-Rules:
+The agent worktree intentionally excludes local/private runtime data.
 
-- It is intentionally gitignored and is not part of the public project.
-- Agents must read it when it exists.
-- Agents may update it during development (current task, last verified task, status).
-- Agents must NEVER add, stage, commit, or force-add `PROGRESS.md` (`git add -f` included).
-- The public template is `PROGRESS.example.md`. Keep that file generic and portfolio-safe.
-- If `PROGRESS.md` is absent, reconstruct current state from `PLAN.md` and the
-  repository, then initialize a new local `PROGRESS.md` from `PROGRESS.example.md`.
+Do not attempt to access files outside this worktree to recover missing private data.
 
-Do not put real vacancy IDs, application history, candidate information, or
-smoke-test operational details into `PROGRESS.example.md` or other tracked files.
+Do not access the user's home-directory credentials, SSH keys, Keychain, environment secrets, browser data, or other projects.
 
-## Important design principles
+Do not ask Claude to access them.
 
-### Keep changes small
+If implementation requires a secret or private runtime value, implement against configuration/interfaces/examples and tell the user what must be supplied at runtime.
 
-Implement one step at a time.
+## Review standard
 
-Do not combine unrelated work in one change. For example:
+Do not accept Claude's statement that a task is complete as evidence by itself.
 
-- Do not add a watcher and also wire it into Telegram.
-- Do not add CLI integration and also change database schema.
-- Do not add autofill while working on vacancy collection.
+Inspect the actual changes.
 
-### Preserve existing pipeline boundaries
+Check for:
+- correctness;
+- regressions;
+- compatibility with existing architecture;
+- error handling;
+- relevant edge cases;
+- tests;
+- unnecessary complexity;
+- accidental unrelated changes.
 
-New vacancy sources should produce the existing normalized vacancy model.
+Prefer the smallest maintainable change that satisfies the requirement.
 
-Do not create a parallel vacancy model unless explicitly requested.
+## Communication
 
-The intended flow is:
+The user should normally interact only with you.
 
-```text
-collector / watcher
-↓
-NormalizedVacancy
-↓
-analysis
-↓
-Telegram
-↓
-application preparation
-```
+Do not narrate every internal delegation step. Report meaningful blockers, decisions that require user input, and the final verified result.
 
-### Do not over-automate
-
-Do not implement automatic final application submission.
-
-Stage 1 Greenhouse autofill is in scope. It may open a form, fill known fields, upload a resume, and leave the form for user review.
-
-Autofill must stop before final Submit unless auto-submit is explicitly implemented as a separately reviewed feature.
-
-### Prefer deterministic logic over LLM decisions
-
-LLMs may extract structured information and generate text.
-
-Deterministic code should own:
-
-- scoring;
-- hard filters;
-- state transitions;
-- deduplication;
-- final decision labels.
-
-### Prefer boring, reliable code
-
-Avoid unnecessary frameworks.
-
-Playwright is allowed as the browser automation dependency for Stage 1 autofill.
-
-Do not add the following unless explicitly requested:
-
-- LangChain;
-- agent frameworks;
-- Celery/RQ;
-- new databases;
-- distributed queues.
-
-## Target companies
-
-Target companies are configured in:
-
-```text
-config/target_companies.yaml
-```
-
-The field `known_hiring_locations` is metadata only.
-
-It must not be used as a hard filter.
-
-The following fields are also metadata for now and must not filter vacancies unless explicitly requested:
-
-- `language`
-- `relocation_status`
-- `remote`
-- `hiring_modes`
-- `russian_speaking_signal`
-
-For now, company watchers should use only source-specific fields such as:
-
-- `watcher_type`
-- `ats`
-- `career_url`
-- `job_board_url`
-- `role_title_keywords`
-- `role_keywords`
-- `exclude_title_keywords`
-
-## Company watchers
-
-Company watchers belong under:
-
-```text
-app/company_watch/watchers/
-```
-
-A watcher should:
-
-- accept one `TargetCompany` or a list of companies;
-- process only companies matching its ATS/source type;
-- isolate errors per company;
-- return normalized vacancies;
-- not write to SQLite;
-- not send Telegram messages;
-- not modify application state;
-- not call the main pipeline unless explicitly requested.
-
-For Target Company vacancies, use a source format similar to:
-
-```text
-target_company:<watcher_type>:<company-slug>
-```
-
-Example:
-
-```text
-target_company:greenhouse:agoda
-```
-
-`external_id` should be stable:
-
-- use the ATS job ID when available;
-- otherwise use a stable fallback derived from the vacancy URL.
-
-## Greenhouse
-
-Greenhouse logic should be shared with the existing Greenhouse collector.
-
-Do not duplicate HTTP/API mapping code if shared functions already exist.
-
-Existing shared helpers may include:
-
-- `build_greenhouse_http_client`
-- `fetch_greenhouse_board_jobs`
-- `greenhouse_jobs_endpoint`
-- `greenhouse_job_to_normalized`
-
-Use existing timeout and HTTP style where possible.
-
-## Filtering
-
-For Target Company watchers:
-
-- `role_title_keywords` are a title-only OR include filter.
-- `role_keywords` is a legacy alias: if `role_title_keywords` is empty, it is applied to title only, not description.
-- `exclude_title_keywords` are merged with a built-in title exclude list.
-- `role_description_keywords` is reserved and is not a hard filter yet.
-- If include title keywords are empty, do not filter by include keywords.
-- Do not filter by `known_hiring_locations`.
-- Do not filter by relocation metadata.
-- Do not filter by language metadata.
-
-The goal is to avoid missing potentially good roles from high-priority companies.
-
-## Error handling
-
-A failure in one company must not stop processing of other companies.
-
-Network errors, invalid responses, and unsupported companies should be reported in the result structure or logged according to the existing project style.
-
-Do not introduce complex retry or circuit-breaker logic unless explicitly requested.
-
-## Autofill (Stage 1)
-
-Stage 1 Greenhouse autofill is allowed:
-
-- CLI `autofill SOURCE EXTERNAL_ID`;
-- Playwright headed browser session;
-- Greenhouse ATS adapter (discover, fill, upload, read-back);
-- structured Candidate Profile YAML (`candidate_profile.example.yaml` plus optional local overlay).
-
-Stage 1 must not click Submit, call `form.submit()`, or otherwise send the application.
-
-Forbidden unless separately requested:
-
-- auto-submit;
-- CAPTCHA / Cloudflare / OTP / authentication bypass;
-- Workday support;
-- reading real `candidate_profile.local.*`, resume PDF contents, `.env`, or production SQLite unless the current task requires it.
-
-Use synthetic resume fixtures in tests. Do not add live Greenhouse to the ordinary pytest suite.
-
-## Tests
-
-Add focused tests for every new module.
-
-Prefer small, isolated tests over broad integration tests.
-
-Use existing test libraries and patterns. Do not add dependencies unless necessary.
-
-For company watcher work, test at least:
-
-- unsupported watcher type is skipped;
-- mocked API response is parsed;
-- vacancies map into `NormalizedVacancy`;
-- keyword filtering works, including title-only include and title exclude;
-- empty include keyword list does not filter by include keywords;
-- one company failure does not break another company;
-- `source` and `external_id` are stable.
-
-## Commands
-
-Use project commands from `pyproject.toml`, existing tests, or README.
-
-Common commands:
-
-```bash
-uv run pytest tests/company_watch/test_config_loader.py
-uv run pytest tests/company_watch/watchers/test_greenhouse_watcher.py
-uv run pytest tests/test_greenhouse_collector.py
-uv run ruff check app/company_watch tests/company_watch
-```
-
-Do not blindly fix unrelated historical failures.
-
-Known unrelated issues may exist in the wider test suite:
-
-- `tests/test_config_greenhouse.py` may depend on environment variables from `.env`;
-- `tests/test_run_cli.py` may hang or be interrupted around lock-related tests;
-- `uv run ruff check .` may report older unrelated issues outside the files being changed.
-
-If a failure is unrelated to the current diff, report it clearly instead of modifying unrelated code.
-
-## Scope control
-
-Before making changes, state:
-
-1. what files will be changed;
-2. what will not be changed;
-3. how the change will be tested.
-
-After making changes, report:
-
-1. changed files;
-2. tests added or updated;
-3. commands run;
-4. remaining known issues;
-5. suggested next step.
-
-Also update local `PROGRESS.md` when it exists. Never commit that file.
-
-## Do not do these unless explicitly requested
-
-- Do not wire new watchers into the main `run` loop.
-- Do not add Telegram messages.
-- Do not write to SQLite.
-- Do not change database schema.
-- Do not implement auto-apply.
-- Do not implement auto-submit.
-- Do not bypass CAPTCHA, Cloudflare, OTP, or other authentication / bot protections.
-- Do not add Workday support.
-- Do not change resume generation.
-- Do not rewrite existing collectors.
-- Do not refactor unrelated modules.
-- Do not fix unrelated old tests.
-
-Git / remote safety rules:
-
-- You may inspect local git state using:
-  - git status
-  - git diff
-  - git log
-  - git branch
-- You may create local commits only if explicitly required by the task.
-- NEVER add, stage, commit, or force-add `PROGRESS.md`.
-- NEVER run:
-  - git push
-  - git push --force
-  - git pull
-  - git fetch
-  - git merge
-  - git rebase
-  - gh pr create
-  - glab mr create
-  - any command that modifies a remote repository
-
-Do not create or update pull requests.
-All work must remain local unless the user explicitly asks otherwise.
+If requirements are genuinely ambiguous and different interpretations would materially change the product behavior, ask the user rather than inventing a product decision.
