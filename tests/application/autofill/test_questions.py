@@ -241,6 +241,324 @@ def test_years_of_experience_maps_to_select_range() -> None:
     assert mapped.fillable is True
 
 
+def test_technology_specific_years_question_stays_unresolved_without_explicit_value() -> None:
+    profile = _profile(employment={"years_of_experience": 7, "years_of_relevant_experience": 7})
+    mapped = map_question(
+        DiscoveredField(
+            label="Minimum Years of experience in Kotlin *",
+            required=True,
+            field_type="text",
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason is not None
+    assert "Kotlin" in mapped.unresolved_reason
+    # Never silently inherits the overall/relevant experience value.
+    assert mapped.value != profile.relevant_experience_years()
+
+
+def test_technology_specific_years_question_fills_from_explicit_configured_value() -> None:
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "years_of_relevant_experience": 7,
+            "technology_years": [{"technology": "Kotlin", "years": 2}],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Minimum Years of experience in Kotlin *",
+            required=True,
+            field_type="select",
+            options=["0-1 years", "1-3 years", "3-5 years", "5+ years"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "1-3 years"
+
+
+def test_technology_specific_years_question_generalizes_beyond_kotlin() -> None:
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "technology_years": [{"technology": "Golang", "years": 4}],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(label="Years of experience with Golang", required=True, field_type="text"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "4"
+
+
+def test_generic_years_experience_question_is_unchanged() -> None:
+    profile = _profile(employment={"years_of_experience": 7})
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your overall years of relevant experience?*",
+            required=True,
+            field_type="select",
+            options=["0-2 years", "3-5 years", "6-8 years", "9+ years"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "6-8 years"
+
+
+def test_technology_years_question_is_never_llm_eligible() -> None:
+    from app.application.autofill.fields import DiscoveredField as _Field
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    profile = _profile(employment={"years_of_experience": 7})
+    field = _Field(label="Minimum Years of experience in Kotlin *", required=True, field_type="text")
+    mapped = map_question(field, profile)
+    assert mapped.fillable is False
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "How many years of Kotlin experience?",
+        "Years of experience using Spring Boot development",
+    ],
+)
+def test_technology_specific_years_alternate_phrasings_stay_unresolved_without_value(label: str) -> None:
+    profile = _profile(employment={"years_of_experience": 7, "years_of_relevant_experience": 7})
+    mapped = map_question(DiscoveredField(label=label, required=True, field_type="text"), profile)
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason is not None
+    assert mapped.value != profile.relevant_experience_years()
+
+
+def test_technology_specific_years_alternate_phrasing_fills_from_explicit_value() -> None:
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "technology_years": [{"technology": "Kotlin", "years": 2}],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(label="How many years of Kotlin experience?", required=True, field_type="text"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "2"
+
+
+def test_technology_using_trailing_filler_word_still_resolves_to_bare_technology() -> None:
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "technology_years": [{"technology": "Spring Boot", "years": 4}],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Years of experience using Spring Boot development",
+            required=True,
+            field_type="text",
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "4"
+
+
+def test_configured_technology_matches_when_question_has_extra_words() -> None:
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "technology_years": [{"technology": "Kotlin", "years": 2}],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Minimum years of experience in Kotlin required",
+            required=True,
+            field_type="text",
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.value == "2"
+    assert mapped.fillable is True
+
+
+def test_technology_named_only_in_context_without_recognized_phrasing_is_scoped() -> None:
+    """A technology named via the profile's tech stack/context (rather than an
+    "experience in/with/using <X>" phrasing) must still be treated as scoped:
+    never silently answered with overall/relevant years.
+    """
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "years_of_relevant_experience": 7,
+            "professional_tech_stack": ["Kotlin"],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(label="Kotlin experience (years)", required=True, field_type="text"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is False
+    assert mapped.unresolved_reason is not None
+    assert "Kotlin" in mapped.unresolved_reason
+    assert mapped.value != profile.relevant_experience_years()
+
+
+def test_unlisted_technology_experience_years_stays_unresolved() -> None:
+    profile = _profile(employment={"years_of_experience": 7, "professional_tech_stack": ["Java"]})
+    mapped = map_question(
+        DiscoveredField(label="Rust experience (years)", required=True, field_type="text"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.value is None
+    assert mapped.fillable is False
+    assert mapped.unresolved_reason is not None
+    assert "Rust" in mapped.unresolved_reason
+
+
+def test_technology_named_only_in_context_fills_from_explicit_value() -> None:
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "professional_tech_stack": ["Kotlin"],
+            "technology_years": [{"technology": "Kotlin", "years": 3}],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(label="Kotlin experience (years)", required=True, field_type="text"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "3"
+
+
+def test_combined_multi_technology_years_question_stays_unresolved() -> None:
+    """A question naming two known technologies together cannot be answered with
+    either technology's own configured value: that would silently drop or
+    misattribute half the question.
+    """
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    profile = _profile(
+        employment={
+            "professional_tech_stack": ["Java", "Kotlin"],
+            "technology_years": [
+                {"technology": "Java", "years": 7},
+                {"technology": "Kotlin", "years": 2},
+            ],
+        }
+    )
+    field = DiscoveredField(
+        label="Years of experience with Java and Kotlin",
+        required=True,
+        field_type="text",
+    )
+    mapped = map_question(field, profile)
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason is not None
+    assert "Java" in mapped.unresolved_reason
+    assert "Kotlin" in mapped.unresolved_reason
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+def test_combined_technology_years_question_stays_unresolved_when_only_one_is_known() -> None:
+    """A combined question ("X and Y") must stay unresolved even when only one
+    of the named technologies is configured: the configured value belongs to
+    just one of the two targets, so filling it would misattribute the answer
+    to the unconfigured technology too.
+    """
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "professional_tech_stack": ["Java"],
+            "technology_years": [{"technology": "Java", "years": 7}],
+        }
+    )
+    field = DiscoveredField(
+        label="Years of experience with Java and Kotlin",
+        required=True,
+        field_type="text",
+    )
+    mapped = map_question(field, profile)
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason is not None
+    assert "Java" in mapped.unresolved_reason
+    assert "Kotlin" in mapped.unresolved_reason
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+def test_comma_separated_technology_years_question_stays_unresolved_when_only_one_is_known() -> None:
+    """A comma-separated combined question ("X, Y") must fail closed exactly
+    like "X and Y", even when only one of the named technologies is configured.
+    """
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "professional_tech_stack": ["Java"],
+            "technology_years": [{"technology": "Java", "years": 7}],
+        }
+    )
+    field = DiscoveredField(
+        label="Years of experience with Java, Kotlin",
+        required=True,
+        field_type="text",
+    )
+    mapped = map_question(field, profile)
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason is not None
+    assert "Java" in mapped.unresolved_reason
+    assert "Kotlin" in mapped.unresolved_reason
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+def test_single_technology_still_fills_its_own_value_when_other_technologies_are_configured() -> None:
+    profile = _profile(
+        employment={
+            "professional_tech_stack": ["Java", "Kotlin"],
+            "technology_years": [
+                {"technology": "Java", "years": 7},
+                {"technology": "Kotlin", "years": 2},
+            ],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(label="Kotlin experience (years)", required=True, field_type="text"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "2"
+
+
 def test_academic_level_and_tech_stack_and_interest() -> None:
     profile = _profile(
         employment={

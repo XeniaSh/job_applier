@@ -11,6 +11,7 @@ from app.application.autofill.acknowledgements import (
 )
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import (
+    find_known_technologies_in_text,
     match_application_source,
     match_interest_option,
     match_option,
@@ -23,6 +24,8 @@ from app.application.autofill.options import (
     parse_max_choices,
     parse_relocation_destination,
     parse_sponsorship_scope,
+    parse_years_experience_technology,
+    split_technology_scope_terms,
 )
 from app.application.candidate_profile import CandidateProfile
 
@@ -303,6 +306,38 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         return MappedQuestion(kind=QuestionKind.SALARY, fillable=False)
 
     if _is_years_experience(text):
+        named_technologies = find_known_technologies_in_text(
+            f"{field.label} {field.context}", profile.known_technology_names()
+        )
+        raw_technology_phrase = parse_years_experience_technology(
+            field.label
+        ) or parse_years_experience_technology(field.context)
+        scope_terms = split_technology_scope_terms(raw_technology_phrase)
+        if len(named_technologies) > 1 or len(scope_terms) > 1:
+            named = named_technologies if len(named_technologies) > 1 else scope_terms
+            return MappedQuestion(
+                kind=QuestionKind.YEARS_EXPERIENCE,
+                fillable=False,
+                unresolved_reason=(
+                    "years of experience question names multiple technologies "
+                    f"({', '.join(named)}); a single combined answer "
+                    "cannot be truthfully inferred"
+                ),
+            )
+        technology = (named_technologies[0] if named_technologies else None) or raw_technology_phrase
+        if technology:
+            tech_years = profile.technology_years_for(technology)
+            if tech_years is None:
+                return MappedQuestion(
+                    kind=QuestionKind.YEARS_EXPERIENCE,
+                    fillable=False,
+                    unresolved_reason=(
+                        f"years of experience in {technology} requires an explicit "
+                        "configured technology_years value"
+                    ),
+                )
+            value = match_years_option(tech_years, field.options)
+            return MappedQuestion(kind=QuestionKind.YEARS_EXPERIENCE, value=value, fillable=bool(value))
         years = profile.relevant_experience_years()
         if years is None:
             return MappedQuestion(kind=QuestionKind.YEARS_EXPERIENCE, fillable=False)

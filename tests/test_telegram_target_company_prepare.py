@@ -43,6 +43,7 @@ from app.telegram.application_prepare import (
 from app.telegram.client import (
     APPLICATION_PREPARE_ACTION,
     APPLICATION_PREPARE_BUTTON_TEXT,
+    TelegramRequestError,
     build_action_buttons,
     parse_callback_data,
     parse_review_done_session_id,
@@ -122,7 +123,13 @@ class _FakeClient:
         buttons: list | None = None,
     ):
         self.texts.append(
-            {"text": text, "chat_id": chat_id, "reply_to": reply_to_message_id, "buttons": buttons}
+            {
+                "text": text,
+                "chat_id": chat_id,
+                "message_id": 99,
+                "reply_to": reply_to_message_id,
+                "buttons": buttons,
+            }
         )
         return TelegramMessageRef(chat_id=str(chat_id or "222"), message_id=99)
 
@@ -131,6 +138,14 @@ class _FakeClient:
 
     def edit_message_reply_markup(self, **kwargs) -> None:
         _ = kwargs
+
+
+class _EditFailingClient(_FakeClient):
+    """Client whose edit_message_text always fails, for edit-failure tests."""
+
+    def edit_message_text(self, **kwargs) -> None:
+        self.edits.append(kwargs)
+        raise TelegramRequestError("boom", method="editMessageText")
 
 
 def _vacancy(*, description: str = "Java backend services") -> NormalizedVacancy:
@@ -636,3 +651,148 @@ def test_two_concurrent_prepares_have_independent_done_reviewing_sessions(monkey
         allowed_chat_ids=frozenset({"222"}),
     )
     _wait_until(lambda: runners[1].finished)
+
+
+def _start_review_session(monkeypatch, client, cache, storage) -> str:
+    """Trigger an explicit prepare and return the resulting review session id."""
+
+    def fake_builder(lifecycle, *, on_ready=None, wait_for_review=None):
+        service, _runner = _fake_build_prepare_application_service(
+            lifecycle, on_ready=on_ready, wait_for_review=wait_for_review
+        )
+        return service
+
+    monkeypatch.setattr(
+        "app.application.explicit_prepare_runtime.build_prepare_application_service",
+        fake_builder,
+    )
+    cli_module._process_callback_update(
+        update=_callback_update(),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+        application_prepare_service=None,
+        application_prepare_cache=cache,
+        application_prepare_sync=False,
+    )
+    _wait_until(lambda: len(client.texts) > 0)
+    return parse_review_done_session_id(client.texts[0]["buttons"][0][0].callback_data)
+
+
+def _tap_review_done(client, storage, session_id: str, *, message_text: str | None = None) -> None:
+    completion = client.texts[0]
+    update = {
+        "callback_query": {
+            "id": "cb-prep",
+            "data": f"revdone:{session_id}",
+            "message": {
+                "chat": {"id": completion["chat_id"]},
+                "message_id": completion["message_id"],
+                "text": message_text if message_text is not None else completion["text"],
+            },
+        }
+    }
+    cli_module._process_callback_update(
+        update=update,
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+    )
+
+
+def test_review_done_tap_edits_completion_message_and_removes_button(monkeypatch, tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _FakeClient()
+
+    session_id = _start_review_session(monkeypatch, client, cache, storage)
+    _tap_review_done(client, storage, session_id)
+
+    assert len(client.edits) == 1
+    edit = client.edits[0]
+    assert edit["chat_id"] == "222"
+    assert edit["message_id"] == 99
+    assert edit["buttons"] == []
+    # The original message content is preserved, not discarded.
+    assert "Preparation completed." in edit["text"]
+    assert "Filled fields: 1" in edit["text"]
+    assert "Manual review needed." not in edit["text"]
+    assert "Manual review finished." in edit["text"]
+    assert "Review finished." in edit["text"]
+    assert "Submission was not verified" in edit["text"]
+
+
+def test_review_done_duplicate_or_stale_tap_is_handled_gracefully(monkeypatch, tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _FakeClient()
+
+    session_id = _start_review_session(monkeypatch, client, cache, storage)
+    _tap_review_done(client, storage, session_id)
+    assert client.answers[-1] == ("cb-prep", "Closing the browser now.")
+
+    # A duplicate/stale tap must never raise and must still answer safely.
+    terminal_text = client.edits[0]["text"]
+    _tap_review_done(client, storage, session_id, message_text=terminal_text)
+    assert client.answers[-1][1] in {"Already closed.", "This review session is no longer available."}
+    assert len(client.edits) == 2
+    assert client.edits[1]["buttons"] == []
+    assert client.edits[1]["text"] == terminal_text
+
+
+def test_review_done_edit_failure_does_not_block_browser_release(monkeypatch, tmp_path: Path) -> None:
+    holder: dict[str, object] = {}
+
+    def fake_builder(lifecycle, *, on_ready=None, wait_for_review=None):
+        service, runner = _fake_build_prepare_application_service(
+            lifecycle, on_ready=on_ready, wait_for_review=wait_for_review
+        )
+        holder["runner"] = runner
+        return service
+
+    monkeypatch.setattr(
+        "app.application.explicit_prepare_runtime.build_prepare_application_service",
+        fake_builder,
+    )
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _EditFailingClient()
+
+    cli_module._process_callback_update(
+        update=_callback_update(),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+        application_prepare_service=None,
+        application_prepare_cache=cache,
+        application_prepare_sync=False,
+    )
+    _wait_until(lambda: len(client.texts) > 0)
+    session_id = parse_review_done_session_id(client.texts[0]["buttons"][0][0].callback_data)
+
+    # The edit raises, but mark_done (browser release) happens before the
+    # edit is even attempted, so the failure must not block it.
+    _tap_review_done(client, storage, session_id)
+
+    runner = holder["runner"]
+    _wait_until(lambda: runner.finished)
+    assert runner.finished is True
+    assert client.answers[-1] == ("cb-prep", "Closing the browser now.")
+    assert len(client.edits) == 1
+
+
+def test_review_done_never_writes_applied_status(monkeypatch, tmp_path: Path) -> None:
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _FakeClient()
+
+    session_id = _start_review_session(monkeypatch, client, cache, storage)
+    assert storage.get_history_status(SOURCE, EXTERNAL_ID) is None
+
+    _tap_review_done(client, storage, session_id)
+    _tap_review_done(client, storage, session_id)
+
+    assert storage.get_history_status(SOURCE, EXTERNAL_ID) is None

@@ -339,11 +339,11 @@ class GreenhouseAdapter:
             _set_resume_files(page, field, path)
         except PlaywrightError:
             pass
-        if _resume_is_attached(page, filename):
+        if _resume_is_attached(page, field, filename):
             return True
         if not page.url.startswith("file:"):
             page.wait_for_timeout(1500)
-        return _resume_is_attached(page, filename)
+        return _resume_is_attached(page, field, filename)
 
     def resume_file_attached(self, page: Page, field: DiscoveredField) -> bool:
         return bool(_file_names(page, field))
@@ -789,14 +789,27 @@ def _field_locator(page: Page, field: DiscoveredField) -> Locator:
 
 
 def _set_resume_files(page: Page, field: DiscoveredField, path: str) -> None:
+    # The discovered resume file input is always preferred, over file:// and
+    # HTTP(S) alike: a nearby button is never assumed to be the attach
+    # trigger just because the transport is HTTP(S). Only when no resume
+    # file input exists in the DOM (a dropzone widget that renders one only
+    # after a chooser interaction) do we fall back to clicking an adjacent
+    # non-submit control to open the native file chooser.
     resume_input = page.locator('input[type="file"]#resume')
-    if page.url.startswith("file:"):
-        target = resume_input if resume_input.count() > 0 else _resume_file_locator(page, field)
+    target = resume_input if resume_input.count() > 0 else _resume_file_locator(page, field)
+    if target.count() > 0:
         target.set_input_files(path, timeout=5_000, no_wait_after=True)
         return
-    button = page.locator("#resume").locator("xpath=..").locator("button").first
+    if page.url.startswith("file:"):
+        return
+    # A submit control is never the resume-attach trigger; excluding it keeps
+    # this path from ever mistaking a nearby Submit button for one (no submit
+    # capability exists anywhere in this adapter).
+    button = page.locator("#resume").locator("xpath=..").locator('button:not([type="submit"])')
+    if button.count() == 0:
+        return
     with page.expect_file_chooser(timeout=5_000) as chooser:
-        button.click(timeout=3_000)
+        button.first.click(timeout=3_000)
     chooser.value.set_files(path)
 
 
@@ -1615,8 +1628,12 @@ def _choice_label(value: str | bool) -> str:
     return str(value)
 
 
-def _resume_is_attached(page: Page, filename: str | None) -> bool:
-    names = _all_file_input_names(page)
+def _resume_is_attached(page: Page, field: DiscoveredField, filename: str | None) -> bool:
+    # Scoped to the resume field's own file input (falls back to "#resume"
+    # inside _file_names) rather than every file input on the page, so an
+    # unrelated file input (e.g. a portfolio upload) can never be mistaken
+    # for a successful resume attachment.
+    names = _file_names(page, field)
     if filename and filename in names:
         return True
     if filename is None:
@@ -1649,17 +1666,6 @@ def _file_names(page: Page, field: DiscoveredField) -> list[str]:
     return [str(item) for item in found]
 
 
-def _all_file_input_names(page: Page) -> list[str]:
-    try:
-        names = page.evaluate(
-            """() => Array.from(document.querySelectorAll('input[type="file"]'))
-                .flatMap(el => Array.from(el.files || []).map(file => file.name))"""
-        )
-    except PlaywrightError:
-        return []
-    if not isinstance(names, list):
-        return []
-    return [str(item) for item in names if item]
 
 
 def _input_value(locator: Locator) -> str:

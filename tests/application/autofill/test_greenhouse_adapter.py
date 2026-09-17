@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import functools
+import http.server
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -13,6 +17,7 @@ from app.application.candidate_profile import CandidateProfile
 
 GREENHOUSE_FIXTURE = Path("tests/fixtures/autofill/greenhouse_application.html")
 JOB_BOARDS_FIXTURE = Path("tests/fixtures/autofill/greenhouse_job_boards.html")
+RESUME_BUTTON_FIXTURE = Path("tests/fixtures/autofill/greenhouse_resume_button.html")
 UNRELATED_FIXTURE = Path("tests/fixtures/autofill/unrelated.html")
 CHALLENGE_FIXTURE = Path("tests/fixtures/autofill/challenge.html")
 RESUME_FIXTURE = Path("tests/fixtures/autofill/resume.txt")
@@ -52,6 +57,24 @@ def _open(path: Path) -> BrowserSession:
     session = BrowserSession(headed=False, keep_open=False)
     session.open_html_file(path)
     return session
+
+
+@contextmanager
+def _local_http_server(directory: Path):
+    """Serve `directory` over 127.0.0.1 so tests can exercise the non-file:// upload path.
+
+    The old resume-upload path clicked an adjacent button only for HTTP(S)
+    pages; file: fixture tests never exercised that behavior.
+    """
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
 
 
 def _field(fields: list[DiscoveredField], label_substring: str) -> DiscoveredField:
@@ -180,6 +203,44 @@ def test_resume_upload_read_back() -> None:
         assert adapter.read_back(session.page, resume) == RESUME_FIXTURE.name
     finally:
         session.close()
+
+
+def test_resume_upload_over_http_with_no_adjacent_button() -> None:
+    """Regression: a plain HTTP(S) form with a bare `#resume` file input and
+
+    no wrapping dropzone button used to fail silently. `GREENHOUSE_FIXTURE`'s
+    resume field is a plain `<input type="file" id="resume">` with a
+    `<label>`, not a `<button>` — served via `file:` (every other test in
+    this module) that goes through the direct-set-input branch and always
+    passed; served over real HTTP it used to hit the button-only branch,
+    find no button, and leave the resume unattached. This proves the new
+    direct-input fallback attaches a synthetic file over an HTTP(S) transport.
+    """
+    with _local_http_server(GREENHOUSE_FIXTURE.parent) as base_url:
+        session = BrowserSession(headed=False, keep_open=False)
+        session.open(f"{base_url}/{GREENHOUSE_FIXTURE.name}")
+        try:
+            adapter = GreenhouseAdapter()
+            resume = _field(adapter.discover_fields(session.page), "Resume")
+            assert resume.field_type == "file"
+            assert adapter.upload_resume(session.page, RESUME_FIXTURE, resume) is True
+            assert adapter.read_back(session.page, resume) == RESUME_FIXTURE.name
+        finally:
+            session.close()
+
+
+def test_resume_upload_over_http_ignores_adjacent_unrelated_button() -> None:
+    with _local_http_server(RESUME_BUTTON_FIXTURE.parent) as base_url:
+        session = BrowserSession(headed=False, keep_open=False)
+        session.open(f"{base_url}/{RESUME_BUTTON_FIXTURE.name}")
+        try:
+            adapter = GreenhouseAdapter()
+            resume = _field(adapter.discover_fields(session.page), "Resume")
+            assert adapter.upload_resume(session.page, RESUME_FIXTURE, resume) is True
+            assert adapter.read_back(session.page, resume) == RESUME_FIXTURE.name
+            assert session.page.locator("#portfolio").evaluate("el => el.files.length") == 0
+        finally:
+            session.close()
 
 
 def test_read_back_leaves_unknown_required_empty() -> None:

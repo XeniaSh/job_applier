@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -245,6 +246,34 @@ class SalaryExpectations(BaseModel):
     fill_salary: bool = False
 
 
+class TechnologyExperience(BaseModel):
+    """Explicit years of experience with one named technology/language/tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    technology: str
+    years: float
+
+    @field_validator("technology")
+    @classmethod
+    def required_technology(cls, value: str) -> str:
+        cleaned = " ".join(value.strip().split())
+        if not cleaned:
+            raise ValueError("technology_years technology must not be empty.")
+        return cleaned
+
+    @field_validator("years")
+    @classmethod
+    def finite_nonnegative_years(cls, value: float) -> float:
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("technology_years years must be a finite, nonnegative number.")
+        return value
+
+
+def _normalize_technology_name(value: str) -> str:
+    return " ".join(value.strip().casefold().split())
+
+
 class Employment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -260,6 +289,7 @@ class Employment(BaseModel):
     professional_tech_stack: list[str] = Field(default_factory=list)
     preferred_fields_of_interest: list[str] = Field(default_factory=list)
     primary_programming_language: str | None = None
+    technology_years: list[TechnologyExperience] = Field(default_factory=list)
     salary_expectations: SalaryExpectations | None = None
 
     @field_validator("current_title", "notice_period", "highest_academic_level", "primary_programming_language")
@@ -278,6 +308,17 @@ class Employment(BaseModel):
         if isinstance(value, str):
             stripped = value.strip()
             return [stripped] if stripped else []
+        return value
+
+    @field_validator("technology_years")
+    @classmethod
+    def unique_technology_years(cls, value: list[TechnologyExperience]) -> list[TechnologyExperience]:
+        seen: set[str] = set()
+        for item in value:
+            key = _normalize_technology_name(item.technology)
+            if key in seen:
+                raise ValueError(f"technology_years has a duplicate entry for '{item.technology}'.")
+            seen.add(key)
         return value
 
     @field_validator("relocation_destinations", "professional_tech_stack", "preferred_fields_of_interest")
@@ -309,6 +350,44 @@ class Employment(BaseModel):
         if self.primary_programming_language:
             return self.primary_programming_language
         return self.professional_tech_stack[0] if self.professional_tech_stack else None
+
+    def technology_years_for(self, technology: str) -> float | None:
+        """Explicit configured years for one named technology, or None if unset.
+
+        Never falls back to overall/relevant years_of_experience: a
+        technology-specific question with no matching entry must stay
+        unresolved rather than inherit unrelated general experience.
+        """
+        needle = _normalize_technology_name(technology)
+        if not needle:
+            return None
+        for item in self.technology_years:
+            if _normalize_technology_name(item.technology) == needle:
+                return item.years
+        return None
+
+    def known_technology_names(self) -> list[str]:
+        """Every technology/language/tool name the candidate has explicitly named.
+
+        Combines technology_years, professional_tech_stack, and
+        primary_programming_language (deduplicated). Used to recognize a
+        years-of-experience question as scoped to a named skill even when
+        it doesn't use a recognized "experience in/with/using <X>" phrasing.
+        """
+        names: list[str] = []
+        seen: set[str] = set()
+        for source in (
+            [item.technology for item in self.technology_years],
+            self.professional_tech_stack,
+            [self.primary_programming_language] if self.primary_programming_language else [],
+        ):
+            for name in source:
+                key = _normalize_technology_name(name)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                names.append(name)
+        return names
 
 
 class CountryWorkAuthorization(BaseModel):
@@ -754,6 +833,14 @@ class CandidateProfile(BaseModel):
         if self.employment.years_of_relevant_experience is not None:
             return self.employment.years_of_relevant_experience
         return self.employment.years_of_experience
+
+    def technology_years_for(self, technology: str) -> float | None:
+        """Explicit configured years for one named technology. See Employment."""
+        return self.employment.technology_years_for(technology)
+
+    def known_technology_names(self) -> list[str]:
+        """Every technology/language/tool name the candidate has explicitly named. See Employment."""
+        return self.employment.known_technology_names()
 
     def relocation_willingness(self) -> bool | None:
         """General willingness to relocate. Does not imply residence or work authorization."""

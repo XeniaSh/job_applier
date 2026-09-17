@@ -114,6 +114,31 @@ def format_review_done_response_text(outcome: ReviewSessionCloseOutcome) -> str:
     return _REVIEW_DONE_RESPONSE_TEXT.get(outcome, _REVIEW_DONE_RESPONSE_TEXT[ReviewSessionCloseOutcome.NOT_FOUND])
 
 
+REVIEW_ENDED_NOTICE = (
+    "Review finished. Submission was not verified by this app. "
+    "Confirm it manually before marking Applied."
+)
+
+
+def format_review_done_terminal_text(original_text: str, outcome: ReviewSessionCloseOutcome) -> str:
+    """Text for editing the completion message once 'Done reviewing' is tapped.
+
+    Preserves the original preparation summary, states plainly that review
+    ended and the application was not confirmed submitted, and never claims
+    or implies the manual Submit succeeded. Used with an empty button list so
+    the (now inactive) 'Done reviewing' button is removed from the message.
+    """
+    _ = outcome
+    lines = [
+        "Manual review finished." if line == "Manual review needed." else line
+        for line in (original_text or "").rstrip().splitlines()
+    ]
+    base = "\n".join(lines).rstrip()
+    if REVIEW_ENDED_NOTICE in base:
+        return base
+    return f"{base}\n\n{REVIEW_ENDED_NOTICE}" if base else REVIEW_ENDED_NOTICE
+
+
 class TelegramPrepareState(StrEnum):
     STARTING = "starting"
     COMPLETED = "completed"

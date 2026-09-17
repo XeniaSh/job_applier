@@ -44,3 +44,9 @@ def test_example_profile_yaml_loads_into_schema() -> None:
     assert profile.primary_programming_language() == "Java"
     assert profile.gitlab_username_for_autofill() is None
     assert profile.open_source_urls_for_autofill() == []
+    # The example ships with no technology_years entries: deep-merging the
+    # example with a private overlay must never invent a value the user
+    # never configured themselves.
+    assert profile.employment.technology_years == []
+    assert profile.technology_years_for("Java") is None
+    assert profile.technology_years_for("Kotlin") is None

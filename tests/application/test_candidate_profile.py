@@ -200,3 +200,88 @@ def test_specialist_is_masters_and_unawarded_doctorate_is_not() -> None:
         _valid_payload(employment={"highest_academic_level": "Bachelor's"})
     )
     assert bachelor.awarded_academic_level() == "BACHELOR"
+
+
+def test_technology_years_for_is_explicit_and_case_insensitive() -> None:
+    profile = CandidateProfile.model_validate(
+        _valid_payload(
+            employment={
+                "years_of_experience": 7,
+                "technology_years": [{"technology": "Kotlin", "years": 2}],
+            }
+        )
+    )
+    assert profile.technology_years_for("Kotlin") == 2
+    assert profile.technology_years_for("kotlin") == 2
+    assert profile.technology_years_for("  Kotlin  ") == 2
+
+
+def test_technology_years_for_unconfigured_technology_is_unset() -> None:
+    profile = CandidateProfile.model_validate(
+        _valid_payload(
+            employment={
+                "years_of_experience": 7,
+                "years_of_relevant_experience": 7,
+                "technology_years": [{"technology": "Java", "years": 5}],
+            }
+        )
+    )
+    # A missing technology never falls back to overall/relevant experience.
+    assert profile.technology_years_for("Kotlin") is None
+    assert profile.technology_years_for("Kotlin") != profile.relevant_experience_years()
+
+
+def test_technology_years_empty_technology_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        CandidateProfile.model_validate(
+            _valid_payload(employment={"technology_years": [{"technology": "  ", "years": 2}]})
+        )
+
+
+def test_technology_years_negative_years_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        CandidateProfile.model_validate(
+            _valid_payload(employment={"technology_years": [{"technology": "Kotlin", "years": -1}]})
+        )
+
+
+@pytest.mark.parametrize("years", [float("inf"), float("-inf"), float("nan")])
+def test_technology_years_non_finite_years_is_rejected(years: float) -> None:
+    with pytest.raises(ValidationError):
+        CandidateProfile.model_validate(
+            _valid_payload(employment={"technology_years": [{"technology": "Kotlin", "years": years}]})
+        )
+
+
+def test_technology_years_zero_years_is_accepted() -> None:
+    profile = CandidateProfile.model_validate(
+        _valid_payload(employment={"technology_years": [{"technology": "Kotlin", "years": 0}]})
+    )
+    assert profile.technology_years_for("Kotlin") == 0
+
+
+def test_technology_years_duplicate_entries_are_rejected_case_insensitively() -> None:
+    with pytest.raises(ValidationError):
+        CandidateProfile.model_validate(
+            _valid_payload(
+                employment={
+                    "technology_years": [
+                        {"technology": "Kotlin", "years": 2},
+                        {"technology": " kotlin ", "years": 3},
+                    ]
+                }
+            )
+        )
+
+
+def test_known_technology_names_combines_stack_and_technology_years() -> None:
+    profile = CandidateProfile.model_validate(
+        _valid_payload(
+            employment={
+                "professional_tech_stack": ["Java", "Kafka"],
+                "primary_programming_language": "Java",
+                "technology_years": [{"technology": "Kotlin", "years": 2}],
+            }
+        )
+    )
+    assert profile.known_technology_names() == ["Kotlin", "Java", "Kafka"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.application.autofill.options import (
+    find_known_technology_in_text,
     label_matches,
     match_academic_option,
     match_affirmative_option,
@@ -14,6 +15,7 @@ from app.application.autofill.options import (
     parse_max_choices,
     parse_relocation_destination,
     parse_sponsorship_scope,
+    parse_years_experience_technology,
     match_sponsorship_option,
     select_listed_options,
 )
@@ -37,6 +39,36 @@ def test_years_and_academic_matching() -> None:
     assert match_years_option(7, options) == "6-8 years"
     assert match_years_option(10, options) == "9+ years"
     assert match_academic_option("Master's", ["High school", "Bachelor's", "Master's", "PhD"]) == "Master's"
+
+
+def test_parse_years_experience_technology_alternate_phrasings() -> None:
+    assert parse_years_experience_technology("Minimum Years of experience in Kotlin *") == "Kotlin"
+    assert parse_years_experience_technology("How many years of Kotlin experience?") == "Kotlin"
+    assert parse_years_experience_technology("Rust experience (years)") == "Rust"
+    assert (
+        parse_years_experience_technology("Years of experience using Spring Boot development")
+        == "Spring Boot"
+    )
+    assert parse_years_experience_technology("What is your overall years of relevant experience?") is None
+    assert parse_years_experience_technology("Total years of experience in the industry") is None
+
+
+def test_parse_years_experience_technology_keeps_full_comma_separated_phrase() -> None:
+    """The captured phrase must not be truncated at a comma: dropping "Kotlin"
+    from "Java, Kotlin" would let a single-technology answer (e.g. only Java
+    configured) silently fill a combined question.
+    """
+    assert (
+        parse_years_experience_technology("Years of experience with Java, Kotlin")
+        == "Java, Kotlin"
+    )
+
+
+def test_find_known_technology_in_text_prefers_longer_configured_name() -> None:
+    known = ["Spring", "Spring Boot", "Kafka"]
+    assert find_known_technology_in_text("Kotlin experience (years)", known) is None
+    assert find_known_technology_in_text("Spring Boot experience (years)", known) == "Spring Boot"
+    assert find_known_technology_in_text("Kafka years", known) == "Kafka"
 
 
 def test_academic_option_maps_semantic_levels_without_diploma_fallback() -> None:

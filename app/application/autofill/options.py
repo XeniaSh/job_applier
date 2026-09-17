@@ -26,6 +26,150 @@ _PLUS_RE = re.compile(
     r"(?:more than|over|at least|minimum)?\s*(\d+(?:\.\d+)?)\s*(?:\+|or more|and above)?",
     re.IGNORECASE,
 )
+_TECH_WORD = r"[A-Za-z0-9+#./&\-]+"
+# Separator between words within a captured technology phrase: whitespace, or a
+# comma-separated list item (e.g. "Java, Kotlin") — kept intact so the combined
+# phrase reaches split_technology_scope_terms instead of being truncated at the
+# comma, which would silently drop the additional named technology.
+_TECH_WORD_SEP = r"(?:,\s*|\s+)"
+# "years (of) experience with/in/using/for <tech>" — tech follows "experience".
+_TECH_AFTER_EXPERIENCE_RE = re.compile(
+    rf"years?(?:\s+of)?\s+experience\s+(?:with|in|using|for)\s+"
+    rf"({_TECH_WORD}(?:{_TECH_WORD_SEP}{_TECH_WORD}){{0,3}})",
+    re.IGNORECASE,
+)
+# "years (of) <tech> experience" — tech precedes "experience".
+_TECH_BEFORE_EXPERIENCE_RE = re.compile(
+    rf"years?(?:\s+of)?\s+({_TECH_WORD}(?:{_TECH_WORD_SEP}{_TECH_WORD}){{0,2}})\s+experience\b",
+    re.IGNORECASE,
+)
+_TECH_EXPERIENCE_YEARS_RE = re.compile(
+    rf"({_TECH_WORD}(?:{_TECH_WORD_SEP}{_TECH_WORD}){{0,2}})\s+experience\s*\(\s*years?\s*\)",
+    re.IGNORECASE,
+)
+# Trailing filler words trimmed off a captured phrase (never a technology name
+# by itself): "Spring Boot development" -> "Spring Boot".
+_TRAILING_FILLER_WORDS = {"development", "experience", "background", "work"}
+# Generic (non-technology) phrases rejected by exact match after trimming, not
+# substring match — a technology name that merely contains one of these words
+# (e.g. "Spring Boot development" before trimming) must not be rejected outright.
+_GENERIC_YEARS_EXPERIENCE_PHRASES = {
+    "the industry",
+    "this industry",
+    "industry",
+    "the field",
+    "this field",
+    "field",
+    "the role",
+    "this role",
+    "role",
+    "the position",
+    "this position",
+    "position",
+    "the area",
+    "this area",
+    "area",
+    "the company",
+    "this company",
+    "company",
+    "the team",
+    "this team",
+    "team",
+    "the domain",
+    "this domain",
+    "domain",
+    "software development",
+    "development",
+    "relevant",
+    "overall",
+    "total",
+    "professional",
+    "general",
+    "work",
+    "hands on",
+    "hands-on",
+}
+
+
+def parse_years_experience_technology(text: str) -> str | None:
+    """Extract an explicit technology/skill name from a years-of-experience question.
+
+    Returns None for generic overall/relevant/total experience questions (no
+    "experience in/with/using/for <X>" or "<X> experience" phrasing, or <X> is
+    a generic non-technology phrase such as "the industry"). Never invents or
+    hardcodes a specific technology; it only reads what the question itself
+    names.
+    """
+    haystack = text or ""
+    match = (
+        _TECH_AFTER_EXPERIENCE_RE.search(haystack)
+        or _TECH_BEFORE_EXPERIENCE_RE.search(haystack)
+        or _TECH_EXPERIENCE_YEARS_RE.search(haystack)
+    )
+    if not match:
+        return None
+    words = match.group(1).strip().split()
+    while len(words) > 1 and words[-1].lower() in _TRAILING_FILLER_WORDS:
+        words = words[:-1]
+    technology = " ".join(words)
+    if not technology or technology.lower() in _GENERIC_YEARS_EXPERIENCE_PHRASES:
+        return None
+    return technology
+
+
+def find_known_technologies_in_text(text: str, known_technologies: list[str]) -> list[str]:
+    """All profile-configured technology names present in free text.
+
+    Used to recognize an ambiguous combined years-of-experience question such
+    as "Years of experience with Java and Kotlin": when more than one
+    configured technology is named, no single technology-specific answer can
+    be truthfully inferred. Only ever matches technologies the candidate has
+    actually configured; never hardcodes or guesses a technology name.
+    """
+    haystack = text or ""
+    if not haystack:
+        return []
+    matches: list[str] = []
+    seen: set[str] = set()
+    for technology in sorted(known_technologies, key=len, reverse=True):
+        cleaned = technology.strip()
+        if not cleaned or cleaned.lower() in seen:
+            continue
+        pattern = r"(?<![A-Za-z0-9+#])" + re.escape(cleaned) + r"(?![A-Za-z0-9+#])"
+        if re.search(pattern, haystack, re.IGNORECASE):
+            seen.add(cleaned.lower())
+            matches.append(cleaned)
+    return matches
+
+
+_TECH_SCOPE_SPLIT_RE = re.compile(r"\s*(?:,|/|\band\b|\bor\b)\s*", re.IGNORECASE)
+
+
+def split_technology_scope_terms(phrase: str | None) -> list[str]:
+    """Split a years-of-experience technology phrase on combining words/punctuation.
+
+    Detects a combined/scope expression such as "Java and Kotlin", "Java/Kotlin",
+    or "Java, Kotlin" that names more than one target. Used to keep a combined
+    question unresolved even when only one of the named terms is a configured
+    technology, since a single configured value cannot truthfully answer for an
+    unconfigured one. Returns an empty list for an empty phrase, or a
+    single-item list when no combinator is present.
+    """
+    if not phrase or not phrase.strip():
+        return []
+    return [part.strip() for part in _TECH_SCOPE_SPLIT_RE.split(phrase) if part.strip()]
+
+
+def find_known_technology_in_text(text: str, known_technologies: list[str]) -> str | None:
+    """Token-boundary match of a single profile-configured technology name in free text.
+
+    Used as a conservative fallback when a years-of-experience question
+    names a technology without one of the recognized "experience in/with/
+    using <X>" or "<X> experience" phrasings (e.g. the technology is named
+    elsewhere in the question's surrounding context).
+    """
+    matches = find_known_technologies_in_text(text, known_technologies)
+    return matches[0] if matches else None
 
 
 def parse_max_choices(text: str) -> int | None:

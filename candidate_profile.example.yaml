@@ -40,6 +40,17 @@ employment:
     - PostgreSQL
     - Kafka
   primary_programming_language: Java
+  # Explicit years per technology/language/tool, for "Minimum Years of
+  # experience in <Tech> *" style questions. A technology-specific question
+  # with no matching entry here stays unresolved: it never inherits overall
+  # years_of_experience/years_of_relevant_experience and is never guessed.
+  # This example intentionally ships empty: any value here would deep-merge
+  # into your local overlay and invent a fact you never configured. Add your
+  # own entries in candidate_profile.local.yaml, for example:
+  #   technology_years:
+  #     - technology: Java
+  #       years: 7
+  technology_years: []
   preferred_fields_of_interest:
     - Backend
     - Platform

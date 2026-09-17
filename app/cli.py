@@ -134,6 +134,7 @@ from app.telegram.application_prepare import (
     STARTING_TEXT,
     format_application_prepare_completed_text,
     format_review_done_response_text,
+    format_review_done_terminal_text,
     run_explicit_application_prepare,
 )
 from app.application.autofill.greenhouse_url import is_canonical_greenhouse_hosted_url
@@ -3993,11 +3994,17 @@ def _handle_review_done_callback(
     client: TelegramClient,
     callback_id: str,
     callback_data: str,
+    chat_id: str,
+    message_id: int,
+    message_text: str,
 ) -> None:
     """Handle a 'Done reviewing' tap: close only the named browser session.
 
     Idempotent and safe for an unknown/already-closed session id — Telegram
-    always gets an answered callback query either way.
+    always gets an answered callback query either way. `mark_done` (which
+    releases the browser) always runs before the Telegram message edit
+    below, so a failed edit can never leave the browser open or affect the
+    browser handoff.
     """
     try:
         session_id = parse_review_done_session_id(callback_data)
@@ -4008,6 +4015,25 @@ def _handle_review_done_callback(
     outcome = default_review_registry().mark_done(session_id)
     if callback_id:
         client.answer_callback_query(callback_id, text=format_review_done_response_text(outcome))
+    if message_id <= 0:
+        return
+    try:
+        client.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=format_review_done_terminal_text(message_text, outcome),
+            buttons=[],
+            parse_mode=None,
+        )
+    except TelegramMessageNotModifiedError:
+        pass
+    except TelegramRequestError as exc:
+        logger.warning(
+            "Failed to edit review-done completion message chat=%s message_id=%s error=%s",
+            chat_id,
+            message_id,
+            exc,
+        )
 
 
 def _process_callback_update(
@@ -4070,7 +4096,14 @@ def _process_callback_update(
     configured_chat_id = callback_chat_id
 
     if callback_data.startswith(REVIEW_DONE_CALLBACK_PREFIX):
-        _handle_review_done_callback(client=client, callback_id=callback_id, callback_data=callback_data)
+        _handle_review_done_callback(
+            client=client,
+            callback_id=callback_id,
+            callback_data=callback_data,
+            chat_id=callback_chat_id,
+            message_id=int(message.get("message_id", 0)),
+            message_text=str(message.get("text", "") or ""),
+        )
         return
 
     try:

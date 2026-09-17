@@ -14,6 +14,7 @@ from app.telegram.application_prepare import (
     format_application_prepare_failed_text,
     format_application_prepare_completed_text,
     format_review_done_response_text,
+    format_review_done_terminal_text,
 )
 
 
@@ -135,3 +136,25 @@ def test_review_done_response_text_for_each_outcome() -> None:
     not_found = format_review_done_response_text(ReviewSessionCloseOutcome.NOT_FOUND)
     assert closed != already != not_found
     assert closed and already and not_found
+
+
+def test_review_done_terminal_text_preserves_summary_and_states_unconfirmed() -> None:
+    original = "Preparation completed.\nFilled fields: 5\nManual review needed."
+    text = format_review_done_terminal_text(original, ReviewSessionCloseOutcome.CLOSED)
+    assert "Preparation completed.\nFilled fields: 5" in text
+    assert "Manual review needed." not in text
+    assert "Manual review finished." in text
+    assert "Review finished." in text
+    assert "Submission was not verified" in text
+    assert "Applied" in text
+    assert "Closing the browser now." not in text
+
+
+def test_review_done_terminal_text_never_implies_submit_succeeded() -> None:
+    original = "Preparation completed.\nFilled fields: 3"
+    for outcome in ReviewSessionCloseOutcome:
+        text = format_review_done_terminal_text(original, outcome)
+        assert "application submitted" not in text.lower()
+        assert "successfully applied" not in text.lower()
+        assert "confirm it manually" in text.lower()
+        assert format_review_done_terminal_text(text, outcome) == text
