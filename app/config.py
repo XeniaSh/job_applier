@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     telegram_poll_interval_seconds: int = 2
     preparing_recovery_timeout_seconds: int = 600
     undo_window_seconds: int = 600
+    auto_submit_enabled: bool = False
     greenhouse_boards: Annotated[list[str], NoDecode] = []
 
     @field_validator("greenhouse_boards", mode="before")

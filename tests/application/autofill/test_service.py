@@ -407,6 +407,122 @@ def test_service_picks_adapter_by_resolved_source_when_none_given_explicitly() -
     assert seen == ["target_company:lever:qonto"]
 
 
+class _FakeSubmitAdapter:
+    def __init__(self, *, submit_ok: bool = True, confirmed: bool = True) -> None:
+        self.submit_ok = submit_ok
+        self.confirmed = confirmed
+        self.submit_calls = 0
+        self.confirm_calls = 0
+
+    def submit(self, page: object) -> bool:
+        _ = page
+        self.submit_calls += 1
+        return self.submit_ok
+
+    def submit_confirmed(self, page: object) -> bool:
+        _ = page
+        self.confirm_calls += 1
+        return self.confirmed
+
+
+class _AutoSubmitSafeAdapter(_FakeAdapter):
+    """Only discovers a field that fills and reads back cleanly, so the policy is AUTO_SUBMIT_SAFE."""
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [DiscoveredField(label="First Name", name="first_name", required=True)]
+
+
+def test_service_auto_submit_disabled_by_default_never_calls_submit_adapter() -> None:
+    session = _FakeSession()
+    submit_adapter = _FakeSubmitAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_AutoSubmitSafeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        submit_adapter=submit_adapter,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert result.submit_performed is False
+    assert submit_adapter.submit_calls == 0
+
+
+def test_service_auto_submit_enabled_and_policy_safe_performs_mocked_submit() -> None:
+    session = _FakeSession()
+    submit_adapter = _FakeSubmitAdapter()
+    waited: list[bool] = []
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_AutoSubmitSafeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: waited.append(True),
+        auto_submit_enabled=True,
+        submit_adapter=submit_adapter,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=True)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert result.submit_performed is True
+    assert submit_adapter.submit_calls == 1
+    assert submit_adapter.confirm_calls == 1
+    # The browser handoff still happens after a successful auto-submit, in
+    # case a post-submit challenge (e.g. email verification) needs a human.
+    assert waited == [True]
+    assert session.closed is True
+
+
+def test_service_auto_submit_enabled_but_blocked_by_unresolved_required_field() -> None:
+    session = _FakeSession()
+    submit_adapter = _FakeSubmitAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_FakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        auto_submit_enabled=True,
+        submit_adapter=submit_adapter,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any("favorite IDE" in item.label for item in result.unresolved_required_fields)
+    assert result.submit_performed is False
+    assert submit_adapter.submit_calls == 0
+
+
+class _ChallengeBeforeSubmitAdapter(_AutoSubmitSafeAdapter):
+    """Stage 1 detection sees no challenge, but one appears by the time submit is attempted."""
+
+    def __init__(self) -> None:
+        self.detect_calls = 0
+
+    def detect_challenge(self, page: object) -> str | None:
+        _ = page
+        self.detect_calls += 1
+        return None if self.detect_calls == 1 else "captcha"
+
+
+def test_service_auto_submit_blocked_by_challenge_appearing_before_submit() -> None:
+    session = _FakeSession()
+    submit_adapter = _FakeSubmitAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_ChallengeBeforeSubmitAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        auto_submit_enabled=True,
+        submit_adapter=submit_adapter,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert result.submit_performed is False
+    assert submit_adapter.submit_calls == 0
+
+
 def test_service_explicit_adapter_overrides_source_based_selection() -> None:
     session = _FakeSession()
     seen: list[str] = []

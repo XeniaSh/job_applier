@@ -43,6 +43,7 @@ def build_prepare_application_service(
         on_ready=on_ready,
         answer_generator=ApplicationAnswerGenerator(llm_client) if llm_client else None,
         cover_letter_provider=AutofillCoverLetterProvider(llm_client) if llm_client else None,
+        auto_submit_enabled=_auto_submit_enabled(),
         **autofill_kwargs,
     )
     return PrepareApplicationService(autofill, lifecycle)
@@ -62,3 +63,13 @@ def _optional_llm_client():
     except Exception:
         logger.info("Autofill LLM client unavailable; generated answers and cover letter skipped.")
         return None
+
+
+def _auto_submit_enabled() -> bool:
+    """Defaults to disabled whenever config cannot be loaded, never fails open."""
+    try:
+        from app.config import Settings
+
+        return Settings().auto_submit_enabled
+    except Exception:
+        return False

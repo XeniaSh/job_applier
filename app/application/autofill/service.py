@@ -34,6 +34,11 @@ from app.application.autofill.resolver import (
     VacancyResolver,
 )
 from app.application.autofill.resume import ResumeResolutionError, resolve_default_resume_path
+from app.application.autofill.submit import (
+    SubmitAdapter,
+    attempt_auto_submit,
+    default_submit_adapter_for_source,
+)
 from app.application.candidate_profile import CandidateProfile
 from app.application.candidate_profile_loader import CandidateProfileLoadError, load_structured_candidate_profile
 
@@ -77,6 +82,9 @@ class AutofillService:
         on_ready: Callable[[AutofillResult], None] | None = None,
         answer_generator: ApplicationAnswerGenerator | None = None,
         cover_letter_provider: CoverLetterTextProvider | None = None,
+        auto_submit_enabled: bool = False,
+        submit_adapter: SubmitAdapter | None = None,
+        submit_adapter_for_source: Callable[[str], SubmitAdapter] = default_submit_adapter_for_source,
     ) -> None:
         self._resolver = resolver
         self._profile_loader = profile_loader
@@ -87,6 +95,9 @@ class AutofillService:
         self._on_ready = on_ready
         self._answer_generator = answer_generator
         self._cover_letter_provider = cover_letter_provider
+        self._auto_submit_enabled = auto_submit_enabled
+        self._explicit_submit_adapter = submit_adapter
+        self._submit_adapter_for_source = submit_adapter_for_source
 
     def run(self, source: str, external_id: str, *, keep_open: bool = True) -> AutofillResult:
         session: BrowserSession | None = None
@@ -101,6 +112,17 @@ class AutofillService:
             session.keep_open = keep_open
             session.open(vacancy.application_url)
             result = self._fill_open_page(vacancy, profile, resume_path, session, adapter)
+            if self._auto_submit_enabled and result.status is AutofillStatus.READY_FOR_REVIEW:
+                submit_adapter = self._explicit_submit_adapter or self._submit_adapter_for_source(
+                    vacancy.source
+                )
+                result = attempt_auto_submit(
+                    result,
+                    enabled=self._auto_submit_enabled,
+                    challenge_detector=adapter,
+                    submit_adapter=submit_adapter,
+                    page=session.page,
+                )
         except VacancyResolveError as exc:
             result = _failed(
                 source, external_id, str(exc), vacancy, reason=AutofillFailureReason.VACANCY_RESOLVE_FAILED
@@ -315,7 +337,7 @@ class AutofillService:
             warnings=warnings,
             resume_uploaded=resume_uploaded,
             cover_letter_filled=cover_letter_filled,
-            submit_performed=True,
+            submit_performed=False,
         )
 
 

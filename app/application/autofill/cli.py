@@ -40,6 +40,7 @@ def register_autofill_command(app: typer.Typer) -> None:
                 on_ready=_show,
                 answer_generator=ApplicationAnswerGenerator(llm_client) if llm_client else None,
                 cover_letter_provider=AutofillCoverLetterProvider(llm_client) if llm_client else None,
+                auto_submit_enabled=_auto_submit_enabled(),
             )
             result = service.run(source, external_id, keep_open=keep_open)
         except VacancyResolveError as exc:
@@ -68,3 +69,13 @@ def _optional_llm_client():
     except Exception:
         logger.info("Autofill LLM client unavailable; generated answers and cover letter skipped.")
         return None
+
+
+def _auto_submit_enabled() -> bool:
+    """Defaults to disabled whenever config cannot be loaded, never fails open."""
+    try:
+        from app.config import Settings
+
+        return Settings().auto_submit_enabled
+    except Exception:
+        return False

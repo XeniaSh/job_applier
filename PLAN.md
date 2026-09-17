@@ -182,8 +182,9 @@ Everything listed below was the "main remaining work" as of 2026-09-10 and is no
 
 - TASK-046: additional-ATS autofill adapters (beyond Greenhouse), one per iteration; depends on TASK-033 (done) and the matching watcher existing — Lever/Ashby/SmartRecruiters watchers (TASK-042..044) already exist, so this task has no unmet dependency, it simply has not been picked up yet
 - TASK-047: auto-submit policy computation only (no submit action); depends on TASK-033 and TASK-041 (both done), so it also has no unmet dependency
-- TASK-048: auto-submit execution — forbidden until it is both built on a done TASK-047 and explicitly requested; the "requires an explicit request" gate applies to TASK-048, not to computing the TASK-047 policy itself
 - Workday (`OQ-006`), including TASK-045 — blocked on an explicit user request
+
+TASK-048 (auto-submit execution) is done: an explicit user request enabled it, gated behind `AUTO_SUBMIT_ENABLED` (default `false`) plus the TASK-047 policy — see the TASK-048 entry below.
 
 ---
 
@@ -887,7 +888,7 @@ Watchers belong in `app/company_watch/watchers/`. Autofill adapters belong in th
 
 ### TASK-048 — Auto-submit execution
 
-- **Status:** todo
+- **Status:** done
 - **Depends on:** TASK-047 and an explicit user request to enable submit
 - **Goal:** Submit only when policy is `AUTO_SUBMIT_SAFE`.
 - **Area:** autofill service
@@ -895,6 +896,19 @@ Watchers belong in `app/company_watch/watchers/`. Autofill adapters belong in th
   - Default remains no submit until this task is explicitly executed.
   - `submit_performed` is true only after a real successful submit path.
 - **Verification:** Fixture tests; still no live Greenhouse in pytest.
+- **Implementation notes (2026-09-17):** `app/application/autofill/submit.py` adds
+  `attempt_auto_submit`, gated on all of: `AUTO_SUBMIT_ENABLED` config flag
+  (default `false`), `evaluate_auto_submit_policy(result)` returning
+  `AUTO_SUBMIT_SAFE`, no challenge detected immediately before the click, a
+  successful Submit-button click, and a post-submit confirmation read-back.
+  `GreenhouseSubmitAdapter`/`LeverSubmitAdapter` live in this new module, not
+  on `GreenhouseAdapter`/`LeverAdapter` — those keep having no `submit` method
+  (see the existing `not hasattr(adapter, "submit")` tests). Also fixed
+  `AutofillService._fill_open_page` calling `stage1_autofill_result(...,
+  submit_performed=True)`: the factory already forced it back to `False`, but
+  the call site is now consistent with "Stage 1 never submits". Manual-review
+  browser handoff is unchanged and still runs after a successful auto-submit,
+  since post-submit steps (e.g. email verification) still need a human.
 
 ---
 
@@ -1405,7 +1419,7 @@ a task number or a prescribed fix.
 - Rewriting LinkedIn parser, matcher, or Telegram prepare flow
 - Merging Target Companies into `GREENHOUSE_BOARDS`
 - Using `known_hiring_locations` as a hard filter
-- Automatic final application submission before TASK-048
+- Automatic final application submission unless `AUTO_SUBMIT_ENABLED=true` is explicitly set (TASK-048; default remains off)
 - CAPTCHA / Cloudflare / OTP bypass
 - Reading real `candidate_profile.local.*`, resume PDFs, or production DB in agent work
 - Relocating `candidate_profile.md` (`OQ-010`)
@@ -1429,8 +1443,9 @@ blocked:
   Lever/Ashby/SmartRecruiters watchers (TASK-042..044) already exist.
 - TASK-047 (auto-submit policy computation only) is `todo` with no unmet
   dependency: it depends on TASK-033 and TASK-041 (both done).
-- TASK-048 (auto-submit execution) is `todo` and depends on TASK-047 being
-  done plus an explicit user request to enable submit.
+- TASK-048 (auto-submit execution) is `done`: implemented behind
+  `AUTO_SUBMIT_ENABLED` (default `false`) after an explicit user request to
+  enable submit; see the TASK-048 entry above for details.
 - TASK-050 (optional vacancy snapshot store) is `todo`, gated on TASK-009's
   live resolve first proving insufficient.
 
