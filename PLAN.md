@@ -876,7 +876,7 @@ Watchers belong in `app/company_watch/watchers/`. Autofill adapters belong in th
 
 ### TASK-047 — Auto-submit policy
 
-- **Status:** todo
+- **Status:** done
 - **Depends on:** TASK-033, TASK-041
 - **Goal:** Compute `AUTO_SUBMIT_SAFE` vs `NEEDS_REVIEW` from AutofillResult without submitting.
 - **Area:** autofill policy module
