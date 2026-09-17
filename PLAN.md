@@ -863,7 +863,7 @@ Watchers belong in `app/company_watch/watchers/`. Autofill adapters belong in th
 
 ### TASK-046 — Additional autofill adapters
 
-- **Status:** todo
+- **Status:** done (Lever adapter)
 - **Depends on:** TASK-033 and the matching watcher
 - **Goal:** Add autofill adapters only after Greenhouse Stage 1 is done, one ATS per iteration.
 - **Area:** autofill adapters

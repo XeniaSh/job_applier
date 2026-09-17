@@ -15,6 +15,7 @@ from app.application.autofill.browser import (
 )
 from app.application.autofill.classifier import ClassifiedField, classify_field
 from app.application.autofill.greenhouse import GreenhouseAdapter, GreenhouseFormError
+from app.application.autofill.lever import LeverAdapter, LeverFormError
 from app.application.autofill.logging import log_autofill_result
 from app.application.autofill.summary import format_privacy_acknowledgement_report
 from app.application.autofill.models import (
@@ -26,12 +27,37 @@ from app.application.autofill.models import (
     stage1_autofill_result,
 )
 from app.application.autofill.questions import QuestionKind
-from app.application.autofill.resolver import ResolvedVacancy, VacancyResolveError, VacancyResolver
+from app.application.autofill.resolver import (
+    TARGET_COMPANY_LEVER_PREFIX,
+    ResolvedVacancy,
+    VacancyResolveError,
+    VacancyResolver,
+)
 from app.application.autofill.resume import ResumeResolutionError, resolve_default_resume_path
 from app.application.candidate_profile import CandidateProfile
 from app.application.candidate_profile_loader import CandidateProfileLoadError, load_structured_candidate_profile
 
 logger = logging.getLogger(__name__)
+
+_UNSUPPORTED_FORM_ERRORS: tuple[type[Exception], ...] = (GreenhouseFormError, LeverFormError)
+
+
+class AutofillAdapter(Protocol):
+    """The DOM surface `AutofillService` drives. No adapter exposes a submit method."""
+
+    def recognize(self, page: object) -> bool: ...
+    def detect_challenge(self, page: object) -> str | None: ...
+    def discover_fields(self, page: object) -> list[object]: ...
+    def fill_field(self, page: object, classified: ClassifiedField) -> bool: ...
+    def upload_resume(self, page: object, resume_path: Path, field: object) -> bool: ...
+    def read_back(self, page: object, field: object) -> str | None: ...
+
+
+def default_adapter_for_source(source: str) -> AutofillAdapter:
+    """Source-aware ATS adapter selection. Unknown sources keep the historical Greenhouse default."""
+    if source.strip().startswith(TARGET_COMPANY_LEVER_PREFIX):
+        return LeverAdapter()
+    return GreenhouseAdapter()
 
 
 class CoverLetterTextProvider(Protocol):
@@ -44,7 +70,8 @@ class AutofillService:
         *,
         resolver: VacancyResolver,
         profile_loader: Callable[[], CandidateProfile] = load_structured_candidate_profile,
-        adapter: GreenhouseAdapter | None = None,
+        adapter: AutofillAdapter | None = None,
+        adapter_for_source: Callable[[str], AutofillAdapter] = default_adapter_for_source,
         browser_factory: Callable[[], BrowserSession] | None = None,
         wait_for_review: Callable[[], None] = wait_for_manual_review,
         on_ready: Callable[[AutofillResult], None] | None = None,
@@ -53,7 +80,8 @@ class AutofillService:
     ) -> None:
         self._resolver = resolver
         self._profile_loader = profile_loader
-        self._adapter = adapter or GreenhouseAdapter()
+        self._explicit_adapter = adapter
+        self._adapter_for_source = adapter_for_source
         self._browser_factory = browser_factory or (lambda: BrowserSession(headed=True, keep_open=True))
         self._wait_for_review = wait_for_review
         self._on_ready = on_ready
@@ -66,12 +94,13 @@ class AutofillService:
         result: AutofillResult
         try:
             vacancy = self._resolver.resolve(source, external_id)
+            adapter = self._explicit_adapter or self._adapter_for_source(vacancy.source)
             profile = self._profile_loader()
             resume_path = resolve_default_resume_path(profile)
             session = self._browser_factory()
             session.keep_open = keep_open
             session.open(vacancy.application_url)
-            result = self._fill_open_page(vacancy, profile, resume_path, session)
+            result = self._fill_open_page(vacancy, profile, resume_path, session, adapter)
         except VacancyResolveError as exc:
             result = _failed(
                 source, external_id, str(exc), vacancy, reason=AutofillFailureReason.VACANCY_RESOLVE_FAILED
@@ -88,7 +117,7 @@ class AutofillService:
             result = _failed(
                 source, external_id, str(exc), vacancy, reason=AutofillFailureReason.BROWSER_SETUP_FAILED
             )
-        except GreenhouseFormError as exc:
+        except _UNSUPPORTED_FORM_ERRORS as exc:
             result = _failed(
                 source, external_id, str(exc), vacancy, reason=AutofillFailureReason.UNSUPPORTED_FORM
             )
@@ -139,12 +168,13 @@ class AutofillService:
         profile: CandidateProfile,
         resume_path: Path,
         session: BrowserSession,
+        adapter: AutofillAdapter,
     ) -> AutofillResult:
         page = session.page
-        prepare = getattr(self._adapter, "prepare_page", None)
+        prepare = getattr(adapter, "prepare_page", None)
         if prepare is not None:
             prepare(page)
-        challenge = self._adapter.detect_challenge(page)
+        challenge = adapter.detect_challenge(page)
         if challenge:
             return stage1_autofill_result(
                 source=vacancy.source,
@@ -153,7 +183,7 @@ class AutofillService:
                 status=AutofillStatus.NEEDS_MANUAL_INTERVENTION,
                 warnings=[f"Security challenge detected: {challenge}"],
             )
-        if not self._adapter.recognize(page):
+        if not adapter.recognize(page):
             return stage1_autofill_result(
                 source=vacancy.source,
                 external_id=vacancy.external_id,
@@ -163,7 +193,7 @@ class AutofillService:
                 failure_reason=AutofillFailureReason.UNSUPPORTED_FORM,
             )
 
-        discovered = self._adapter.discover_fields(page)
+        discovered = adapter.discover_fields(page)
         classified = [classify_field(item, profile) for item in discovered]
         cover_letter_text = _maybe_cover_letter(
             self._cover_letter_provider, classified, vacancy, profile
@@ -213,7 +243,7 @@ class AutofillService:
                 resume_items.append(item)
                 continue
             if item.fill:
-                if _fill_and_confirm(self._adapter, page, item):
+                if _fill_and_confirm(adapter, page, item):
                     filled.append(record)
                     if item.kind is QuestionKind.COVER_LETTER:
                         cover_letter_filled = True
@@ -222,7 +252,7 @@ class AutofillService:
                 else:
                     if item.kind is QuestionKind.COVER_LETTER:
                         adapter_reason = getattr(
-                            self._adapter, "last_cover_letter_error", None
+                            adapter, "last_cover_letter_error", None
                         )
                         warnings.append(
                             adapter_reason
@@ -255,16 +285,16 @@ class AutofillService:
 
         for item in resume_items:
             record = _field_result(item)
-            resume_uploaded = self._adapter.upload_resume(page, resume_path, item.field)
+            resume_uploaded = adapter.upload_resume(page, resume_path, item.field)
             if not resume_uploaded:
-                resume_uploaded = self._adapter.upload_resume(page, resume_path, item.field)
+                resume_uploaded = adapter.upload_resume(page, resume_path, item.field)
             if resume_uploaded:
                 filled.append(record)
             else:
                 unresolved_required.append(record) if item.field.required else unresolved_optional.append(record)
                 warnings.append(f"Resume was not attached for '{item.field.label}'.")
 
-        privacy_trace = _build_privacy_acknowledgement_trace(classified, self._adapter, filled)
+        privacy_trace = _build_privacy_acknowledgement_trace(classified, adapter, filled)
         if privacy_trace is not None:
             privacy_report = format_privacy_acknowledgement_report(privacy_trace)
             logger.info("%s", privacy_report)
@@ -377,7 +407,7 @@ def _field_result(item: ClassifiedField) -> AutofillFieldResult:
     )
 
 
-def _fill_and_confirm(adapter: GreenhouseAdapter, page: object, item: ClassifiedField) -> bool:
+def _fill_and_confirm(adapter: AutofillAdapter, page: object, item: ClassifiedField) -> bool:
     ok = adapter.fill_field(page, item)
     check_item = _with_confirmed_multiselect(adapter, item)
     read_back = adapter.read_back(page, item.field)

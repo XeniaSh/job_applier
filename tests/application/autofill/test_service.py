@@ -360,3 +360,69 @@ def test_service_accepts_matching_years_readback_with_no_warning() -> None:
     assert any("kotlin" in item.label.lower() for item in result.filled_fields)
     assert all("kotlin" not in item.label.lower() for item in result.unresolved_required_fields)
     assert not any("read-back failed" in warning.lower() for warning in result.warnings)
+
+
+def test_default_adapter_for_source_is_source_aware() -> None:
+    from app.application.autofill.greenhouse import GreenhouseAdapter
+    from app.application.autofill.lever import LeverAdapter
+    from app.application.autofill.service import default_adapter_for_source
+
+    assert isinstance(default_adapter_for_source("target_company:greenhouse:agoda"), GreenhouseAdapter)
+    assert isinstance(default_adapter_for_source("target_company:lever:qonto"), LeverAdapter)
+    # Unknown sources keep the historical Greenhouse default.
+    assert isinstance(default_adapter_for_source("linkedin-email"), GreenhouseAdapter)
+
+
+class _SourceAwareFakeResolver:
+    """Echoes back whatever source it is asked to resolve, like the real resolvers do."""
+
+    def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
+        return ResolvedVacancy(
+            source=source,
+            external_id=external_id,
+            title="Backend Engineer",
+            company="Example",
+            url="https://example.test/apply",
+            application_url="https://example.test/apply",
+        )
+
+
+def test_service_picks_adapter_by_resolved_source_when_none_given_explicitly() -> None:
+    session = _FakeSession()
+    seen: list[str] = []
+
+    def _adapter_for_source(source: str) -> _FakeAdapter:
+        seen.append(source)
+        return _FakeAdapter()
+
+    service = AutofillService(
+        resolver=_SourceAwareFakeResolver(),
+        profile_loader=_profile,
+        adapter_for_source=_adapter_for_source,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:lever:qonto", "abc123", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert seen == ["target_company:lever:qonto"]
+
+
+def test_service_explicit_adapter_overrides_source_based_selection() -> None:
+    session = _FakeSession()
+    seen: list[str] = []
+
+    def _adapter_for_source(source: str) -> _FakeAdapter:
+        seen.append(source)
+        return _FakeAdapter()
+
+    service = AutofillService(
+        resolver=_SourceAwareFakeResolver(),
+        profile_loader=_profile,
+        adapter=_FakeAdapter(),
+        adapter_for_source=_adapter_for_source,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:lever:qonto", "abc123", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert seen == []

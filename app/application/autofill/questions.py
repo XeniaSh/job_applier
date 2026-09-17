@@ -40,6 +40,7 @@ QuestionValue = str | bool | list[str] | None
 class QuestionKind(StrEnum):
     FIRST_NAME = "first_name"
     LAST_NAME = "last_name"
+    FULL_NAME = "full_name"
     EMAIL = "email"
     PHONE = "phone"
     LOCATION = "location"
@@ -97,6 +98,7 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.GENDER,
         QuestionKind.FIRST_NAME,
         QuestionKind.LAST_NAME,
+        QuestionKind.FULL_NAME,
         QuestionKind.EMAIL,
         QuestionKind.PHONE,
         QuestionKind.LOCATION,
@@ -427,6 +429,10 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         value = profile.identity.last_name
         return MappedQuestion(kind=QuestionKind.LAST_NAME, value=value, fillable=bool(value))
 
+    if _is_full_name(text, field):
+        value = f"{profile.identity.first_name} {profile.identity.last_name}".strip()
+        return MappedQuestion(kind=QuestionKind.FULL_NAME, value=value, fillable=bool(value))
+
     if _is_email(text, field):
         value = profile.identity.email
         return MappedQuestion(kind=QuestionKind.EMAIL, value=value, fillable=bool(value))
@@ -696,7 +702,11 @@ def _is_work_authorization(text: str) -> bool:
 
 
 def _country_from_work_auth_label(label: str) -> str | None:
-    match = _WORK_IN_RE.search(label.strip())
+    # Some ATSes (e.g. Lever) render the required-field asterisk directly
+    # appended to the question text with no separating space, which would
+    # otherwise defeat the trailing `$` anchor below.
+    cleaned = label.strip().rstrip("*").strip()
+    match = _WORK_IN_RE.search(cleaned)
     if not match:
         return None
     country = match.group(1).strip().rstrip("?.")
@@ -1024,6 +1034,19 @@ def _is_last_name(text: str, field: DiscoveredField) -> bool:
     if field.autocomplete in {"family-name", "lname"}:
         return True
     return "last name" in text or "last_name" in text or "family name" in text
+
+
+def _is_full_name(text: str, field: DiscoveredField) -> bool:
+    """A single combined name field (e.g. Lever's `name`), not first/last split."""
+    _ = text
+    if field.autocomplete == "name":
+        return True
+    element_id = (field.element_id or "").lower()
+    name_attr = (field.name or "").lower()
+    if element_id == "name" or name_attr == "name":
+        return True
+    label = field.label.strip().lower().rstrip("*").strip()
+    return label in {"full name", "name", "your name", "candidate name"}
 
 
 def _is_phone(text: str, field: DiscoveredField) -> bool:

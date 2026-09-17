@@ -1,5 +1,21 @@
 # Agent workflow
 
+## Shared Git directory invariant
+
+Git write access to the shared `.git` directory exists only so this agent
+worktree can create local commits.
+
+Before every commit, verify:
+
+```bash
+git branch --show-current
+```
+
+must equal exactly `agent-work`.
+
+Never checkout, switch, merge, rebase, reset, push, modify `main` or another
+ref, or operate on the main working tree.
+
 ## Roles
 
 You are the project manager, architect, and reviewer for this repository.
@@ -105,6 +121,19 @@ A Claude prompt should contain enough context to work autonomously:
 - instruction to add/update tests when appropriate;
 - instruction to run the relevant tests;
 - instruction not to modify unrelated code.
+
+Every Claude implementation prompt must also explicitly require Claude to:
+- work directly in this repository;
+- not spawn Task, exploration, research, or other subagents;
+- not delegate work to other agents;
+- inspect only the files needed for the bounded task;
+- start implementation directly after the minimal necessary inspection;
+- return any blocker immediately instead of waiting for another agent.
+
+A direct Claude run may spend up to 15 minutes inspecting or working silently.
+Do not treat the absence of early git diffs or command output as a stall, and
+do not terminate the run on that basis alone. Stop it only after the allowed
+work window is exceeded or Claude reports a blocker.
 
 Do not tell Claude how to implement something in unnecessary detail when repository inspection can determine the appropriate implementation.
 

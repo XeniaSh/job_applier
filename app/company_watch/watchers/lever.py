@@ -69,7 +69,7 @@ class LeverTargetWatcher:
         vacancies: list[NormalizedVacancy] = []
         errors: list[LeverCompanyError] = []
         raw_fetched = 0
-        with _build_client(
+        with build_lever_http_client(
             timeout_seconds=self._timeout_seconds,
             user_agent=self._user_agent,
         ) as client:
@@ -217,7 +217,7 @@ def lever_job_to_normalized(
     )
 
 
-def _build_client(*, timeout_seconds: float, user_agent: str) -> httpx.Client:
+def build_lever_http_client(*, timeout_seconds: float, user_agent: str) -> httpx.Client:
     return httpx.Client(
         timeout=httpx.Timeout(connect=5.0, read=timeout_seconds, write=10.0, pool=5.0),
         headers={"User-Agent": user_agent},
