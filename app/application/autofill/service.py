@@ -408,6 +408,16 @@ def _append_unresolved(
         optional.append(record)
 
 
+def _parse_plain_number(value: str) -> float | None:
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+_YEARS_NATIVE_INPUT_TYPES = frozenset({"text", "number"})
+
+
 def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
     if raw is None or raw == "":
         return False
@@ -468,6 +478,15 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
         if item.country and item.country.lower() in actual.lower():
             return bool(national and national in actual_digits)
         return False
+    if item.kind is QuestionKind.YEARS_EXPERIENCE:
+        expected_number = _parse_plain_number(wanted)
+        actual_number = _parse_plain_number(actual)
+        if expected_number is not None and actual_number is not None:
+            return expected_number == actual_number
+        if expected_number is not None and item.field.field_type in _YEARS_NATIVE_INPUT_TYPES:
+            # A native text/number years input must read back as a plain number;
+            # anything else (e.g. "12 years") is a mismatch, not a substring match.
+            return False
     if wanted.lower() in actual.lower() or actual.lower() in wanted.lower():
         if item.kind in {
             QuestionKind.YEARS_EXPERIENCE,

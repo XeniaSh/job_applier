@@ -1280,6 +1280,9 @@ def _fill_radio(page: Page, field: DiscoveredField, value: str | bool) -> bool:
     return False
 
 
+_YEARS_NATIVE_INPUT_TYPES = frozenset({"text", "number"})
+
+
 def _fill_years(page: Page, locator: Locator, field: DiscoveredField, value: object) -> bool:
     raw = str(value)
     years: float | None = None
@@ -1294,6 +1297,8 @@ def _fill_years(page: Page, locator: Locator, field: DiscoveredField, value: obj
             if matched:
                 return _fill_select(page, locator, matched, options)
         return _fill_select(page, locator, raw, options)
+    if field.field_type in _YEARS_NATIVE_INPUT_TYPES and not _is_combobox(locator, field):
+        return _fill_text(page, locator, raw)
     if years is not None:
         try:
             locator.click(timeout=3_000)

@@ -24,6 +24,24 @@ def _profile() -> CandidateProfile:
     )
 
 
+def _profile_with_kotlin_years() -> CandidateProfile:
+    return CandidateProfile.model_validate(
+        {
+            "identity": {
+                "first_name": "Ada",
+                "last_name": "Example",
+                "email": "ada.example@example.test",
+                "phone": "+15555550100",
+            },
+            "employment": {
+                "professional_tech_stack": ["Kotlin"],
+                "technology_years": [{"technology": "Kotlin", "years": 2}],
+            },
+            "application_files": {"default_resume": "tests/fixtures/autofill/resume.txt"},
+        }
+    )
+
+
 @dataclass
 class _FakeSession:
     keep_open: bool = False
@@ -216,3 +234,129 @@ def test_service_security_challenge_needs_manual_intervention() -> None:
     assert any("captcha" in warning for warning in result.warnings)
     # Manual intervention still keeps the browser open for the user.
     assert session.closed is True  # closed only after wait_for_review() returns (fake resolves immediately)
+
+
+class _MismatchedYearsAdapter(_FakeAdapter):
+    """fill_field reports success, but the years field never actually reads back."""
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(label="First Name", name="first_name", required=True),
+            DiscoveredField(
+                label="How many years of experience do you have with Kotlin?",
+                name="kotlin_years",
+                field_type="number",
+                required=True,
+            ),
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        return bool(getattr(classified, "fill", False))
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        if field.name == "first_name":
+            return "Ada"
+        if field.name == "kotlin_years":
+            return "0"
+        return None
+
+
+def test_service_leaves_mismatched_years_readback_unresolved() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile_with_kotlin_years,
+        adapter=_MismatchedYearsAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == "First Name" for item in result.filled_fields)
+    assert any("kotlin" in item.label.lower() for item in result.unresolved_required_fields)
+    assert any("read-back failed" in warning.lower() for warning in result.warnings)
+
+
+class _SubstringMismatchedYearsAdapter(_MismatchedYearsAdapter):
+    """Actual value "12" numerically contains expected "2" as a substring but must not match."""
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        if field.name == "first_name":
+            return "Ada"
+        if field.name == "kotlin_years":
+            return "12"
+        return None
+
+
+def test_service_rejects_substring_matching_years_readback() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile_with_kotlin_years,
+        adapter=_SubstringMismatchedYearsAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any("kotlin" in item.label.lower() for item in result.unresolved_required_fields)
+    assert any("read-back failed" in warning.lower() for warning in result.warnings)
+
+
+class _NonNumericSuffixYearsAdapter(_MismatchedYearsAdapter):
+    """Actual value "12 years" fails numeric parsing but contains expected "2" as a substring."""
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        if field.name == "first_name":
+            return "Ada"
+        if field.name == "kotlin_years":
+            return "12 years"
+        return None
+
+
+def test_service_rejects_nonnumeric_years_readback_on_native_input() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile_with_kotlin_years,
+        adapter=_NonNumericSuffixYearsAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any("kotlin" in item.label.lower() for item in result.unresolved_required_fields)
+    assert any("read-back failed" in warning.lower() for warning in result.warnings)
+
+
+class _MatchedYearsAdapter(_MismatchedYearsAdapter):
+    """Same shape as the mismatch case, but the years field reads back correctly."""
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        if field.name == "first_name":
+            return "Ada"
+        if field.name == "kotlin_years":
+            return "2"
+        return None
+
+
+def test_service_accepts_matching_years_readback_with_no_warning() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile_with_kotlin_years,
+        adapter=_MatchedYearsAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any("kotlin" in item.label.lower() for item in result.filled_fields)
+    assert all("kotlin" not in item.label.lower() for item in result.unresolved_required_fields)
+    assert not any("read-back failed" in warning.lower() for warning in result.warnings)

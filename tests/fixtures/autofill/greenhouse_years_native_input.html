@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — Native Years Input</title>
+</head>
+<body>
+  <h1>Senior Backend Engineer</h1>
+  <form id="application_form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+
+    <label for="kotlin_years">How many years of experience do you have with Kotlin?*</label>
+    <input id="kotlin_years" name="job_application[kotlin_years]" type="number" min="0" step="1" required>
+
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+  <script>
+    window.__submitClicked = false;
+    window.__formSubmitted = false;
+    document.getElementById("submit_app").addEventListener("click", function () {
+      window.__submitClicked = true;
+    });
+    document.getElementById("application_form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      window.__formSubmitted = true;
+    });
+  </script>
+</body>
+</html>
