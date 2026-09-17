@@ -31,6 +31,18 @@ For each implementation request:
 
 Do not require the user to manually relay prompts, diffs, or review comments between Codex and Claude.
 
+### Focus and scope
+
+For an ordinary bounded task, start with the relevant files, tests, and directly connected interfaces. Do not reread the whole repository, `PLAN.md`, or `PROGRESS.md` for every task unless the task needs project-wide or architecture context.
+
+When delegating, pass Claude the scoped context already established by Codex:
+- the concrete problem;
+- acceptance criteria;
+- relevant files and symbols;
+- confirmed facts and behavior that must remain unchanged.
+
+Do not ask Claude to re-investigate the whole repository for an ordinary local task. On a fix iteration, pass only the specific review defect and the local context needed to fix it; do not repeat the general task analysis.
+
 ## Claude delegation
 
 A Claude prompt should contain enough context to work autonomously:
@@ -44,6 +56,20 @@ A Claude prompt should contain enough context to work autonomously:
 - instruction not to modify unrelated code.
 
 Do not tell Claude how to implement something in unnecessary detail when repository inspection can determine the appropriate implementation.
+
+## Testing and review efficiency
+
+For ordinary changes, Claude runs the smallest relevant regression test set for the changed behavior. After Claude finishes, Codex independently runs the focused tests needed for the acceptance criteria and inspects the relevant diff and absence of unrelated changes.
+
+Do not run the full test suite after every iteration. Run it at most once per task, and only when the change has broad cross-cutting impact, touches shared/core interfaces with a large blast radius, focused tests provide a concrete reason to suspect a regression, the user explicitly requests it, or Codex can state a specific reason it is needed. Documentation-only changes do not require pytest.
+
+Do not repeat a large unchanged test set without a new code change relevant to those tests. If Claude has successfully run a large set and Codex has no reason to doubt the result, inspect the diff and run a narrower independent regression set instead.
+
+For small local changes, review proportionally: inspect the relevant diff, check the acceptance criteria, run focused tests, and verify that unrelated files were not changed. Use a deep architecture review only for architectural, security-sensitive, cross-cutting, or explicitly complex changes.
+
+If review finds a concrete defect, first delegate a targeted fix request to Claude. After the fix, inspect the changed area and its related tests rather than repeating the entire initial review. Do not impose an artificial limit on fix iterations, but keep each iteration scoped to the defects actually found.
+
+Start ordinary tasks with the minimum sufficient analysis. Expand repository research or testing only when uncertainty, regression risk, or architectural impact is discovered.
 
 ## Git and existing work
 
