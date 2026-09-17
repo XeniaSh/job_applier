@@ -31,6 +31,57 @@ For each implementation request:
 
 Do not require the user to manually relay prompts, diffs, or review comments between Codex and Claude.
 
+## Autonomous project loop
+
+When the user says `Continue project` (or gives an equivalent continuation
+command), Codex continues the project autonomously instead of stopping after a
+small task.
+
+For each iteration:
+
+1. Read the current state from `PLAN.md`, `PROGRESS.md`, and relevant code,
+   tests, and interfaces. Keep the investigation focused; do not perform a
+   full repository audit without a concrete reason.
+2. Select the next bounded task that is represented in the existing plan, is
+   not blocked on user or live input, and has clear acceptance criteria.
+3. Establish the concrete scope, root cause, and design. Delegate substantive
+   implementation to Claude with one bounded prompt. Claude implements; it
+   does not choose roadmap priorities.
+4. Review the relevant diff, run focused tests, and check the invariants and
+   architecture directly affected by the change. If a defect remains, send
+   Claude only a targeted fix prompt and review that local area again.
+5. After the task passes review, update ignored `PROGRESS.md`, make one local
+   commit in `agent-work` for the accepted task, and record its hash. Do not
+   include unrelated changes.
+6. After committing, select the next eligible bounded task and continue. Do
+   not stop merely because one task is complete.
+
+The loop never changes `main`, pushes, merges, or deploys. It does not expand
+the task scope or bypass the human boundaries below.
+
+## Human boundaries
+
+Stop the autonomous loop and ask the user only when safe progress requires:
+
+- live verification in a real browser, Telegram, or ATS;
+- CAPTCHA, OTP, email verification, or another human verification step;
+- credentials, secrets, or private data unavailable to the agent;
+- changing the private candidate profile;
+- a product decision with materially different options that cannot be derived
+  from `PLAN.md`;
+- destructive or migratory work on real user data;
+- push, merge, deploy, or a change to `main`;
+- an action that could submit an application or cause another external,
+  irreversible side effect;
+- substantial architecture uncertainty outside the existing plan;
+- an unresolved test or implementation failure that cannot be made safe; or
+- a next task whose correctness depends on pending live verification.
+
+When stopping, report briefly what was completed, the commits created since
+the last user checkpoint, the one human action or decision required, and which
+task will resume after the user responds. Do not ask questions answerable from
+the plan, progress file, code, or tests.
+
 ### Focus and scope
 
 For an ordinary bounded task, start with the relevant files, tests, and directly connected interfaces. Do not reread the whole repository, `PLAN.md`, or `PROGRESS.md` for every task unless the task needs project-wide or architecture context.
@@ -79,9 +130,43 @@ Never discard, reset, overwrite, or revert changes merely because you did not cr
 
 Do not use destructive Git commands.
 
-Do not commit, push, merge, rebase, or deploy unless the user explicitly asks.
+Do not push, merge, rebase, deploy, or change `main`. A local commit is
+allowed after Codex has accepted a bounded task in the autonomous project loop
+above; outside that loop, commit only when the user explicitly asks.
 
 Keep changes narrowly scoped to the current task.
+
+## Commit policy
+
+One accepted bounded task should produce one local commit in `agent-work` when
+practical. Codex may commit automatically only after implementation, focused
+verification, and review have passed with no known blocking defects. If the
+task is not accepted, do not commit it. Never include unrelated working-tree
+changes, and never use this policy to push, merge, cherry-pick into `main`, or
+rewrite existing history.
+
+## Planning policy
+
+Do not return to the user after every task asking what to do next. Choose the
+next task from `PLAN.md` and `PROGRESS.md` using this order:
+
+1. blocker or reliability issue in the currently used flow;
+2. unfinished functionality in the current milestone;
+3. the next eligible task in `PLAN.md`;
+4. cleanup or refactoring only when required by a product task.
+
+Do not invent a new roadmap or start speculative polishing. If a task can be
+completed safely without the user, continue with it.
+
+## Live verification boundaries
+
+When implementation is locally complete but live verification is required,
+finish and verify everything available locally, update `PROGRESS.md` with the
+live check marked pending, and commit the accepted local task if its local
+acceptance criteria pass. Then stop and give the user concise verification
+steps. Do not begin another task whose correctness depends on that live
+result. An independent task may continue only when doing so does not build on
+the unverified behavior or accumulate unsafe changes.
 
 ## Private data
 
@@ -94,6 +179,14 @@ Do not access the user's home-directory credentials, SSH keys, Keychain, environ
 Do not ask Claude to access them.
 
 If implementation requires a secret or private runtime value, implement against configuration/interfaces/examples and tell the user what must be supplied at runtime.
+
+## Claude boundaries
+
+Claude is the implementation engineer. It does not select the next task,
+change the roadmap, access private credentials or data, perform real
+submissions, or commit, push, or merge. Codex gives Claude one bounded
+implementation or targeted-fix prompt per iteration, then independently
+accepts or rejects the result.
 
 ## Review standard
 
@@ -120,3 +213,27 @@ The user should normally interact only with you.
 Do not narrate every internal delegation step. Report meaningful blockers, decisions that require user input, and the final verified result.
 
 If requirements are genuinely ambiguous and different interpretations would materially change the product behavior, ask the user rather than inventing a product decision.
+
+## End-of-run reporting
+
+When the autonomous loop stops at a real human boundary, keep the final report
+compact:
+
+Completed:
+
+- task → commit hash
+
+Current state:
+
+- what works;
+- what is pending.
+
+Need from user:
+
+- one concrete action or decision.
+
+Next after that:
+
+- the task Codex will resume after `Continue project`.
+
+Do not repeat a full project audit in this report.
