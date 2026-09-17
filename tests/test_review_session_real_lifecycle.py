@@ -184,24 +184,53 @@ def _seed_cache(path: Path) -> TargetCompanyAnalysisCache:
 
 
 class _FakeClient:
-    def __init__(self, *, fail_first_sends: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        fail_first_sends: int = 0,
+        always_fail_sends: bool = False,
+        raise_unexpected_error: bool = False,
+    ) -> None:
         self.answers: list[tuple[str, str | None]] = []
         self.texts: list[dict[str, object]] = []
+        self.edits: list[dict[str, object]] = []
         self._remaining_failures = fail_first_sends
+        self._always_fail_sends = always_fail_sends
+        self._raise_unexpected_error = raise_unexpected_error
 
     def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
         self.answers.append((callback_query_id, text))
 
     def send_text_message(self, text: str, *, chat_id=None, reply_to_message_id=None, buttons=None):
-        if self._remaining_failures > 0:
-            self._remaining_failures -= 1
-            raise TelegramRequestError("simulated transient network failure")
+        if self._raise_unexpected_error:
+            # A bug or an unwrapped client-library failure (e.g. a decode
+            # error), as opposed to the TelegramRequestError the retry
+            # helper knows how to classify and retry.
+            raise RuntimeError("unexpected non-Telegram failure")
+        if self._always_fail_sends or self._remaining_failures > 0:
+            self._remaining_failures = max(0, self._remaining_failures - 1)
+            # A 429 is a transient, definitely-undelivered failure: Telegram
+            # rejected the call outright, so it is safe for production code
+            # to retry it.
+            raise TelegramRequestError(
+                "simulated rate limit",
+                http_status=429,
+                error_code=429,
+                description="Too Many Requests: retry after 1",
+            )
         self.texts.append({"text": text, "chat_id": chat_id, "buttons": buttons})
         return TelegramMessageRef(chat_id=str(chat_id or "222"), message_id=99)
 
+    def edit_message_text(self, **kwargs) -> None:
+        self.edits.append(kwargs)
+
 
 def _run_real_prepare(
-    monkeypatch, tmp_path: Path, *, client: "_FakeClient | None" = None
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    client: "_FakeClient | None" = None,
+    browser_session_cls: type = _FakeBrowserSession,
 ) -> tuple[_FakeClient, threading.Thread]:
     """Dispatch a Telegram-triggered prepare through the REAL production
     wiring (`build_prepare_application_service`), threaded exactly like
@@ -209,7 +238,7 @@ def _run_real_prepare(
     """
     monkeypatch.setattr("app.application.autofill.resolver.DefaultVacancyResolver", _FakeResolver)
     monkeypatch.setattr("app.application.autofill.service.GreenhouseAdapter", _FakeAdapter)
-    monkeypatch.setattr("app.application.autofill.service.BrowserSession", _FakeBrowserSession)
+    monkeypatch.setattr("app.application.autofill.service.BrowserSession", browser_session_cls)
     monkeypatch.setattr(
         "app.application.autofill.service.resolve_default_resume_path",
         lambda profile: Path(__file__),  # any file that exists
@@ -251,11 +280,14 @@ def test_session_stays_active_after_completion_message_while_worker_waits(
 ) -> None:
     client, worker_thread = _run_real_prepare(monkeypatch, tmp_path)
 
-    # 1. Completion message + Done reviewing button arrive.
-    _wait_until(lambda: len(client.texts) > 0)
+    # 1. Completion message + Done reviewing button arrive (the plain text
+    # is sent first, then the button is attached by a separate edit).
+    _wait_until(lambda: len(client.texts) > 0 and len(client.edits) > 0)
     message = client.texts[0]
     assert message["text"].startswith("Preparation completed.")
-    buttons = message["buttons"]
+    assert message["buttons"] is None
+    edit = client.edits[0]
+    buttons = edit["buttons"]
     assert buttons is not None
     session_id = parse_review_done_session_id(buttons[0][0].callback_data)
 
@@ -297,12 +329,12 @@ def _session_ids(registry) -> set[str]:
 
 def test_two_concurrent_real_prepares_have_independent_sessions(monkeypatch, tmp_path: Path) -> None:
     client_a, thread_a = _run_real_prepare(monkeypatch, tmp_path)
-    _wait_until(lambda: len(client_a.texts) > 0)
-    session_a = parse_review_done_session_id(client_a.texts[0]["buttons"][0][0].callback_data)
+    _wait_until(lambda: len(client_a.edits) > 0)
+    session_a = parse_review_done_session_id(client_a.edits[0]["buttons"][0][0].callback_data)
 
     client_b, thread_b = _run_real_prepare(monkeypatch, tmp_path)
-    _wait_until(lambda: len(client_b.texts) > 0)
-    session_b = parse_review_done_session_id(client_b.texts[0]["buttons"][0][0].callback_data)
+    _wait_until(lambda: len(client_b.edits) > 0)
+    session_b = parse_review_done_session_id(client_b.edits[0]["buttons"][0][0].callback_data)
 
     assert session_a != session_b
     registry = default_review_registry()
@@ -320,36 +352,150 @@ def test_two_concurrent_real_prepares_have_independent_sessions(monkeypatch, tmp
     assert not thread_b.is_alive()
 
 
-def test_flaky_completion_notification_does_not_orphan_the_session(monkeypatch, tmp_path: Path) -> None:
-    """Root-cause regression for the live Adyen bug: the completion message
-    (which carries the "Done reviewing" button) is sent over the network from
-    inside `on_ready`. A transient failure on that specific send must not
-    leave a browser open with no way to close it -- the worker must still be
-    blocked in the real wait_for_review handoff, so the registry entry stays
-    valid for as long as the browser genuinely stays open.
+def test_flaky_completion_notification_recovers_via_retry(monkeypatch, tmp_path: Path) -> None:
+    """Root-cause regression for the live Adyen bug, updated for the bounded
+    retry/recovery fix: the completion message (which carries the "Done
+    reviewing" button) is sent over the network from inside `on_ready`. A
+    transient, definitely-undelivered Telegram error (a 429) on that send
+    must be retried -- within a small bounded budget, without re-running
+    autofill or registering a second session -- so the browser handoff
+    still ends up delivered instead of leaving a browser open with no
+    working way to close it.
     """
     flaky_client = _FakeClient(fail_first_sends=1)
     registry = default_review_registry()
     _client, worker_thread = _run_real_prepare(monkeypatch, tmp_path, client=flaky_client)
 
-    # Wait for the session to be registered (this happens before the flaky
-    # on_ready send), then give the worker a moment to actually run through
-    # the failing on_ready call and reach the browser handoff.
-    _wait_until(lambda: registry.active_count() >= 1)
-    time.sleep(0.05)
-
-    # The first send (the completion message) failed, so nothing was
-    # recorded -- but the worker must still be alive, parked in the real
-    # browser handoff, not dead from the on_ready exception.
-    assert worker_thread.is_alive()
-    assert flaky_client.texts == []
+    # The one retryable failure recovers on retry, ending up with exactly
+    # one plain send (the retry) and one button-attach edit -- no duplicate
+    # active completion messages.
+    _wait_until(lambda: len(flaky_client.edits) > 0)
+    assert len(flaky_client.texts) == 1
+    assert flaky_client.texts[0]["buttons"] is None
+    assert len(flaky_client.edits) == 1
+    session_id = parse_review_done_session_id(flaky_client.edits[0]["buttons"][0][0].callback_data)
 
     active_sessions = _session_ids(registry)
-    assert len(active_sessions) == 1
-    session_id = next(iter(active_sessions))
+    assert active_sessions == {session_id}
+    assert worker_thread.is_alive()
 
     outcome = registry.mark_done(session_id)
     assert outcome is ReviewSessionCloseOutcome.CLOSED
     worker_thread.join(timeout=2.0)
     assert not worker_thread.is_alive()
     assert session_id not in _session_ids(registry)
+
+
+def test_permanent_send_failure_closes_browser_without_hanging(monkeypatch, tmp_path: Path) -> None:
+    """If every completion-notice send exhausts the retry budget, `on_ready`
+    must call `mark_done` itself so `AutofillService`'s wait_for_review
+    never blocks -- the browser still closes deterministically even though
+    the user was never notified with a working "Done reviewing" button, and
+    no ordinary-completion fallback message is left dangling either.
+    """
+    failing_client = _FakeClient(always_fail_sends=True)
+    registry = default_review_registry()
+    _client, worker_thread = _run_real_prepare(monkeypatch, tmp_path, client=failing_client)
+
+    worker_thread.join(timeout=2.0)
+    assert not worker_thread.is_alive()
+    assert failing_client.texts == []
+    assert failing_client.edits == []
+    _wait_until(lambda: registry.active_count() == 0)
+
+
+def test_non_telegram_send_failure_closes_browser_without_hanging(monkeypatch, tmp_path: Path) -> None:
+    """`AutofillService.run` only logs-and-continues into the browser
+    handoff when `on_ready` raises; it never calls `mark_done` itself. If
+    the completion send raises something other than the Telegram-specific
+    errors `_send_with_bounded_retry` knows how to classify (e.g. a bug in
+    button building, or an unwrapped client error), that exception must
+    still be caught inside the review-handoff notice and must not skip
+    `mark_done` -- otherwise `wait_for_review()` blocks forever with no one
+    left to signal it, and the real browser session is never closed.
+    """
+
+    class _CapturingBrowserSession(_FakeBrowserSession):
+        instances: list["_CapturingBrowserSession"] = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            type(self).instances.append(self)
+
+    failing_client = _FakeClient(raise_unexpected_error=True)
+    registry = default_review_registry()
+    _client, worker_thread = _run_real_prepare(
+        monkeypatch, tmp_path, client=failing_client, browser_session_cls=_CapturingBrowserSession
+    )
+
+    worker_thread.join(timeout=2.0)
+    assert not worker_thread.is_alive()
+
+    # The browser was released deterministically even though delivery
+    # blew up with an exception type the retry helper cannot classify.
+    assert len(_CapturingBrowserSession.instances) == 1
+    assert _CapturingBrowserSession.instances[0].closed is True
+
+    # No Done-reviewing button and no misleading ordinary-completion
+    # fallback were left dangling alongside the failed handoff.
+    assert failing_client.edits == []
+    assert failing_client.texts == []
+
+    _wait_until(lambda: registry.active_count() == 0)
+
+    # A failed handoff must never be mistaken for a completed application.
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    assert storage.get_history_status(SOURCE, EXTERNAL_ID) is None
+
+
+def test_completion_text_formatting_failure_closes_browser_without_hanging(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """`format_application_prepare_completed_text(result)` runs inside
+    `on_ready` before `_notify_review_ready`'s own try/except can guard
+    anything -- it builds the very `text` argument that call needs. If
+    formatting itself raises, that exception must still be caught, and
+    `mark_done` still called, before `on_ready` returns: `AutofillService.run`
+    only logs-and-continues past a failed `on_ready`, so skipping `mark_done`
+    here would leave the real `wait_for_review()` handoff blocked forever
+    with the browser never closed.
+    """
+
+    class _CapturingBrowserSession(_FakeBrowserSession):
+        instances: list["_CapturingBrowserSession"] = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            type(self).instances.append(self)
+
+    def _boom(result):
+        raise RuntimeError("unexpected formatting failure")
+
+    monkeypatch.setattr(cli_module, "format_application_prepare_completed_text", _boom)
+
+    client = _FakeClient()
+    registry = default_review_registry()
+    _client, worker_thread = _run_real_prepare(
+        monkeypatch, tmp_path, client=client, browser_session_cls=_CapturingBrowserSession
+    )
+
+    worker_thread.join(timeout=2.0)
+    assert not worker_thread.is_alive()
+
+    # The browser was released deterministically even though formatting the
+    # completion text blew up before the review-ready notice could even be
+    # attempted.
+    assert len(_CapturingBrowserSession.instances) == 1
+    assert _CapturingBrowserSession.instances[0].closed is True
+
+    # No Done-reviewing button was ever attached; only the best-effort
+    # review-unavailable notice went out, never a misleading ordinary
+    # completion.
+    assert client.edits == []
+    assert len(client.texts) == 1
+    assert client.texts[0]["text"] == cli_module._REVIEW_UNAVAILABLE_TEXT
+
+    _wait_until(lambda: registry.active_count() == 0)
+
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    assert storage.get_history_status(SOURCE, EXTERNAL_ID) is None

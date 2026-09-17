@@ -117,6 +117,7 @@ from app.telegram.client import (
     build_prepared_application_buttons,
     build_ready_text,
     build_review_done_buttons,
+    is_definite_non_delivery,
     map_source_to_code,
     parse_callback_data,
     parse_review_done_session_id,
@@ -138,7 +139,7 @@ from app.telegram.application_prepare import (
     run_explicit_application_prepare,
 )
 from app.application.autofill.greenhouse_url import is_canonical_greenhouse_hosted_url
-from app.application.autofill.review_session import default_review_registry
+from app.application.autofill.review_session import ReviewSessionRegistry, default_review_registry
 from app.telegram.formatter import (
     card_display_sections,
     format_archived_vacancy_html,
@@ -3887,6 +3888,183 @@ def preview_linkedin_email(
     typer.echo(f"Parsing errors: {parsing_errors}")
 
 
+_REVIEW_NOTICE_MAX_ATTEMPTS = 3
+_REVIEW_NOTICE_BACKOFF_SECONDS = 0.05
+_REVIEW_NOTICE_MAX_RETRY_AFTER_SECONDS = 2.0
+
+_REVIEW_UNAVAILABLE_TEXT = (
+    "Preparation finished, but the review notice could not be delivered. "
+    "The browser was closed automatically; manual review is unavailable for this run."
+)
+
+
+def _send_with_bounded_retry(
+    action: Callable[[], object],
+    *,
+    max_attempts: int = _REVIEW_NOTICE_MAX_ATTEMPTS,
+    retry_ambiguous_failures: bool = False,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[object | None, bool]:
+    """Call `action`, retrying only failures that are safe to retry.
+
+    Returns `(result, True)` once `action` succeeds, or when an edit comes
+    back as "message is not modified" (Telegram already applied it, so
+    this counts as success). Returns `(None, False)` once the attempt
+    budget is exhausted or the failure is unsafe to retry.
+
+    By default (`retry_ambiguous_failures=False`, meant for a plain
+    `sendMessage`) only failures Telegram is known not to have received are
+    retried -- an ambiguous one could have actually gone through, and
+    resending risks a duplicate message. Pass `retry_ambiguous_failures=True`
+    for a call that always targets a known, stable id (an edit): retrying it
+    can only reapply the same content, never create a second message, so
+    even an ambiguous failure is safe to retry.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return action(), True
+        except TelegramMessageNotModifiedError:
+            return None, True
+        except TelegramRequestError as exc:
+            safe_to_retry = retry_ambiguous_failures or is_definite_non_delivery(exc)
+            retry_after = exc.retry_after
+            if safe_to_retry and retry_after is not None and retry_after > _REVIEW_NOTICE_MAX_RETRY_AFTER_SECONDS:
+                # Telegram is asking us to wait longer than our bounded
+                # retry budget allows -- retrying sooner would just be
+                # rejected again, so fail closed now instead of burning the
+                # attempt budget on retries that can't succeed in time.
+                safe_to_retry = False
+            retryable = safe_to_retry and attempt < max_attempts
+            logger.warning(
+                "Telegram review-handoff call failed (attempt %d/%d, retrying=%s): %s",
+                attempt,
+                max_attempts,
+                retryable,
+                exc,
+            )
+            if not retryable:
+                return None, False
+            delay = _REVIEW_NOTICE_BACKOFF_SECONDS
+            if retry_after is not None:
+                delay = max(delay, min(retry_after, _REVIEW_NOTICE_MAX_RETRY_AFTER_SECONDS))
+            sleep(delay)
+    return None, False
+
+
+def _best_effort_send_text(
+    client: TelegramClient, text: str, *, chat_id: str, reply_to_message_id: int | None
+) -> None:
+    try:
+        client.send_text_message(text, chat_id=chat_id, reply_to_message_id=reply_to_message_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Best-effort review-unavailable notice failed to send.")
+
+
+def _best_effort_edit_terminal(
+    client: TelegramClient, *, chat_id: str, message_id: int, base_text: str
+) -> None:
+    text = (
+        f"{base_text}\n\nManual review is unavailable: the Done-reviewing button could not be "
+        "delivered. The browser was closed automatically."
+    )
+    try:
+        client.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, buttons=[], parse_mode=None)
+    except TelegramMessageNotModifiedError:
+        pass
+    except Exception:  # noqa: BLE001
+        logger.exception("Best-effort terminal edit for undeliverable review button failed.")
+
+
+def _notify_review_ready(
+    *,
+    client: TelegramClient,
+    chat_id: str,
+    reply_to_message_id: int | None,
+    text: str,
+    session_id: str,
+    registry: ReviewSessionRegistry,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Deliver the review-completion message and its Done-reviewing button.
+
+    Sends the plain text first to learn its message_id, then edits that
+    same message to attach the button. Edits are naturally idempotent --
+    retrying one can only reapply the same text/markup, never create a
+    second message -- so only the initial send needs to avoid retrying
+    ambiguous failures. If delivery can't be confirmed, `mark_done` runs
+    here so the browser still closes deterministically instead of waiting
+    on a button the user may never see (see app.application.autofill.review_session).
+
+    The whole body is guarded: `AutofillService.run` only wraps its
+    `on_ready` call to log-and-continue into the browser handoff, it does
+    not call `mark_done` itself. So any exception this function lets
+    escape -- not just the Telegram-specific ones handled above, e.g. from
+    button building or an unwrapped client error -- would otherwise leave
+    that handoff's `wait_for_review()` blocked forever with no one left to
+    signal it. `mark_done` here must run before this function returns or
+    raises, so the browser closes deterministically either way.
+    """
+    ref = None
+    try:
+        ref, sent = _send_with_bounded_retry(
+            lambda: client.send_text_message(text, chat_id=chat_id, reply_to_message_id=reply_to_message_id),
+            sleep=sleep,
+        )
+        if not sent or ref is None:
+            logger.error(
+                "Review-handoff notice could not be delivered for session %s; releasing browser without review.",
+                session_id,
+            )
+            registry.mark_done(session_id)
+            _best_effort_send_text(
+                client,
+                _REVIEW_UNAVAILABLE_TEXT,
+                chat_id=chat_id,
+                reply_to_message_id=reply_to_message_id,
+            )
+            return
+
+        _, attached = _send_with_bounded_retry(
+            lambda: client.edit_message_text(
+                chat_id=ref.chat_id,
+                message_id=ref.message_id,
+                text=text,
+                buttons=build_review_done_buttons(session_id),
+                parse_mode=None,
+            ),
+            retry_ambiguous_failures=True,
+            sleep=sleep,
+        )
+        if attached:
+            return
+
+        logger.error(
+            "Review-handoff button could not be attached for session %s; releasing browser without review.",
+            session_id,
+        )
+        registry.mark_done(session_id)
+        _best_effort_edit_terminal(client, chat_id=ref.chat_id, message_id=ref.message_id, base_text=text)
+    except Exception:
+        logger.exception(
+            "Unexpected error delivering review-handoff notice for session %s; releasing browser without review.",
+            session_id,
+        )
+        registry.mark_done(session_id)
+        if ref is not None:
+            # The plain completion message already reached the user (we have
+            # its id) -- terminal-edit that same message instead of sending a
+            # second, separate notice that would leave the first one looking
+            # like an ordinary, still-actionable completion.
+            _best_effort_edit_terminal(client, chat_id=ref.chat_id, message_id=ref.message_id, base_text=text)
+        else:
+            _best_effort_send_text(
+                client,
+                _REVIEW_UNAVAILABLE_TEXT,
+                chat_id=chat_id,
+                reply_to_message_id=reply_to_message_id,
+            )
+
+
 def _dispatch_target_company_application_prepare(
     *,
     source: str,
@@ -3928,10 +4106,41 @@ def _dispatch_target_company_application_prepare(
             # The autofill runner is about to block this thread in
             # wait_for_review (registry.wait_for_done) until the user taps
             # "Done reviewing", so the browser is genuinely still open when
-            # this message arrives.
-            send_outcome(
-                format_application_prepare_completed_text(result),
-                buttons=build_review_done_buttons(session_id),
+            # this message arrives -- unless delivery of that message/button
+            # is not confirmed, in which case _notify_review_ready itself
+            # calls mark_done so the browser still closes deterministically.
+            # Set before attempting delivery so a failed/uncertain outcome
+            # here can never fall through to the plain outcome.text send
+            # below and misleadingly claim an ordinary completion.
+            notified["sent"] = True
+            try:
+                ready_text = format_application_prepare_completed_text(result)
+            except Exception:  # noqa: BLE001
+                # Formatting happens before _notify_review_ready's own guard
+                # can take effect, so a failure here needs the same
+                # mark_done-before-returning contract: AutofillService.run
+                # only logs-and-continues past a failed on_ready, it never
+                # calls mark_done itself, so skipping this would leave
+                # wait_for_review() blocked forever.
+                logger.exception(
+                    "Failed to format review-ready text for session %s; releasing browser without review.",
+                    session_id,
+                )
+                registry.mark_done(session_id)
+                _best_effort_send_text(
+                    client,
+                    _REVIEW_UNAVAILABLE_TEXT,
+                    chat_id=chat_id,
+                    reply_to_message_id=message_id if message_id > 0 else None,
+                )
+                return
+            _notify_review_ready(
+                client=client,
+                chat_id=chat_id,
+                reply_to_message_id=message_id if message_id > 0 else None,
+                text=ready_text,
+                session_id=session_id,
+                registry=registry,
             )
 
         try:

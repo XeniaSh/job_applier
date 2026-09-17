@@ -9,6 +9,7 @@ from app.application.autofill.models import (
     FieldClassification,
     stage1_autofill_result,
 )
+from app.application.autofill.review_session import default_review_registry
 from app.application.prepare_application import (
     BLOCKED_ALREADY_APPLIED,
     BLOCKED_SKIP,
@@ -146,6 +147,60 @@ class _EditFailingClient(_FakeClient):
     def edit_message_text(self, **kwargs) -> None:
         self.edits.append(kwargs)
         raise TelegramRequestError("boom", method="editMessageText")
+
+
+class _TerminalEditFailingClient(_FakeClient):
+    """Client whose edit_message_text fails only for button-clearing edits.
+
+    The review-ready button-attach edit (which always carries a non-empty
+    `buttons` list) still succeeds, so the handoff itself completes
+    normally; only the later "Done reviewing" terminal edit (which always
+    clears the button, i.e. `buttons == []`) fails.
+    """
+
+    def edit_message_text(self, **kwargs) -> None:
+        self.edits.append(kwargs)
+        if not kwargs.get("buttons"):
+            raise TelegramRequestError("boom", method="editMessageText")
+
+
+class _UnexpectedAttachEditFailingClient(_FakeClient):
+    """Client whose edit_message_text raises a non-Telegram exception, but
+    only for the button-attach edit (buttons non-empty). The later
+    best-effort terminal edit (buttons == []) still succeeds, so the
+    recovery path (edit the already-sent message instead of sending a
+    second one) can be observed.
+    """
+
+    def edit_message_text(self, **kwargs) -> None:
+        self.edits.append(kwargs)
+        if kwargs.get("buttons"):
+            raise RuntimeError("unexpected non-Telegram failure while attaching button")
+
+
+class _FlakySendOnceClient(_FakeClient):
+    """Client whose first `send_text_message` call fails with a transient,
+    definitely-undelivered error before succeeding, for retry-recovery
+    tests. Defaults to a 429; pass `error=` for a different definitely-
+    undelivered failure (e.g. a connection failure)."""
+
+    def __init__(self, *, error: TelegramRequestError | None = None) -> None:
+        super().__init__()
+        self._send_failures_remaining = 1
+        self._error = error or TelegramRequestError(
+            "Too Many Requests",
+            http_status=429,
+            error_code=429,
+            description="Too Many Requests: retry after 1",
+        )
+
+    def send_text_message(self, text, *, chat_id=None, reply_to_message_id=None, buttons=None):
+        if self._send_failures_remaining > 0:
+            self._send_failures_remaining -= 1
+            raise self._error
+        return super().send_text_message(
+            text, chat_id=chat_id, reply_to_message_id=reply_to_message_id, buttons=buttons
+        )
 
 
 def _vacancy(*, description: str = "Java backend services") -> NormalizedVacancy:
@@ -555,10 +610,16 @@ def test_completed_message_includes_done_reviewing_button(monkeypatch, tmp_path:
         application_prepare_sync=False,
     )
 
-    _wait_until(lambda: len(client.texts) > 0)
+    _wait_until(lambda: len(client.texts) > 0 and len(client.edits) > 0)
     message = client.texts[0]
     assert message["text"].startswith("Preparation completed.")
-    buttons = message["buttons"]
+    # The completion text is sent without a button first (to learn its
+    # message_id); the button is attached by a separate, retry-safe edit.
+    assert message["buttons"] is None
+    edit = client.edits[0]
+    assert edit["message_id"] == message["message_id"]
+    assert edit["text"] == message["text"]
+    buttons = edit["buttons"]
     assert buttons is not None
     session_id = parse_review_done_session_id(buttons[0][0].callback_data)
     assert session_id
@@ -587,6 +648,101 @@ def test_completed_message_includes_done_reviewing_button(monkeypatch, tmp_path:
         allowed_chat_ids=frozenset({"222"}),
     )
     assert client.answers[-1][1] in {"Already closed.", "This review session is no longer available."}
+
+
+def test_review_ready_send_recovers_after_transient_429(monkeypatch, tmp_path: Path) -> None:
+    """A transient, definitely-undelivered Telegram error (429) on the
+    review-completion send must be retried -- within a small bounded
+    budget, without registering a second session or duplicating the
+    completion message -- rather than treated as a permanent failure.
+    """
+    holder: dict[str, object] = {}
+
+    def fake_builder(lifecycle, *, on_ready=None, wait_for_review=None):
+        service, runner = _fake_build_prepare_application_service(
+            lifecycle, on_ready=on_ready, wait_for_review=wait_for_review
+        )
+        holder["runner"] = runner
+        return service
+
+    monkeypatch.setattr(
+        "app.application.explicit_prepare_runtime.build_prepare_application_service",
+        fake_builder,
+    )
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _FlakySendOnceClient()
+
+    cli_module._process_callback_update(
+        update=_callback_update(),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+        application_prepare_service=None,
+        application_prepare_cache=cache,
+        application_prepare_sync=False,
+    )
+
+    _wait_until(lambda: len(client.edits) > 0)
+    # Exactly one plain send (after the one retry) and one button-attach
+    # edit -- the retry never produced a second, duplicate completion
+    # message.
+    assert len(client.texts) == 1
+    session_id = parse_review_done_session_id(client.edits[0]["buttons"][0][0].callback_data)
+
+    runner = holder["runner"]
+    assert not runner.finished
+
+    _tap_review_done(client, storage, session_id)
+    _wait_until(lambda: runner.finished)
+
+
+def test_review_ready_send_retries_after_connection_failure(monkeypatch, tmp_path: Path) -> None:
+    """A connection failure that happens before any request bytes are sent
+    is, like a 429, known not to have reached Telegram -- so it must also
+    get a bounded retry, not just explicit rate-limit responses.
+    """
+    holder: dict[str, object] = {}
+
+    def fake_builder(lifecycle, *, on_ready=None, wait_for_review=None):
+        service, runner = _fake_build_prepare_application_service(
+            lifecycle, on_ready=on_ready, wait_for_review=wait_for_review
+        )
+        holder["runner"] = runner
+        return service
+
+    monkeypatch.setattr(
+        "app.application.explicit_prepare_runtime.build_prepare_application_service",
+        fake_builder,
+    )
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _FlakySendOnceClient(
+        error=TelegramRequestError(
+            "connection refused",
+            description="connection failed before request was sent",
+        )
+    )
+
+    cli_module._process_callback_update(
+        update=_callback_update(),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+        application_prepare_service=None,
+        application_prepare_cache=cache,
+        application_prepare_sync=False,
+    )
+
+    _wait_until(lambda: len(client.edits) > 0)
+    assert len(client.texts) == 1
+    session_id = parse_review_done_session_id(client.edits[0]["buttons"][0][0].callback_data)
+
+    runner = holder["runner"]
+    _tap_review_done(client, storage, session_id)
+    _wait_until(lambda: runner.finished)
 
 
 def test_two_concurrent_prepares_have_independent_done_reviewing_sessions(monkeypatch, tmp_path: Path) -> None:
@@ -625,9 +781,9 @@ def test_two_concurrent_prepares_have_independent_done_reviewing_sessions(monkey
             application_prepare_sync=False,
         )
 
-    _wait_until(lambda: len(client.texts) >= 2)
+    _wait_until(lambda: len(client.edits) >= 2)
     session_ids = [
-        parse_review_done_session_id(text["buttons"][0][0].callback_data) for text in client.texts
+        parse_review_done_session_id(edit["buttons"][0][0].callback_data) for edit in client.edits
     ]
     assert len(set(session_ids)) == 2
 
@@ -676,8 +832,8 @@ def _start_review_session(monkeypatch, client, cache, storage) -> str:
         application_prepare_cache=cache,
         application_prepare_sync=False,
     )
-    _wait_until(lambda: len(client.texts) > 0)
-    return parse_review_done_session_id(client.texts[0]["buttons"][0][0].callback_data)
+    _wait_until(lambda: len(client.edits) > 0)
+    return parse_review_done_session_id(client.edits[0]["buttons"][0][0].callback_data)
 
 
 def _tap_review_done(client, storage, session_id: str, *, message_text: str | None = None) -> None:
@@ -708,10 +864,12 @@ def test_review_done_tap_edits_completion_message_and_removes_button(monkeypatch
     client = _FakeClient()
 
     session_id = _start_review_session(monkeypatch, client, cache, storage)
+    # The button-attach edit from the review-ready notice itself.
+    assert len(client.edits) == 1
     _tap_review_done(client, storage, session_id)
 
-    assert len(client.edits) == 1
-    edit = client.edits[0]
+    assert len(client.edits) == 2
+    edit = client.edits[1]
     assert edit["chat_id"] == "222"
     assert edit["message_id"] == 99
     assert edit["buttons"] == []
@@ -734,12 +892,13 @@ def test_review_done_duplicate_or_stale_tap_is_handled_gracefully(monkeypatch, t
     assert client.answers[-1] == ("cb-prep", "Closing the browser now.")
 
     # A duplicate/stale tap must never raise and must still answer safely.
-    terminal_text = client.edits[0]["text"]
+    terminal_text = client.edits[-1]["text"]
     _tap_review_done(client, storage, session_id, message_text=terminal_text)
     assert client.answers[-1][1] in {"Already closed.", "This review session is no longer available."}
-    assert len(client.edits) == 2
-    assert client.edits[1]["buttons"] == []
-    assert client.edits[1]["text"] == terminal_text
+    # edits[0] is the button-attach edit from the review-ready notice.
+    assert len(client.edits) == 3
+    assert client.edits[-1]["buttons"] == []
+    assert client.edits[-1]["text"] == terminal_text
 
 
 def test_review_done_edit_failure_does_not_block_browser_release(monkeypatch, tmp_path: Path) -> None:
@@ -758,7 +917,7 @@ def test_review_done_edit_failure_does_not_block_browser_release(monkeypatch, tm
     )
     storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
     cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
-    client = _EditFailingClient()
+    client = _TerminalEditFailingClient()
 
     cli_module._process_callback_update(
         update=_callback_update(),
@@ -770,18 +929,130 @@ def test_review_done_edit_failure_does_not_block_browser_release(monkeypatch, tm
         application_prepare_cache=cache,
         application_prepare_sync=False,
     )
-    _wait_until(lambda: len(client.texts) > 0)
-    session_id = parse_review_done_session_id(client.texts[0]["buttons"][0][0].callback_data)
+    _wait_until(lambda: len(client.edits) > 0)
+    session_id = parse_review_done_session_id(client.edits[0]["buttons"][0][0].callback_data)
 
-    # The edit raises, but mark_done (browser release) happens before the
-    # edit is even attempted, so the failure must not block it.
+    # The revdone terminal edit raises, but mark_done (browser release)
+    # happens before that edit is even attempted, so the failure must not
+    # block it.
     _tap_review_done(client, storage, session_id)
 
     runner = holder["runner"]
     _wait_until(lambda: runner.finished)
     assert runner.finished is True
     assert client.answers[-1] == ("cb-prep", "Closing the browser now.")
-    assert len(client.edits) == 1
+    # edits[0] is the (successful) button-attach edit; edits[1] is the
+    # failing revdone terminal edit.
+    assert len(client.edits) == 2
+
+
+def test_review_ready_permanent_edit_failure_closes_browser_without_waiting(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """If the button-attach edit can never succeed, `on_ready` itself must
+    mark_done the session so the browser closes deterministically -- the
+    worker must not sit blocked in wait_for_review waiting for a
+    "Done reviewing" tap on a button that was never delivered, and no
+    misleading ordinary-completion fallback must fire alongside it.
+    """
+    holder: dict[str, object] = {}
+
+    def fake_builder(lifecycle, *, on_ready=None, wait_for_review=None):
+        service, runner = _fake_build_prepare_application_service(
+            lifecycle, on_ready=on_ready, wait_for_review=wait_for_review
+        )
+        holder["runner"] = runner
+        return service
+
+    monkeypatch.setattr(
+        "app.application.explicit_prepare_runtime.build_prepare_application_service",
+        fake_builder,
+    )
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _EditFailingClient()
+    registry = default_review_registry()
+
+    cli_module._process_callback_update(
+        update=_callback_update(),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+        application_prepare_service=None,
+        application_prepare_cache=cache,
+        application_prepare_sync=False,
+    )
+
+    runner = holder["runner"]
+    _wait_until(lambda: runner.finished)
+    assert runner.finished is True
+
+    # Exactly one plain completion message was sent; no duplicate or
+    # misleading ordinary-completion fallback fired alongside it.
+    assert len(client.texts) == 1
+    assert client.texts[0]["buttons"] is None
+    _wait_until(lambda: registry.active_count() == 0)
+
+
+def test_review_ready_unexpected_attach_edit_failure_edits_existing_message(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """If attaching the Done-reviewing button raises something other than a
+    `TelegramRequestError` (e.g. a bug in button building, or an unwrapped
+    client error), `_notify_review_ready`'s outer `except` runs after the
+    plain completion message has already been sent and its id is known. It
+    must best-effort terminal-edit that same message instead of sending a
+    second, separate "unavailable" notice -- otherwise the original
+    completion message is left looking like an ordinary, still-actionable
+    completion while a confusing second message sits next to it.
+    """
+    holder: dict[str, object] = {}
+
+    def fake_builder(lifecycle, *, on_ready=None, wait_for_review=None):
+        service, runner = _fake_build_prepare_application_service(
+            lifecycle, on_ready=on_ready, wait_for_review=wait_for_review
+        )
+        holder["runner"] = runner
+        return service
+
+    monkeypatch.setattr(
+        "app.application.explicit_prepare_runtime.build_prepare_application_service",
+        fake_builder,
+    )
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    cache = _seed_cache(tmp_path / "cache.json", recommendation=RECOMMENDATION_APPLY_NOW)
+    client = _UnexpectedAttachEditFailingClient()
+    registry = default_review_registry()
+
+    cli_module._process_callback_update(
+        update=_callback_update(),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+        application_prepare_service=None,
+        application_prepare_cache=cache,
+        application_prepare_sync=False,
+    )
+
+    runner = holder["runner"]
+    _wait_until(lambda: runner.finished)
+    assert runner.finished is True
+
+    # Exactly one message was ever sent -- no duplicate "unavailable" notice.
+    assert len(client.texts) == 1
+    sent_message_id = client.texts[0]["message_id"]
+
+    # Two edit attempts: the failing button-attach, then the best-effort
+    # terminal edit -- both targeting the one message that was actually sent.
+    assert len(client.edits) == 2
+    assert client.edits[0]["buttons"]
+    terminal_edit = client.edits[1]
+    assert terminal_edit["message_id"] == sent_message_id
+    assert terminal_edit["buttons"] == []
+
+    _wait_until(lambda: registry.active_count() == 0)
 
 
 def test_review_done_never_writes_applied_status(monkeypatch, tmp_path: Path) -> None:

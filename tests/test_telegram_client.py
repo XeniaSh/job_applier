@@ -380,3 +380,49 @@ def test_telegram_http_error_exposes_method_status_and_description(monkeypatch) 
     assert err.http_status == 400
     assert err.error_code == 400
     assert err.description == "Bad Request: query is too old"
+
+
+def test_telegram_429_exposes_retry_after(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+    responses = [
+        _FakeResponse(
+            429,
+            {
+                "ok": False,
+                "error_code": 429,
+                "description": "Too Many Requests: retry after 5",
+                "parameters": {"retry_after": 5},
+            },
+        )
+    ]
+
+    def fake_client(*args, **kwargs):
+        _ = args, kwargs
+        return _FakeClient(responses, calls)
+
+    monkeypatch.setattr(httpx, "Client", fake_client)
+    client = TelegramClient(bot_token="token", chat_id="123")
+    with pytest.raises(TelegramRequestError) as exc:
+        client.answer_callback_query("cb-id")
+    assert exc.value.error_code == 429
+    assert exc.value.retry_after == 5.0
+
+
+def test_telegram_error_without_parameters_has_no_retry_after(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+    responses = [
+        _FakeResponse(
+            400,
+            {"ok": False, "error_code": 400, "description": "Bad Request: query is too old"},
+        )
+    ]
+
+    def fake_client(*args, **kwargs):
+        _ = args, kwargs
+        return _FakeClient(responses, calls)
+
+    monkeypatch.setattr(httpx, "Client", fake_client)
+    client = TelegramClient(bot_token="token", chat_id="123")
+    with pytest.raises(TelegramRequestError) as exc:
+        client.answer_callback_query("cb-id")
+    assert exc.value.retry_after is None

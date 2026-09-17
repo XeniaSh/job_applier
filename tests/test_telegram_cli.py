@@ -2190,3 +2190,107 @@ def test_cover_letter_without_pdf_falls_back_to_text_only() -> None:
     )
     assert sent_texts and sent_texts[0][0] == "Letter only"
     assert any(text == "Cover letter sent" for _, text in answers)
+
+
+def test_bounded_retry_honors_telegram_retry_after_within_cap() -> None:
+    sleeps: list[float] = []
+    attempts = {"count": 0}
+
+    def action():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise cli_module.TelegramRequestError(
+                "rate limited", http_status=429, error_code=429, retry_after=1.0
+            )
+        return "ok"
+
+    result, sent = cli_module._send_with_bounded_retry(action, sleep=sleeps.append)
+
+    assert sent is True
+    assert result == "ok"
+    assert attempts["count"] == 2
+    # Telegram's requested delay (1.0s) is honored instead of the default
+    # 50ms backoff, since it is well within the bounded retry cap.
+    assert sleeps == [1.0]
+
+
+def test_bounded_retry_fails_closed_when_retry_after_exceeds_cap() -> None:
+    sleeps: list[float] = []
+    attempts = {"count": 0}
+
+    def action():
+        attempts["count"] += 1
+        raise cli_module.TelegramRequestError(
+            "rate limited", http_status=429, error_code=429, retry_after=10.0
+        )
+
+    result, sent = cli_module._send_with_bounded_retry(action, sleep=sleeps.append)
+
+    assert sent is False
+    assert result is None
+    # Telegram asked for a wait longer than the bounded retry cap allows --
+    # fail closed immediately instead of spinning retries too early.
+    assert attempts["count"] == 1
+    assert sleeps == []
+
+
+def test_bounded_retry_does_not_retry_ambiguous_timeout() -> None:
+    sleeps: list[float] = []
+    attempts = {"count": 0}
+
+    def action():
+        attempts["count"] += 1
+        raise cli_module.TelegramRequestError("timed out", description="timeout")
+
+    result, sent = cli_module._send_with_bounded_retry(action, sleep=sleeps.append)
+
+    assert sent is False
+    assert result is None
+    assert attempts["count"] == 1
+    assert sleeps == []
+
+
+def test_notify_review_ready_ambiguous_timeout_closes_without_second_send() -> None:
+    send_calls: list[dict] = []
+    edit_calls: list[dict] = []
+
+    class Client:
+        def send_text_message(self, text, *, chat_id=None, reply_to_message_id=None, buttons=None):
+            send_calls.append({"text": text, "chat_id": chat_id, "buttons": buttons})
+            raise cli_module.TelegramRequestError("timed out", description="timeout")
+
+        def edit_message_text(self, **kwargs):
+            edit_calls.append(kwargs)
+
+    class Registry:
+        def __init__(self) -> None:
+            self.marked_done: list[str] = []
+
+        def mark_done(self, session_id):
+            self.marked_done.append(session_id)
+
+    registry = Registry()
+
+    cli_module._notify_review_ready(
+        client=Client(),
+        chat_id="222",
+        reply_to_message_id=None,
+        text="Preparation completed.",
+        session_id="session-1",
+        registry=registry,
+        sleep=lambda _seconds: None,
+    )
+
+    # An ambiguous failure (e.g. a timeout) on the very first send must not
+    # be retried -- Telegram may already have received it, so resending
+    # risks a second, duplicate completion message/button.
+    assert len(send_calls) == 2
+    assert send_calls[0]["text"] == "Preparation completed."
+    assert send_calls[0]["buttons"] is None
+    # The only other send is the best-effort, buttonless "unavailable"
+    # notice -- never a second active completion message with its own
+    # "Done reviewing" button.
+    assert send_calls[1]["text"] == cli_module._REVIEW_UNAVAILABLE_TEXT
+    assert send_calls[1]["buttons"] is None
+    assert edit_calls == []
+    assert registry.marked_done == ["session-1"]

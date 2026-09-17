@@ -27,16 +27,51 @@ class TelegramRequestError(Exception):
         http_status: int | None = None,
         error_code: int | None = None,
         description: str | None = None,
+        retry_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.method = method
         self.http_status = http_status
         self.error_code = error_code
         self.description = description
+        self.retry_after = retry_after
 
 
 class TelegramMessageNotModifiedError(TelegramRequestError):
     """Raised when Telegram edit has no changes."""
+
+
+_CONNECTION_FAILED_DESCRIPTION = "connection failed before request was sent"
+
+
+def is_definite_non_delivery(exc: TelegramRequestError) -> bool:
+    """True when `exc` proves the request never reached/was rejected by Telegram.
+
+    Safe to retry without risking a duplicate: an explicit 429 (Telegram
+    rejected the call outright, nothing was processed) or a connection
+    failure that happened before any request bytes were written (the
+    server never saw it). Anything else -- including read/write timeouts,
+    where the request may have already reached Telegram and only the
+    response was lost -- is ambiguous and must not be retried blindly.
+    """
+    if exc.error_code == 429 or exc.http_status == 429:
+        return True
+    return exc.description == _CONNECTION_FAILED_DESCRIPTION
+
+
+def _extract_retry_after(data: dict) -> float | None:
+    """Read Telegram's requested backoff (seconds) from a 429 response body.
+
+    Telegram reports this as `parameters.retry_after` on rate-limit errors;
+    absent or malformed on every other error shape.
+    """
+    parameters = data.get("parameters")
+    if not isinstance(parameters, dict):
+        return None
+    retry_after_raw = parameters.get("retry_after")
+    if isinstance(retry_after_raw, bool) or not isinstance(retry_after_raw, (int, float)):
+        return None
+    return float(retry_after_raw)
 
 
 class TelegramClient:
@@ -263,6 +298,14 @@ class TelegramClient:
         url = f"{self._base_url}/{endpoint}"
         try:
             response = self._http_client().post(url, json=payload, timeout=timeout)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            # The connection itself never came up, so the request body was
+            # never transmitted: Telegram cannot have processed it.
+            raise TelegramRequestError(
+                "Telegram API request failed.",
+                method=endpoint,
+                description=_CONNECTION_FAILED_DESCRIPTION,
+            ) from exc
         except httpx.TimeoutException as exc:
             raise TelegramRequestError(
                 "Telegram API request failed.",
@@ -306,6 +349,7 @@ class TelegramClient:
         description = str(description_raw) if description_raw is not None else ""
         error_code_raw = data.get("error_code")
         error_code = int(error_code_raw) if isinstance(error_code_raw, int) else None
+        retry_after = _extract_retry_after(data)
         lowered = description.lower()
         if "message is not modified" in lowered:
             raise TelegramMessageNotModifiedError(
@@ -321,6 +365,7 @@ class TelegramClient:
             http_status=response.status_code,
             error_code=error_code,
             description=description or "unknown Telegram API error",
+            retry_after=retry_after,
         )
 
     def _extract_document_ref(self, *, data: dict) -> TelegramDocumentRef:
