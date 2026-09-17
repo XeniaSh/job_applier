@@ -1450,3 +1450,90 @@ def test_current_location_sponsorship_does_not_use_netherlands_hsm() -> None:
     assert relocate.value == "Yes"
     assert netherlands.fillable is True
     assert netherlands.value == "Yes, Netherlands Highly Skilled Migrant Visa"
+
+
+def _profile_without_identity_country(current_location: str, **overrides: object) -> CandidateProfile:
+    payload: dict[str, object] = dict(overrides)
+    payload["identity"] = {
+        "first_name": "Ada",
+        "last_name": "Example",
+        "email": "ada.example@example.test",
+        "phone": "+15555550100",
+        "current_location": current_location,
+        "country": None,
+    }
+    return _profile(**payload)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Will you now or in the future require sponsorship for a visa to remain in your current location?",
+        "Will you now or in the future require sponsorship for a visa to remain in your current country?",
+        "Do you now or will you in the future require sponsorship for a visa in your current residence?",
+        "Will you require a visa sponsorship for where you currently live?",
+    ],
+)
+def test_current_location_sponsorship_uses_country_named_in_current_location(label: str) -> None:
+    profile = _profile_without_identity_country(
+        "Tashkent, Uzbekistan",
+        work_eligibility={
+            "work_authorizations": [
+                {"country": "Uzbekistan", "authorized": False, "requires_sponsorship": True},
+            ],
+        },
+    )
+    mapped = map_question(
+        DiscoveredField(label=label, field_type="select", options=["Yes", "No"]),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.VISA_SPONSORSHIP
+    assert mapped.fillable is True
+    assert mapped.value == "Yes"
+    assert mapped.country == "Uzbekistan"
+
+
+def test_current_location_sponsorship_no_answer_without_identity_country_or_location_fact() -> None:
+    profile = _profile_without_identity_country(
+        "Tashkent, Uzbekistan",
+        work_eligibility={"work_authorizations": []},
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Will you now or in the future require sponsorship for a visa to remain in your current location?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.VISA_SPONSORSHIP
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason == (
+        "current-location sponsorship requires country-specific fact for current residence"
+    )
+
+
+def test_current_location_sponsorship_no_answer_when_location_country_does_not_match_fact() -> None:
+    profile = _profile_without_identity_country(
+        "Tashkent, Uzbekistan",
+        work_eligibility={
+            "work_authorizations": [
+                {"country": "Netherlands", "authorized": False, "requires_sponsorship": True},
+            ],
+        },
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Will you now or in the future require sponsorship for a visa to remain in your current location?",
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.VISA_SPONSORSHIP
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason == (
+        "current-location sponsorship requires country-specific fact for current residence"
+    )

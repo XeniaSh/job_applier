@@ -152,3 +152,79 @@ def test_sponsorship_required_for_is_country_specific() -> None:
     assert profile.sponsorship_answer_for_scope("generic") == (True, None)
     assert profile.work_authorization_for("Uzbekistan") is None
     assert profile.relocation_answer_for("Netherlands") is True
+
+
+def test_current_location_sponsorship_falls_back_to_location_country_without_identity_country() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Amsterdam, Netherlands",
+            "country": None,
+        },
+        work_eligibility={
+            "work_authorizations": [
+                {"country": "Netherlands", "authorized": False, "requires_sponsorship": True},
+            ],
+        },
+    )
+    assert profile.identity.country is None
+    assert profile.sponsorship_answer_for_scope("current") == (True, "Netherlands")
+
+
+def test_current_location_sponsorship_fallback_is_fail_closed_without_matching_fact() -> None:
+    no_facts = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Amsterdam, Netherlands",
+            "country": None,
+        },
+        work_eligibility={"work_authorizations": []},
+    )
+    assert no_facts.sponsorship_answer_for_scope("current") == (None, None)
+
+    mismatched = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Amsterdam, Netherlands",
+            "country": None,
+        },
+        work_eligibility={
+            "work_authorizations": [
+                {"country": "Germany", "authorized": True, "requires_sponsorship": False},
+            ],
+        },
+    )
+    assert mismatched.sponsorship_answer_for_scope("current") == (None, None)
+
+
+def test_current_location_sponsorship_fallback_does_not_use_residence_or_citizenship() -> None:
+    """Being physically located somewhere is not a citizenship/residence inference shortcut.
+
+    The fallback only matches an explicit work_authorizations fact; a
+    generic requires_visa_sponsorship flag or citizenship must not leak in.
+    """
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Amsterdam, Netherlands",
+            "country": None,
+        },
+        work_eligibility={
+            "citizenship": ["Netherlands"],
+            "requires_visa_sponsorship": True,
+            "work_authorizations": [],
+        },
+    )
+    assert profile.sponsorship_answer_for_scope("current") == (None, None)
