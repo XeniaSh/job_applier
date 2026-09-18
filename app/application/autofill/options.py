@@ -3,6 +3,10 @@ from __future__ import annotations
 import re
 
 from app.application.candidate_profile import (
+    REMOTE_ARRANGEMENT_HYBRID_ONSITE,
+    REMOTE_ARRANGEMENT_OPEN_ONSITE_OR_LISTED,
+    REMOTE_ARRANGEMENT_REMOTE_IN_LISTED_COUNTRIES,
+    REMOTE_ARRANGEMENT_REMOTE_OUTSIDE_LISTED_COUNTRIES,
     canonical_academic_level,
     countries_mentioned,
     normalize_country_name,
@@ -271,15 +275,56 @@ def option_implied_country(option: str) -> str | None:
     return None
 
 
+_RELOCATION_ALREADY_TERMS = (
+    "already relocated",
+    "already live",
+    "already living",
+    "already reside",
+    "already residing",
+    "already based",
+)
+_RELOCATION_INTENT_TERMS = (
+    "would like to relocate",
+    "want to relocate",
+    "wish to relocate",
+    "willing to relocate",
+    "and relocate",
+    "and would relocate",
+)
+
+
+def sponsorship_option_relocation_intent(option: str) -> bool | None:
+    """Whether a sponsorship option's own text implies future relocation intent
+    (True), already-relocated/resident status (False), or neither (None).
+
+    Used only to disambiguate between multiple otherwise-generic "Yes" options
+    that differ solely on relocation timing (e.g. "I need a visa and I would
+    like to relocate" vs "I need a visa but I have already relocated").
+    """
+    lowered = option.lower()
+    if any(term in lowered for term in _RELOCATION_ALREADY_TERMS):
+        return False
+    if any(term in lowered for term in _RELOCATION_INTENT_TERMS):
+        return True
+    return None
+
+
 def match_sponsorship_option(
     value: bool,
     options: list[str],
     referenced_country: str | None = None,
+    *,
+    relocation_willing: bool | None = None,
 ) -> str | None:
     """Map a sponsorship boolean onto a Yes/No option without picking an unrelated visa.
 
     Country-specific labels such as Netherlands HSM are used only when the
-    question's referenced country matches. Generic Yes is preferred.
+    question's referenced country matches. Generic Yes is preferred. When
+    more than one generic "Yes" option remains (e.g. a form distinguishing
+    "need a visa and want to relocate" from "need a visa, already relocated"),
+    the explicit ``relocation_willing`` fact is used to pick the one that
+    matches; if it can't disambiguate, the answer stays unresolved rather than
+    guessing.
     """
     labels = [item.strip() for item in options if item and item.strip()]
     if not value:
@@ -311,7 +356,16 @@ def match_sponsorship_option(
     if not safe:
         return None
     generic = [item for item in safe if option_implied_country(item) is None]
-    return generic[0] if generic else safe[0]
+    candidates = generic if generic else safe
+    if len(candidates) == 1:
+        return candidates[0]
+    if relocation_willing is not None:
+        matched = [
+            item for item in candidates if sponsorship_option_relocation_intent(item) == relocation_willing
+        ]
+        if len(matched) == 1:
+            return matched[0]
+    return None
 
 
 def label_matches(wanted: str, option: str) -> bool:
@@ -657,3 +711,81 @@ def match_interest_option(interests: list[str], options: list[str]) -> str | Non
         if match is not None:
             return match
     return None
+
+
+_REMOTE_ARRANGEMENT_DAY_COUNT_RE = re.compile(r"\d+\s*(?:remote\s*)?days?", re.IGNORECASE)
+
+
+def classify_remote_work_arrangement_option(option: str) -> str | None:
+    """Classify one visible working-arrangement option into a canonical token.
+
+    Generic pattern matching only -- never tied to any specific company's
+    exact option wording. Returns None when the option's text doesn't clearly
+    fit one of the four categories, so an unrecognized option never gets
+    force-matched to the wrong bucket.
+    """
+    lowered = " ".join(option.lower().split())
+    has_onsite = bool(re.search(r"\bon[\s-]?site\b", lowered))
+    has_remote = "remote" in lowered
+    if has_remote and re.search(r"\boutside\b", lowered):
+        return REMOTE_ARRANGEMENT_REMOTE_OUTSIDE_LISTED_COUNTRIES
+    if has_onsite and has_remote and _REMOTE_ARRANGEMENT_DAY_COUNT_RE.search(lowered):
+        return REMOTE_ARRANGEMENT_HYBRID_ONSITE
+    if has_onsite and has_remote and "open" in lowered:
+        return REMOTE_ARRANGEMENT_OPEN_ONSITE_OR_LISTED
+    if has_onsite and has_remote and "hybrid" in lowered:
+        return REMOTE_ARRANGEMENT_HYBRID_ONSITE
+    if has_remote and not has_onsite and re.search(r"\bin\b", lowered):
+        return REMOTE_ARRANGEMENT_REMOTE_IN_LISTED_COUNTRIES
+    return None
+
+
+def match_remote_work_arrangement_option(preference: str, options: list[str]) -> str | None:
+    """Pick the one visible option matching an explicit canonical preference token.
+
+    Fails closed (returns None) unless exactly one option classifies into the
+    wanted category -- an unrecognized or ambiguous option set is left
+    unresolved rather than guessed.
+    """
+    labels = [item.strip() for item in options if item and item.strip()]
+    matches = [item for item in labels if classify_remote_work_arrangement_option(item) == preference]
+    return matches[0] if len(matches) == 1 else None
+
+
+_SKILL_SET_CUE_RE = re.compile(
+    r"\b(?:most\s+proficient|most\s+skilled|most\s+experienced|strongest(?:\s+skill)?|"
+    r"primary\s+skill|primarily\s+use|main\s+language|favou?rite\s+language)\b",
+    re.IGNORECASE,
+)
+_SKILL_SET_LIST_RE = re.compile(r":\s*(.+?)\s*\??\s*$")
+
+
+def parse_named_skill_set(text: str | None) -> list[str] | None:
+    """Extract an explicit closed set of named skills/languages/technologies
+    from a single-choice proficiency question such as "Which of these
+    languages are you most proficient in: Go, Ruby or Python?".
+
+    Requires both a proficiency/primary-skill cue and a colon-introduced
+    list; a plain multi-select tech-stack question (no colon-introduced
+    closed set) returns None. Never invents a named set -- only reads terms
+    the question itself lists.
+    """
+    haystack = text or ""
+    if not _SKILL_SET_CUE_RE.search(haystack):
+        return None
+    match = _SKILL_SET_LIST_RE.search(haystack)
+    if not match:
+        return None
+    parts = [part.strip(" ?.!") for part in _TECH_SCOPE_SPLIT_RE.split(match.group(1))]
+    parts = [part for part in parts if part]
+    return parts if len(parts) >= 2 else None
+
+
+def match_named_skill_set(named_options: list[str], known_technologies: list[str]) -> list[str]:
+    """Named options that exactly match one of the candidate's own configured
+    technology names (case-insensitive, identifier-exact so "Go" never
+    matches "Django" or similar). Returns every match so the caller can
+    detect "no match" or "ambiguous" and stay unresolved instead of guessing.
+    """
+    known_lower = {item.strip().lower() for item in known_technologies if item.strip()}
+    return [option for option in named_options if option.strip().lower() in known_lower]

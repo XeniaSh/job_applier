@@ -1546,3 +1546,282 @@ def test_current_location_sponsorship_no_answer_without_explicit_fact() -> None:
     assert mapped.unresolved_reason == (
         "current-location sponsorship requires country-specific fact for current residence"
     )
+
+
+# --- Optional current-company/current-employer stays blank without an explicit fact ---
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Current company", "Current Employer", "Present employer", "Current organization"],
+)
+def test_current_employer_stays_blank_without_explicit_fact(label: str) -> None:
+    profile = _profile()
+    mapped = map_question(DiscoveredField(label=label, name="org", field_type="text"), profile)
+    assert mapped.kind is QuestionKind.CURRENT_EMPLOYER
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_current_employer_is_never_llm_eligible() -> None:
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    profile = _profile()
+    field = DiscoveredField(label="Current company", name="org", field_type="text")
+    mapped = map_question(field, profile)
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+def test_current_employer_fills_from_explicit_profile_fact() -> None:
+    profile = _profile(employment={"current_employer": "Acme Corp"})
+    mapped = map_question(DiscoveredField(label="Current company", name="org", field_type="text"), profile)
+    assert mapped.kind is QuestionKind.CURRENT_EMPLOYER
+    assert mapped.fillable is True
+    assert mapped.value == "Acme Corp"
+
+
+def test_current_employer_does_not_shadow_employment_restrictions() -> None:
+    """"...restrictions with your current employer or a past employer?" must
+    still classify as an employment-restriction question, not current-employer.
+    """
+    profile = _profile(application_policy={"has_employment_or_post_employment_restrictions": False})
+    mapped = map_question(
+        DiscoveredField(
+            label=(
+                "Are you subject to any employment agreements and/or post-employment "
+                "restrictions with your current employer or a past employer?"
+            ),
+            field_type="select",
+            options=["Yes", "No"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.EMPLOYMENT_RESTRICTIONS
+    assert mapped.value == "No"
+
+
+# --- Working-arrangement (onsite/hybrid vs remote-scope) preference ---
+
+_WORKING_ARRANGEMENT_OPTIONS = [
+    "Onsite (+ 2 remote days per week)",
+    "Remote in France, Germany, Spain, Portugal, Italy or Serbia",
+    "Remote outside of France, Germany, Spain, Portugal, Italy or Serbia",
+    "Open to onsite or remote in France, Germany, Spain, Portugal, Italy or Serbia",
+]
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "What working arrangement are you ideally looking for? (we will discuss it during the hiring process)",
+        "What work arrangement are you ideally looking for?",
+    ],
+)
+def test_working_arrangement_picks_remote_outside_listed_countries(label: str) -> None:
+    profile = _profile(
+        application_policy={"remote_work_arrangement": {"preference": "REMOTE_OUTSIDE_LISTED_COUNTRIES"}}
+    )
+    mapped = map_question(
+        DiscoveredField(label=label, field_type="radio", required=True, options=_WORKING_ARRANGEMENT_OPTIONS),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.REMOTE_WORK_ARRANGEMENT
+    assert mapped.fillable is True
+    assert mapped.value == "Remote outside of France, Germany, Spain, Portugal, Italy or Serbia"
+
+
+def test_working_arrangement_unset_preference_is_not_fillable() -> None:
+    profile = _profile()
+    mapped = map_question(
+        DiscoveredField(
+            label="What working arrangement are you ideally looking for?",
+            field_type="radio",
+            required=True,
+            options=_WORKING_ARRANGEMENT_OPTIONS,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.REMOTE_WORK_ARRANGEMENT
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_working_arrangement_is_never_llm_eligible() -> None:
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    profile = _profile()
+    field = DiscoveredField(
+        label="What working arrangement are you ideally looking for?",
+        field_type="radio",
+        required=True,
+        options=_WORKING_ARRANGEMENT_OPTIONS,
+    )
+    mapped = map_question(field, profile)
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+def test_working_arrangement_does_not_infer_from_citizenship_or_relocation() -> None:
+    """Only the explicit remote_work_arrangement preference may answer this;
+    citizenship and generic relocation willingness must not substitute.
+    """
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Paris, France",
+            "country": "France",
+        },
+        work_eligibility={"citizenship": ["France"]},
+        application_policy={"relocation": {"willing": True}},
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="What working arrangement are you ideally looking for?",
+            field_type="radio",
+            required=True,
+            options=_WORKING_ARRANGEMENT_OPTIONS,
+        ),
+        profile,
+    )
+    assert mapped.fillable is False
+
+
+# --- Sponsorship: one option among several "Yes" options, disambiguated by
+# explicit relocation intent rather than list position ---
+
+_FIVE_OPTION_SPONSORSHIP_OPTIONS = [
+    "Yes - I need a visa and I would like to relocate",
+    "Yes - I need a visa but I have already relocated to one of your locations",
+    "No - I already have a visa or a European nationality so I can relocate",
+    "No - I do not want to relocate",
+    "No - I already have a visa or a European nationality and I already live in one of your locations",
+]
+
+
+def test_sponsorship_five_option_group_picks_first_yes_when_relocation_intent_true() -> None:
+    profile = _profile(
+        work_eligibility={"requires_visa_sponsorship": True},
+        application_policy={"relocation": {"willing": True}},
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Do you need a visa sponsorship to work in one of our locations?",
+            field_type="radio",
+            required=True,
+            options=_FIVE_OPTION_SPONSORSHIP_OPTIONS,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.VISA_SPONSORSHIP
+    assert mapped.fillable is True
+    assert mapped.value == "Yes - I need a visa and I would like to relocate"
+
+
+def test_sponsorship_five_option_group_stays_unresolved_without_relocation_fact() -> None:
+    """Two generic "Yes" options (relocate vs already relocated) must not be
+    disambiguated by list position when no relocation fact is configured.
+    """
+    profile = _profile(work_eligibility={"requires_visa_sponsorship": True})
+    mapped = map_question(
+        DiscoveredField(
+            label="Do you need a visa sponsorship to work in one of our locations?",
+            field_type="radio",
+            required=True,
+            options=_FIVE_OPTION_SPONSORSHIP_OPTIONS,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.VISA_SPONSORSHIP
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+# --- Closed named skill-set single-choice questions ---
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Which of these languages are you most proficient in: Go, Ruby or Python?",
+        "Which of these technologies are you most experienced with: Go, Ruby, or Python?",
+        "Which of these languages is your strongest: Go, Ruby or Python?",
+    ],
+)
+def test_named_skill_set_matches_explicit_primary_language(label: str) -> None:
+    profile = _profile(employment={"primary_programming_language": "Python"})
+    mapped = map_question(DiscoveredField(label=label, field_type="textarea"), profile)
+    assert mapped.kind is QuestionKind.SKILL_SET_CHOICE
+    assert mapped.fillable is True
+    assert mapped.value == "Python"
+
+
+def test_named_skill_set_never_falls_back_to_generic_tech_stack() -> None:
+    """Regression for the observed live bug: a Go/Ruby/Python question must
+    never be answered with the candidate's unrelated top skills (Java, Kotlin).
+    """
+    profile = _profile(
+        employment={
+            "professional_tech_stack": ["Java", "Kotlin", "Spring Boot"],
+            "primary_programming_language": "Java",
+        }
+    )
+    field = DiscoveredField(
+        label="Which of these languages are you most proficient in: Go, Ruby or Python?",
+        field_type="textarea",
+        required=True,
+    )
+    mapped = map_question(field, profile)
+    assert mapped.kind is QuestionKind.SKILL_SET_CHOICE
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert "Java" not in str(mapped.value)
+    assert "Kotlin" not in str(mapped.value)
+
+
+def test_named_skill_set_is_never_llm_eligible() -> None:
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    profile = _profile(employment={"professional_tech_stack": ["Java", "Kotlin"]})
+    field = DiscoveredField(
+        label="Which of these languages are you most proficient in: Go, Ruby or Python?",
+        field_type="textarea",
+        required=True,
+    )
+    mapped = map_question(field, profile)
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+def test_named_skill_set_with_options_matches_visible_option() -> None:
+    profile = _profile(employment={"technology_years": [{"technology": "Ruby", "years": 3}]})
+    mapped = map_question(
+        DiscoveredField(
+            label="Which of these languages are you most proficient in: Go, Ruby or Python?",
+            field_type="radio",
+            options=["Go", "Ruby", "Python"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.SKILL_SET_CHOICE
+    assert mapped.fillable is True
+    assert mapped.value == "Ruby"
+
+
+def test_named_skill_set_ambiguous_multi_match_uses_explicit_primary_language() -> None:
+    profile = _profile(
+        employment={
+            "professional_tech_stack": ["Go", "Ruby"],
+            "primary_programming_language": "Ruby",
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Which of these languages are you most proficient in: Go, Ruby or Python?",
+            field_type="textarea",
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.SKILL_SET_CHOICE
+    assert mapped.fillable is True
+    assert mapped.value == "Ruby"

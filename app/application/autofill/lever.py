@@ -65,6 +65,17 @@ def _safe_host_path(url: object) -> str:
         return ""
 
 
+_RADIO_OPTION_LABEL_JS = """el => {
+    const wrapped = el.closest('label');
+    if (wrapped && wrapped.innerText && wrapped.innerText.trim()) return wrapped.innerText;
+    const id = el.id;
+    if (id) {
+        const forLabel = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+        if (forLabel && forLabel.innerText && forLabel.innerText.trim()) return forLabel.innerText;
+    }
+    return '';
+}"""
+
 _QUESTION_CONTEXT_JS = """el => {
     const container = el.closest('.application-question') || el.closest('li') || el.parentElement;
     if (!container) return {label: '', required: false};
@@ -363,14 +374,8 @@ class LeverAdapter:
             checked = page.locator(f'input[type="radio"][name="{field.name}"]:checked')
             if checked.count() == 0:
                 return None
-            label_text = checked.first.evaluate(
-                """el => {
-                    const label = el.closest('label');
-                    return label ? label.innerText : '';
-                }"""
-            )
+            visible = _radio_option_label(checked.first)
             value = checked.first.get_attribute("value")
-            visible = " ".join(str(label_text or "").split())
             return visible or value
         if field.field_type == "multiselect":
             try:
@@ -526,17 +531,27 @@ def _radio_group_label(page: Page, locator: Locator, name: str) -> str:
     return _control_label(page, locator)
 
 
+def _radio_option_label(radio: Locator) -> str:
+    """Visible option text: a wrapping `<label>` first, then `label[for=id]`.
+
+    Lever renders custom-question option groups both ways depending on
+    template/posting; without the `label[for]` fallback, a non-wrapped radio
+    would read back its raw `value` attribute (which is not always the
+    visible text) instead of the option a human actually sees and picks.
+    """
+    try:
+        text = radio.evaluate(_RADIO_OPTION_LABEL_JS)
+    except PlaywrightError:
+        return ""
+    return " ".join(str(text or "").split())
+
+
 def _radio_options(page: Page, name: str) -> list[str]:
     radios = page.locator(f'input[type="radio"][name="{name}"]')
     options: list[str] = []
     for index in range(radios.count()):
         radio = radios.nth(index)
-        value = radio.get_attribute("value") or radio.evaluate(
-            """el => {
-                const label = el.closest('label');
-                return label ? label.innerText : '';
-            }"""
-        )
+        value = _radio_option_label(radio) or radio.get_attribute("value")
         if value:
             options.append(str(value).strip())
     return options
@@ -642,24 +657,25 @@ def _fill_select(locator: Locator, value: object, options: list[str]) -> bool:
 def _fill_radio(page: Page, field: DiscoveredField, value: object) -> bool:
     if not field.name:
         return False
-    wanted = value if isinstance(value, str) else ("Yes" if value else "No")
-    semantic = _semantic_bool(value)
-    if semantic is not None:
-        matched = match_yes_no(semantic, field.options)
-        if matched:
-            wanted = matched
+    if isinstance(value, bool):
+        # A raw boolean (e.g. work authorization) has no pre-resolved option
+        # text yet; map it to the visible Yes/No-style option here.
+        wanted = match_yes_no(value, field.options) or ("Yes" if value else "No")
+    else:
+        # A string value (e.g. from `_mapped_choice`/`match_sponsorship_option`)
+        # is already the exact intended option text. Re-deriving it from
+        # `_semantic_bool` here would discard that choice and fall back to
+        # the first "Yes"/"No"-prefixed option by list position -- wrong
+        # whenever a question offers more than one such option (e.g. sponsorship
+        # "Yes, want to relocate" vs "Yes, already relocated").
+        wanted = str(value)
     radios = page.locator(f'input[type="radio"][name="{field.name}"]')
     for index in range(radios.count()):
         radio = radios.nth(index)
         option_value = (radio.get_attribute("value") or "").strip()
-        label_text = radio.evaluate(
-            """el => {
-                const label = el.closest('label');
-                return label ? label.innerText : '';
-            }"""
-        )
+        label_text = _radio_option_label(radio)
         haystack = f"{option_value} {label_text}".strip()
-        if wanted.lower() == option_value.lower() or wanted.lower() == str(label_text).strip().lower():
+        if wanted.lower() == option_value.lower() or wanted.lower() == label_text.lower():
             radio.check()
             return True
         if wanted.lower() in haystack.lower():

@@ -21,6 +21,9 @@ professional_links:
 
 employment:
   current_title: Backend Engineer
+  # Optional "Current company" fields stay blank unless this is set. Never
+  # guessed from employment history, resume text, or LLM answer generation.
+  current_employer: null
   years_of_experience: 7
   years_of_relevant_experience: 7
   notice_period: "30 days"
@@ -89,6 +92,12 @@ application_policy:
     willing: true
   office_work:
     willing: true
+  # Onsite/hybrid vs remote-scope preference for questions such as "What
+  # working arrangement are you ideally looking for?". One of HYBRID_ONSITE,
+  # REMOTE_IN_LISTED_COUNTRIES, REMOTE_OUTSIDE_LISTED_COUNTRIES,
+  # OPEN_ONSITE_OR_LISTED_COUNTRIES, or null (unset -- leave unresolved).
+  remote_work_arrangement:
+    preference: null
   privacy_acknowledgement:
     auto_acknowledge_required: true
   default_no_undeclared_affiliations: true

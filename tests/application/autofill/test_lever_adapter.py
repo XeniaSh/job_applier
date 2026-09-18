@@ -13,6 +13,7 @@ from app.application.autofill.models import FieldClassification
 from app.application.candidate_profile import CandidateProfile
 
 LEVER_FIXTURE = Path("tests/fixtures/autofill/lever_application.html")
+LEVER_LABEL_FOR_RADIOS_FIXTURE = Path("tests/fixtures/autofill/lever_application_label_for_radios.html")
 LEVER_JOB_DETAIL_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail.html")
 LEVER_JOB_DETAIL_DEAD_END_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail_dead_end.html")
 LEVER_JOB_DETAIL_REAL_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail_real.html")
@@ -213,6 +214,53 @@ def test_radio_work_authorization_and_unmapped_checkbox() -> None:
         )
         assert adapter.fill_field(session.page, unknown) is False
         assert adapter.read_back(session.page, work_auth) == "Yes"
+    finally:
+        session.close()
+
+
+def test_label_for_radio_group_discovers_one_field_with_visible_options() -> None:
+    """A five-option `label[for=id]` radio group (not wrapped) must still
+    discover as exactly one semantic field, with visible option text -- not
+    the group's raw, non-human `value` attributes.
+    """
+    session = _open(LEVER_LABEL_FOR_RADIOS_FIXTURE)
+    try:
+        fields = LeverAdapter().discover_fields(session.page)
+        sponsorship_fields = [item for item in fields if item.name == "cards[sponsorship]"]
+        assert len(sponsorship_fields) == 1
+        sponsorship = sponsorship_fields[0]
+        assert sponsorship.field_type == "radio"
+        assert sponsorship.required is True
+        assert sponsorship.options == [
+            "Yes - I need a visa and I would like to relocate",
+            "Yes - I need a visa but I have already relocated to one of your locations",
+            "No - I already have a visa or a European nationality so I can relocate",
+            "No - I do not want to relocate",
+            "No - I already have a visa or a European nationality and I already live in one of your locations",
+        ]
+        assert "opt0" not in sponsorship.options
+    finally:
+        session.close()
+
+
+def test_label_for_radio_sponsorship_fills_and_reads_back_first_yes_option() -> None:
+    """Explicit sponsorship-needed + wants-to-relocate facts must select the
+    "need a visa and would like to relocate" option, filled and verified
+    exactly once for the whole group -- not by iterating every option.
+    """
+    session = _open(LEVER_LABEL_FOR_RADIOS_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        profile = _profile(
+            work_eligibility={"requires_visa_sponsorship": True},
+            application_policy={"relocation": {"willing": True}},
+        )
+        fields = adapter.discover_fields(session.page)
+        sponsorship = _field(fields, "visa sponsorship")
+        classified = classify_field(sponsorship, profile)
+        assert classified.value == "Yes - I need a visa and I would like to relocate"
+        assert adapter.fill_field(session.page, classified) is True
+        assert adapter.read_back(session.page, sponsorship) == "Yes - I need a visa and I would like to relocate"
     finally:
         session.close()
 

@@ -278,6 +278,9 @@ class Employment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     current_title: str | None = None
+    # Explicit current-employer name. Unset stays unresolved; never guessed
+    # from employment history, resume text, or LLM answer generation.
+    current_employer: str | None = None
     years_of_experience: float | None = None
     years_of_relevant_experience: float | None = None
     notice_period: str | None = None
@@ -292,7 +295,9 @@ class Employment(BaseModel):
     technology_years: list[TechnologyExperience] = Field(default_factory=list)
     salary_expectations: SalaryExpectations | None = None
 
-    @field_validator("current_title", "notice_period", "highest_academic_level", "primary_programming_language")
+    @field_validator(
+        "current_title", "current_employer", "notice_period", "highest_academic_level", "primary_programming_language"
+    )
     @classmethod
     def optional_stripped_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -508,6 +513,57 @@ class RelocationPolicy(BaseModel):
     willing: bool | None = None
 
 
+REMOTE_ARRANGEMENT_HYBRID_ONSITE = "HYBRID_ONSITE"
+REMOTE_ARRANGEMENT_REMOTE_IN_LISTED_COUNTRIES = "REMOTE_IN_LISTED_COUNTRIES"
+REMOTE_ARRANGEMENT_REMOTE_OUTSIDE_LISTED_COUNTRIES = "REMOTE_OUTSIDE_LISTED_COUNTRIES"
+REMOTE_ARRANGEMENT_OPEN_ONSITE_OR_LISTED = "OPEN_ONSITE_OR_LISTED_COUNTRIES"
+_REMOTE_ARRANGEMENT_TOKENS = frozenset(
+    {
+        REMOTE_ARRANGEMENT_HYBRID_ONSITE,
+        REMOTE_ARRANGEMENT_REMOTE_IN_LISTED_COUNTRIES,
+        REMOTE_ARRANGEMENT_REMOTE_OUTSIDE_LISTED_COUNTRIES,
+        REMOTE_ARRANGEMENT_OPEN_ONSITE_OR_LISTED,
+    }
+)
+
+
+class RemoteWorkArrangementPolicy(BaseModel):
+    """Explicit preference among onsite/hybrid, remote confined to specific
+    listed countries, remote outside any such list, or open to either onsite
+    or remote-in-listed-countries.
+
+    Unset (``preference is None``) means do not answer: this fails closed by
+    design, since a working-arrangement question is a geo/legal-adjacent
+    question and must never be guessed. Never inferred from citizenship,
+    current_location, or the generic relocation/office_work willingness
+    policies -- those answer separate, narrower questions.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    preference: str | None = None
+
+    @field_validator("preference", mode="before")
+    @classmethod
+    def canonicalize_preference(cls, value: object) -> object:
+        if value is None:
+            return None
+        cleaned = " ".join(str(value).strip().upper().replace("-", "_").split()).replace(" ", "_")
+        return cleaned or None
+
+    @field_validator("preference")
+    @classmethod
+    def known_preference(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value not in _REMOTE_ARRANGEMENT_TOKENS:
+            raise ValueError(
+                f"remote_work_arrangement.preference must be one of {sorted(_REMOTE_ARRANGEMENT_TOKENS)}, "
+                f"got {value!r}."
+            )
+        return value
+
+
 class OfficeWorkPolicy(BaseModel):
     """Willingness to meet a stated office/hybrid attendance requirement.
 
@@ -618,6 +674,7 @@ class ApplicationPolicy(BaseModel):
 
     relocation: RelocationPolicy = Field(default_factory=RelocationPolicy)
     office_work: OfficeWorkPolicy = Field(default_factory=OfficeWorkPolicy)
+    remote_work_arrangement: RemoteWorkArrangementPolicy = Field(default_factory=RemoteWorkArrangementPolicy)
     privacy_acknowledgement: PrivacyAcknowledgementPolicy = Field(
         default_factory=PrivacyAcknowledgementPolicy
     )
@@ -943,6 +1000,14 @@ class CandidateProfile(BaseModel):
     def office_work_answer(self) -> bool | None:
         """Answer office/hybrid attendance questions. Does not change location or work auth."""
         return self.application_policy.office_work.willing
+
+    def remote_work_arrangement_preference(self) -> str | None:
+        """Explicit onsite/hybrid vs remote-scope preference. See RemoteWorkArrangementPolicy."""
+        return self.application_policy.remote_work_arrangement.preference
+
+    def current_employer_for_autofill(self) -> str | None:
+        """Explicit current-employer name. Never guessed from employment history."""
+        return self.employment.current_employer
 
     def may_auto_acknowledge_required_privacy(self) -> bool:
         if self.application_consent.privacy_data_processing is False:

@@ -14,14 +14,17 @@ from app.application.autofill.options import (
     find_known_technologies_in_text,
     match_application_source,
     match_interest_option,
+    match_named_skill_set,
     match_option,
     match_prefer_not_to_disclose_gender,
+    match_remote_work_arrangement_option,
     match_years_option,
     match_yes_no,
     match_affirmative_option,
     match_sponsorship_option,
     parse_located_in_places,
     parse_max_choices,
+    parse_named_skill_set,
     parse_relocation_destination,
     parse_sponsorship_scope,
     parse_years_experience_technology,
@@ -62,6 +65,9 @@ class QuestionKind(StrEnum):
     FIELD_OF_INTEREST = "field_of_interest"
     RELOCATION = "relocation"
     OFFICE_WORK = "office_work"
+    REMOTE_WORK_ARRANGEMENT = "remote_work_arrangement"
+    CURRENT_EMPLOYER = "current_employer"
+    SKILL_SET_CHOICE = "skill_set_choice"
     EMPLOYEE_RELATIONSHIP = "employee_relationship"
     EMPLOYEE_RELATIONSHIP_DETAILS = "employee_relationship_details"
     PRIOR_AFFILIATION = "prior_affiliation"
@@ -117,6 +123,9 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.FIELD_OF_INTEREST,
         QuestionKind.RELOCATION,
         QuestionKind.OFFICE_WORK,
+        QuestionKind.REMOTE_WORK_ARRANGEMENT,
+        QuestionKind.CURRENT_EMPLOYER,
+        QuestionKind.SKILL_SET_CHOICE,
     }
 )
 
@@ -276,7 +285,12 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         value: QuestionValue = None
         if answer is not None:
             if field.options:
-                value = match_sponsorship_option(answer, field.options, country)
+                value = match_sponsorship_option(
+                    answer,
+                    field.options,
+                    country,
+                    relocation_willing=profile.relocation_willingness(),
+                )
             else:
                 value = answer
         return MappedQuestion(
@@ -346,6 +360,29 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         value = match_years_option(years, field.options)
         return MappedQuestion(kind=QuestionKind.YEARS_EXPERIENCE, value=value, fillable=bool(value))
 
+    if _is_named_skill_set(text):
+        named = parse_named_skill_set(field.label) or parse_named_skill_set(field.context)
+        if not named:
+            return MappedQuestion(kind=QuestionKind.SKILL_SET_CHOICE, fillable=False)
+        matches = match_named_skill_set(named, profile.known_technology_names())
+        if len(matches) > 1:
+            primary = profile.primary_programming_language()
+            if primary and any(item.strip().lower() == primary.strip().lower() for item in matches):
+                matches = [item for item in matches if item.strip().lower() == primary.strip().lower()]
+        if len(matches) != 1:
+            return MappedQuestion(
+                kind=QuestionKind.SKILL_SET_CHOICE,
+                fillable=False,
+                unresolved_reason=(
+                    f"named skill set ({', '.join(named)}) has no single explicit "
+                    "matching configured technology"
+                ),
+            )
+        value = matches[0]
+        if field.options:
+            value = match_option(value, field.options) or value
+        return MappedQuestion(kind=QuestionKind.SKILL_SET_CHOICE, value=value, fillable=True)
+
     if _is_academic_level(text):
         level = profile.awarded_academic_level()
         if not level:
@@ -407,6 +444,21 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             value=_mapped_choice(answer, field.options) if answer is not None else None,
             fillable=answer is not None,
         )
+
+    if _is_remote_work_arrangement(text):
+        preference = profile.remote_work_arrangement_preference()
+        if preference is None:
+            return MappedQuestion(kind=QuestionKind.REMOTE_WORK_ARRANGEMENT, fillable=False)
+        value = match_remote_work_arrangement_option(preference, field.options) if field.options else None
+        return MappedQuestion(
+            kind=QuestionKind.REMOTE_WORK_ARRANGEMENT,
+            value=value,
+            fillable=bool(value),
+        )
+
+    if _is_current_employer(text):
+        value = profile.current_employer_for_autofill()
+        return MappedQuestion(kind=QuestionKind.CURRENT_EMPLOYER, value=value, fillable=bool(value))
 
     override = profile.question_override_answer(_search_text(field))
     if override is not None:
@@ -736,6 +788,14 @@ def _is_academic_level(text: str) -> bool:
     )
 
 
+def _is_named_skill_set(text: str) -> bool:
+    """A single-choice question naming a closed set of skills/languages after
+    a colon, e.g. "Which of these languages are you most proficient in: Go,
+    Ruby or Python?". See ``parse_named_skill_set`` for the actual parse.
+    """
+    return parse_named_skill_set(text) is not None
+
+
 def _is_tech_stack(text: str) -> bool:
     return any(
         term in text
@@ -811,6 +871,43 @@ def _is_office_work(text: str) -> bool:
         )
     )
     return hybrid or office_days or onsite
+
+
+def _is_remote_work_arrangement(text: str) -> bool:
+    """A single question offering onsite/hybrid vs remote-in-listed-countries
+    vs remote-outside-listed-countries vs open-to-either, e.g. "What working
+    arrangement are you ideally looking for?". Generic phrasing, not tied to
+    any specific company's option wording.
+    """
+    if _is_relocation(text) or _is_work_authorization(text) or _is_sponsorship(text):
+        return False
+    return "working arrangement" in text or "work arrangement" in text
+
+
+def _is_current_employer(text: str) -> bool:
+    """Optional current-employer/current-company name field. Never confused
+    with prior-affiliation, employment-restriction, or employee-relationship
+    questions, which are matched earlier and take precedence.
+    """
+    if (
+        _is_prior_affiliation(text)
+        or _is_employment_restriction(text)
+        or _is_employee_relationship(text)
+        or _is_employee_relationship_details(text)
+        or _is_work_authorization(text)
+        or _is_sponsorship(text)
+    ):
+        return False
+    return any(
+        term in text
+        for term in (
+            "current company",
+            "current employer",
+            "present employer",
+            "current organization",
+            "current organisation",
+        )
+    )
 
 
 def _is_employee_relationship_details(text: str) -> bool:
@@ -1020,6 +1117,11 @@ def _is_llm_forbidden_text(text: str) -> bool:
         "open-source",
         "primary programming",
         "gitlab username",
+        "current company",
+        "current employer",
+        "present employer",
+        "working arrangement",
+        "work arrangement",
     )
     return any(term in text for term in terms)
 

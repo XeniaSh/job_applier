@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Apply — Example Corp</title>
+</head>
+<body>
+  <div class="application-page">
+    <h2>Senior Backend Engineer</h2>
+    <form id="application-form" method="post" action="/apply">
+      <div class="section page-centered">
+        <div class="section-wrapper">
+          <div class="application-question">
+            <label for="name">Full name<span class="required">*</span></label>
+            <input id="name" name="name" type="text" class="app-input" required>
+          </div>
+        </div>
+      </div>
+      <div class="section page-centered application-additional">
+        <div class="section-wrapper">
+          <!--
+            Radio options here are standalone `<input>` elements associated
+            via `label[for=id]`, not wrapped inside a `<label>`. The `value`
+            attributes are deliberately non-human codes so a test can prove
+            the discovered option text and the fill/read-back path come from
+            the visible `label[for]` text, not the raw `value`.
+          -->
+          <div class="application-question">
+            <div class="application-label">Do you need a visa sponsorship to work in one of our locations?<span class="required">*</span></div>
+            <div class="radio-btn-group">
+              <input type="radio" id="sponsorship-0" name="cards[sponsorship]" value="opt0" required>
+              <label for="sponsorship-0">Yes - I need a visa and I would like to relocate</label>
+              <input type="radio" id="sponsorship-1" name="cards[sponsorship]" value="opt1">
+              <label for="sponsorship-1">Yes - I need a visa but I have already relocated to one of your locations</label>
+              <input type="radio" id="sponsorship-2" name="cards[sponsorship]" value="opt2">
+              <label for="sponsorship-2">No - I already have a visa or a European nationality so I can relocate</label>
+              <input type="radio" id="sponsorship-3" name="cards[sponsorship]" value="opt3">
+              <label for="sponsorship-3">No - I do not want to relocate</label>
+              <input type="radio" id="sponsorship-4" name="cards[sponsorship]" value="opt4">
+              <label for="sponsorship-4">No - I already have a visa or a European nationality and I already live in one of your locations</label>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="section page-centered">
+        <div class="section-wrapper">
+          <div class="application-question">
+            <label for="resume-upload-input">Resume/CV<span class="required">*</span></label>
+            <input id="resume-upload-input" class="resume-upload-input-file" name="resume" type="file" required>
+          </div>
+        </div>
+      </div>
+      <button type="submit" id="submit_app" class="postings-btn template-btn-submit">Submit application</button>
+    </form>
+  </div>
+</body>
+</html>
