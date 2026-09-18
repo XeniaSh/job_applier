@@ -48,6 +48,17 @@ def _safe_host(url: object) -> str:
         return ""
 
 
+def _safe_host_path(url: object) -> str:
+    """Hostname + path only -- never userinfo, query, or fragment."""
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        return f"{parsed.hostname or ''}{parsed.path}"
+    except ValueError:
+        return ""
+
+
 _QUESTION_CONTEXT_JS = """el => {
     const container = el.closest('.application-question') || el.closest('li') || el.parentElement;
     if (!container) return {label: '', required: false};
@@ -130,7 +141,7 @@ class LeverAdapter:
 
     def recognize(self, page: Page) -> bool:
         result, reason = _application_page_check(page)
-        logger.info(
+        logger.warning(
             "lever_prepare stage=form_recognition result=%s reason=%s page_host=%s",
             result,
             reason,
@@ -153,7 +164,7 @@ class LeverAdapter:
         Local fixtures skip the extra settle.
         """
         is_job_detail = is_lever_job_detail_page(page)
-        logger.info(
+        logger.warning(
             "lever_prepare stage=detail_detection is_job_detail=%s page_host=%s",
             is_job_detail,
             _safe_host(page.url),
@@ -170,39 +181,47 @@ class LeverAdapter:
         page.wait_for_timeout(500)
 
     def _navigate_from_job_detail(self, page: Page) -> None:
+        """Attempt the job-detail -> application-form transition and always log a
+        navigation-stage record at the end, even when the Apply locator is absent
+        or the click raises, so a single run identifies every failure stage.
+        """
+        pre_url = page.url
         apply_locator_count = page.locator(_JOB_DETAIL_APPLY_SELECTOR).count()
-        logger.info(
+        logger.warning(
             "lever_prepare stage=apply_action apply_locator_count=%s",
             apply_locator_count,
         )
         action = _job_detail_apply_action(page)
-        if action is None:
-            return
-        pre_url = page.url
+        click_attempted = False
         click_raised: str | None = None
-        try:
-            action.click(timeout=5_000)
-        except PlaywrightError as exc:
-            click_raised = type(exc).__name__
-        logger.info(
-            "lever_prepare stage=apply_action click_attempted=True click_raised=%s",
-            click_raised,
-        )
-        if click_raised is not None:
-            return
-        timeout = 2_000 if page.url.startswith("file:") else 15_000
-        form_ready_selector_found = True
-        try:
-            page.wait_for_selector(_FORM_READY_SELECTOR, timeout=timeout)
-        except PlaywrightTimeoutError:
-            form_ready_selector_found = False
+        form_ready_selector_found = False
+        if action is not None:
+            click_attempted = True
+            try:
+                action.click(timeout=5_000)
+            except PlaywrightError as exc:
+                click_raised = type(exc).__name__
+            logger.warning(
+                "lever_prepare stage=apply_action click_attempted=%s click_raised=%s",
+                click_attempted,
+                click_raised,
+            )
+            if click_raised is None:
+                timeout = 2_000 if page.url.startswith("file:") else 15_000
+                try:
+                    page.wait_for_selector(_FORM_READY_SELECTOR, timeout=timeout)
+                    form_ready_selector_found = True
+                except PlaywrightTimeoutError:
+                    form_ready_selector_found = False
         post_url = page.url
-        logger.info(
-            "lever_prepare stage=navigation pre_host=%s post_host=%s url_changed=%s "
-            "form_ready_selector_found=%s",
-            _safe_host(pre_url),
-            _safe_host(post_url),
+        logger.warning(
+            "lever_prepare stage=navigation pre=%s post=%s url_changed=%s "
+            "click_attempted=%s click_raised=%s form_ready_selector_found=%s",
+            _safe_host_path(pre_url),
+            _safe_host_path(post_url),
             pre_url != post_url,
+            click_attempted,
+            click_raised,
             form_ready_selector_found,
         )
 

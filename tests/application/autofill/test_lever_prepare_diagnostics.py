@@ -100,16 +100,17 @@ def _job_detail_page(
 
 def test_prepare_page_logs_detail_detection_for_application_page(caplog) -> None:
     page = _application_form_page()
-    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         LeverAdapter().prepare_page(page)
     detail_logs = [r.getMessage() for r in caplog.records if "stage=detail_detection" in r.getMessage()]
     assert len(detail_logs) == 1
     assert "is_job_detail=False" in detail_logs[0]
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
 
 
 def test_prepare_page_navigates_and_logs_all_stages(caplog) -> None:
     page = _job_detail_page()
-    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         LeverAdapter().prepare_page(page)
 
     messages = [r.getMessage() for r in caplog.records]
@@ -125,28 +126,36 @@ def test_prepare_page_navigates_and_logs_all_stages(caplog) -> None:
     assert "url_changed=True" in nav_log
     assert "form_ready_selector_found=True" in nav_log
     assert page.url == "file:///tmp/lever_application.html"
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
 
 
-def test_prepare_page_no_apply_locator_skips_click(caplog) -> None:
+def test_prepare_page_no_apply_locator_still_logs_navigation_stage(caplog) -> None:
     page = _job_detail_page(apply_count=0)
-    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         LeverAdapter()._navigate_from_job_detail(page)
 
     messages = [r.getMessage() for r in caplog.records]
     assert any("apply_locator_count=0" in m for m in messages)
-    assert not any("click_attempted" in m for m in messages)
-    assert not any("stage=navigation" in m for m in messages)
+    assert not any("stage=apply_action" in m and "click_attempted" in m for m in messages)
+    nav_log = next(m for m in messages if "stage=navigation" in m)
+    assert "click_attempted=False" in nav_log
+    assert "click_raised=None" in nav_log
+    assert "form_ready_selector_found=False" in nav_log
+    assert "url_changed=False" in nav_log
 
 
-def test_navigate_logs_click_exception_without_navigation_stage(caplog) -> None:
+def test_navigate_logs_click_exception_and_navigation_stage(caplog) -> None:
     page = _job_detail_page(click_error=PlaywrightError("boom"))
-    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         LeverAdapter()._navigate_from_job_detail(page)
 
     messages = [r.getMessage() for r in caplog.records]
-    click_log = next(m for m in messages if "click_attempted" in m)
+    click_log = next(m for m in messages if "click_attempted" in m and "stage=apply_action" in m)
     assert "click_raised=Error" in click_log
-    assert not any("stage=navigation" in m for m in messages)
+    nav_log = next(m for m in messages if "stage=navigation" in m)
+    assert "click_attempted=True" in nav_log
+    assert "click_raised=Error" in nav_log
+    assert "form_ready_selector_found=False" in nav_log
 
 
 def test_navigate_logs_form_ready_not_found(caplog) -> None:
@@ -154,18 +163,19 @@ def test_navigate_logs_form_ready_not_found(caplog) -> None:
         form_ready_error=PlaywrightTimeoutError("timeout"),
         navigate_to="file:///tmp/lever_dead_end.html",
     )
-    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         LeverAdapter()._navigate_from_job_detail(page)
 
     messages = [r.getMessage() for r in caplog.records]
     nav_log = next(m for m in messages if "stage=navigation" in m)
     assert "form_ready_selector_found=False" in nav_log
     assert "url_changed=True" in nav_log
+    assert "lever_dead_end.html" in nav_log
 
 
 def test_recognize_logs_reason_for_application_form_selector(caplog) -> None:
     page = _application_form_page()
-    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         result = LeverAdapter().recognize(page)
 
     assert result is True
@@ -173,11 +183,12 @@ def test_recognize_logs_reason_for_application_form_selector(caplog) -> None:
     form_recognition_log = next(m for m in messages if "stage=form_recognition" in m)
     assert "result=True" in form_recognition_log
     assert "reason=application_form_selector" in form_recognition_log
+    assert caplog.records[0].levelno == logging.WARNING
 
 
 def test_recognize_logs_no_match_reason_for_unrelated_page(caplog) -> None:
     page = FakePage(url="file:///tmp/unrelated.html")
-    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         result = LeverAdapter().recognize(page)
 
     assert result is False
@@ -185,3 +196,17 @@ def test_recognize_logs_no_match_reason_for_unrelated_page(caplog) -> None:
     form_recognition_log = next(m for m in messages if "stage=form_recognition" in m)
     assert "result=False" in form_recognition_log
     assert "reason=no_match" in form_recognition_log
+
+
+def test_navigation_stage_excludes_query_and_fragment_from_resulting_url(caplog) -> None:
+    page = _job_detail_page(
+        navigate_to="file:///tmp/lever_application.html?utm_source=x&token=secret#section",
+    )
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        LeverAdapter()._navigate_from_job_detail(page)
+
+    nav_log = next(r.getMessage() for r in caplog.records if "stage=navigation" in r.getMessage())
+    assert "utm_source" not in nav_log
+    assert "secret" not in nav_log
+    assert "section" not in nav_log
+    assert "lever_application.html" in nav_log

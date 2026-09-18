@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from app.application.autofill.browser import BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.greenhouse import GreenhouseAdapter
@@ -595,3 +597,86 @@ def test_default_adapter_for_source_selects_greenhouse_without_dispatch_log(capl
     assert not any(
         record.getMessage().startswith("autofill_adapter_dispatch") for record in caplog.records
     )
+
+
+class _LeverFakeLocator:
+    def count(self) -> int:
+        return 0
+
+    @property
+    def first(self) -> "_LeverFakeLocator":
+        return self
+
+    def inner_text(self) -> str:
+        return ""
+
+
+class _LeverFakePage:
+    """Minimal double for the same prepare_page -> recognize path the real
+    Telegram-triggered runtime drives, without Chromium or network access.
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    def locator(self, selector: str) -> _LeverFakeLocator:
+        _ = selector
+        return _LeverFakeLocator()
+
+    def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:
+        _ = selector, timeout
+        raise PlaywrightTimeoutError("no application form present")
+
+    def title(self) -> str:
+        return ""
+
+
+class _LeverJobDetailResolver:
+    """Resolves to a Lever-hosted URL carrying a query string and fragment,
+    like a real tracked-link application URL would.
+    """
+
+    def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
+        url = "https://jobs.lever.co/qonto/1234-secret-slug?utm_source=telegram#top"
+        return ResolvedVacancy(
+            source=source,
+            external_id=external_id,
+            title="Backend Engineer",
+            company="Qonto",
+            url=url,
+            application_url=url,
+        )
+
+
+def test_service_lever_source_dispatches_and_logs_unsupported_form_diagnostics(caplog) -> None:
+    """Exercises the same source-aware dispatch -> LeverAdapter.prepare_page ->
+    recognize path the real Telegram Prepare runtime uses, ending in the
+    generic UNSUPPORTED_FORM failure. Confirms every diagnostic stage
+    appears at warning level and never leaks the query string or fragment.
+    """
+    session = _FakeSession()
+    session.page = _LeverFakePage(url="https://jobs.lever.co/qonto/1234-secret-slug?utm_source=telegram#top")
+    service = AutofillService(
+        resolver=_LeverJobDetailResolver(),
+        profile_loader=_profile,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    with caplog.at_level(logging.WARNING):
+        result = service.run("target_company:lever:qonto", "1234", keep_open=False)
+
+    assert result.status is AutofillStatus.FAILED
+    assert result.failure_reason is AutofillFailureReason.UNSUPPORTED_FORM
+
+    messages = [r.getMessage() for r in caplog.records]
+    dispatch_log = next(m for m in messages if m.startswith("autofill_adapter_dispatch"))
+    assert "adapter=LeverAdapter" in dispatch_log
+    detail_log = next(m for m in messages if "stage=detail_detection" in m)
+    assert "is_job_detail=False" in detail_log
+    form_recognition_log = next(m for m in messages if "stage=form_recognition" in m)
+    assert "result=False" in form_recognition_log
+    assert "reason=no_match" in form_recognition_log
+    assert "jobs.lever.co" in detail_log
+    assert "jobs.lever.co" in form_recognition_log
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+    assert not any("utm_source" in m or "#top" in m for m in messages)
