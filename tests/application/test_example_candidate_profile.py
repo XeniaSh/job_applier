@@ -16,6 +16,8 @@ def test_example_profile_yaml_loads_into_schema() -> None:
     assert profile.identity.first_name == "Ada"
     assert profile.identity.email.endswith("@example.test")
     assert profile.work_eligibility.requires_visa_sponsorship is False
+    assert profile.work_eligibility.current_location_requires_visa_sponsorship is False
+    assert profile.sponsorship_answer_for_scope("current") == (False, "Germany")
     assert profile.work_authorization_for("Germany") is True
     assert profile.application_files.default_resume.endswith(".pdf")
     assert profile.fill_sensitive_fields is False

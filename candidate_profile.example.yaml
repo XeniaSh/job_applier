@@ -68,6 +68,7 @@ work_eligibility:
       authorized: true
       requires_sponsorship: false
   requires_visa_sponsorship: false
+  current_location_requires_visa_sponsorship: false
 
 application_files:
   default_resume: resumes/example_java_backend.pdf

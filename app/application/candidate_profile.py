@@ -412,6 +412,9 @@ class WorkEligibility(BaseModel):
     citizenship: list[str] = Field(default_factory=list)
     work_authorizations: list[CountryWorkAuthorization] = Field(default_factory=list)
     requires_visa_sponsorship: bool | None = None
+    # Explicit fact for "sponsorship to remain in your current location" questions.
+    # Unset stays unresolved; never inferred from current_location/country/work_authorizations.
+    current_location_requires_visa_sponsorship: bool | None = None
 
     @field_validator("citizenship", mode="before")
     @classmethod
@@ -760,34 +763,6 @@ class CandidateProfile(BaseModel):
                 return item.requires_sponsorship
         return None
 
-    def _current_location_fact_country(self) -> str | None:
-        """A country named in current_location that has a work-authorization fact.
-
-        Only used as a fallback for current-location sponsorship scope when
-        identity.country is unset. Matches only against countries the
-        candidate already has a work_authorizations entry for, so this
-        never guesses a country from free text alone; an unmatched or
-        ambiguous (multiple matching) location stays None.
-        """
-        location = self.identity.current_location
-        if not location:
-            return None
-        fact_countries = {
-            normalize_country_name(item.country): item.country
-            for item in self.work_eligibility.work_authorizations
-            if item.country
-        }
-        if not fact_countries:
-            return None
-        matched: set[str] = set()
-        for part in re.split(r"[,/;|]", location):
-            cleaned = normalize_country_name(_strip_leading_the(part))
-            if cleaned in fact_countries:
-                matched.add(cleaned)
-        if len(matched) == 1:
-            return fact_countries[next(iter(matched))]
-        return None
-
     def sponsorship_answer_for_scope(
         self,
         scope: str,
@@ -795,12 +770,14 @@ class CandidateProfile(BaseModel):
     ) -> tuple[bool | None, str | None]:
         """Return (answer, referenced_country) for a parsed sponsorship scope.
 
-        ``current`` uses residence country only. ``country`` uses the named
-        country. ``generic`` may use the global requires_visa_sponsorship flag.
+        ``current`` uses only the explicit
+        work_eligibility.current_location_requires_visa_sponsorship fact
+        (never identity.current_location, identity.country, citizenship, or
+        work_authorizations). ``country`` uses the named country.
+        ``generic`` may use the global requires_visa_sponsorship flag.
         """
         if scope == "current":
-            country = self.identity.country or self._current_location_fact_country()
-            return self.sponsorship_required_for(country), country
+            return self.work_eligibility.current_location_requires_visa_sponsorship, self.identity.country
         if scope == "country":
             return self.sponsorship_required_for(named_country), named_country
         return self.explicit_requires_visa_sponsorship(), None

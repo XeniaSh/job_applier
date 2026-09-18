@@ -1474,13 +1474,40 @@ def _profile_without_identity_country(current_location: str, **overrides: object
         "Will you require a visa sponsorship for where you currently live?",
     ],
 )
-def test_current_location_sponsorship_uses_country_named_in_current_location(label: str) -> None:
+def test_current_location_sponsorship_explicit_false_maps_to_no(label: str) -> None:
     profile = _profile_without_identity_country(
         "Tashkent, Uzbekistan",
         work_eligibility={
             "work_authorizations": [
                 {"country": "Uzbekistan", "authorized": False, "requires_sponsorship": True},
             ],
+            "current_location_requires_visa_sponsorship": False,
+        },
+    )
+    mapped = map_question(
+        DiscoveredField(label=label, field_type="select", options=["Yes", "No"]),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.VISA_SPONSORSHIP
+    assert mapped.fillable is True
+    assert mapped.value == "No"
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Will you now or in the future require sponsorship for a visa to remain in your current location?",
+        "Will you now or in the future require sponsorship for a visa to remain in your current country?",
+        "Do you now or will you in the future require sponsorship for a visa in your current residence?",
+        "Will you require a visa sponsorship for where you currently live?",
+    ],
+)
+def test_current_location_sponsorship_explicit_true_maps_to_yes(label: str) -> None:
+    profile = _profile_without_identity_country(
+        "Tashkent, Uzbekistan",
+        work_eligibility={
+            "work_authorizations": [],
+            "current_location_requires_visa_sponsorship": True,
         },
     )
     mapped = map_question(
@@ -1490,36 +1517,18 @@ def test_current_location_sponsorship_uses_country_named_in_current_location(lab
     assert mapped.kind is QuestionKind.VISA_SPONSORSHIP
     assert mapped.fillable is True
     assert mapped.value == "Yes"
-    assert mapped.country == "Uzbekistan"
 
 
-def test_current_location_sponsorship_no_answer_without_identity_country_or_location_fact() -> None:
-    profile = _profile_without_identity_country(
-        "Tashkent, Uzbekistan",
-        work_eligibility={"work_authorizations": []},
-    )
-    mapped = map_question(
-        DiscoveredField(
-            label="Will you now or in the future require sponsorship for a visa to remain in your current location?",
-            field_type="select",
-            options=["Yes", "No"],
-        ),
-        profile,
-    )
-    assert mapped.kind is QuestionKind.VISA_SPONSORSHIP
-    assert mapped.fillable is False
-    assert mapped.value is None
-    assert mapped.unresolved_reason == (
-        "current-location sponsorship requires country-specific fact for current residence"
-    )
-
-
-def test_current_location_sponsorship_no_answer_when_location_country_does_not_match_fact() -> None:
+def test_current_location_sponsorship_no_answer_without_explicit_fact() -> None:
+    """Unset stays unresolved even when current_location names a country with
+    a matching work_authorizations fact: current-location scope must not
+    derive its answer from identity.current_location or work_authorizations.
+    """
     profile = _profile_without_identity_country(
         "Tashkent, Uzbekistan",
         work_eligibility={
             "work_authorizations": [
-                {"country": "Netherlands", "authorized": False, "requires_sponsorship": True},
+                {"country": "Uzbekistan", "authorized": False, "requires_sponsorship": True},
             ],
         },
     )
