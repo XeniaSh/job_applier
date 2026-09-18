@@ -57,6 +57,9 @@ events, and the local SQLite database currently has zero
 `target_company:*` rows in `vacancy_prepare_cache`, `application_history`, or
 `telegram_deliveries`. Therefore actual unsupported-form frequency cannot be
 ranked from local runtime data without running the target-company collectors.
+Future cycles now emit one existing-runtime-log diagnostic per drop with
+provider, source company, source, external ID, deterministic form-family
+reason, and URL host/path; no vacancy description or candidate data is logged.
 
 The deterministic configuration inventory is 30 companies: 8 Greenhouse, 2
 Lever (Qonto — `https://jobs.lever.co/qonto`, Finom —

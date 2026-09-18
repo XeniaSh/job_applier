@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 import hashlib
 import heapq
 import html
@@ -1185,7 +1186,12 @@ def _is_unchanged_cached_skip(
     return cached.recommendation.label == RECOMMENDATION_SKIP
 
 
+_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX = "target_company:greenhouse:"
 _TARGET_COMPANY_LEVER_SOURCE_PREFIX = "target_company:lever:"
+_GREENHOUSE_HOSTED_HOST_SUFFIX = ".greenhouse.io"
+_GREENHOUSE_HOSTED_HOST_EXACT = "greenhouse.io"
+_LEVER_HOSTED_HOST_SUFFIX = ".lever.co"
+_LEVER_HOSTED_HOST_EXACT = "lever.co"
 
 
 def _has_unconfirmed_application_form(vacancy: NormalizedVacancy) -> bool:
@@ -1200,6 +1206,74 @@ def _has_unconfirmed_application_form(vacancy: NormalizedVacancy) -> bool:
     if vacancy.source.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX):
         return not is_canonical_lever_hosted_url(vacancy.url)
     return not is_canonical_greenhouse_hosted_url(vacancy.url)
+
+
+def _target_company_form_provider(source: str) -> str:
+    """Deterministic ATS classification from the discovery source prefix.
+
+    Falls back to "unknown" for any source outside the two Target Companies
+    watchers so the diagnostic never guesses at an unrecognized provider.
+    """
+    if source.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX):
+        return "greenhouse"
+    if source.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX):
+        return "lever"
+    return "unknown"
+
+
+def _target_company_source_company(vacancy: NormalizedVacancy) -> str:
+    _, _, suffix = vacancy.source.rpartition(":")
+    return suffix or (vacancy.company or "unknown")
+
+
+def _unsupported_application_form_reason(provider: str, url: str) -> str:
+    """Deterministic, groupable form-family reason for the drop diagnostic.
+
+    Distinguishes a custom domain (the common Greenhouse embed case) from a
+    canonical host with an unrecognized path shape, without duplicating the
+    is_canonical_*_hosted_url gate decision itself.
+    """
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    if provider == "greenhouse":
+        if host != _GREENHOUSE_HOSTED_HOST_EXACT and not host.endswith(_GREENHOUSE_HOSTED_HOST_SUFFIX):
+            return "greenhouse_custom_domain"
+        return "greenhouse_non_canonical_path"
+    if provider == "lever":
+        if host != _LEVER_HOSTED_HOST_EXACT and not host.endswith(_LEVER_HOSTED_HOST_SUFFIX):
+            return "lever_custom_domain"
+        return "lever_non_canonical_path"
+    return "unknown_provider_unconfirmed_form"
+
+
+def _log_unsupported_application_form_drop(vacancy: NormalizedVacancy) -> None:
+    """Structured diagnostic for a Target Companies vacancy dropped by the
+    unconfirmed-application-form gate. Only non-sensitive source/provider/URL
+    diagnostics are logged — vacancy.description and candidate/profile data
+    must never appear here.
+    """
+    provider = _target_company_form_provider(vacancy.source)
+    reason = _unsupported_application_form_reason(provider, vacancy.url)
+    try:
+        parsed = urlsplit(vacancy.url)
+        url_host = parsed.hostname or ""
+        url_path = parsed.path or ""
+    except ValueError:
+        url_host = ""
+        url_path = ""
+    _run_log(
+        "Target companies: unsupported_form "
+        f"provider={provider} "
+        f"source_company={_target_company_source_company(vacancy)} "
+        f"source={vacancy.source} "
+        f"external_id={vacancy.external_id} "
+        f"reason={reason} "
+        f"url_host={url_host} "
+        f"url_path={url_path}",
+        component="main",
+    )
 
 
 def _target_companies_run_chat_id(settings: Settings) -> str:
@@ -1281,6 +1355,7 @@ def _run_target_companies_cycle(
             continue
         if _has_unconfirmed_application_form(vacancy):
             dropped_unsupported_form += 1
+            _log_unsupported_application_form_drop(vacancy)
             continue
         candidates.append(vacancy)
 

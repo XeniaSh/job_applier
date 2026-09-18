@@ -479,6 +479,96 @@ def test_unconfirmed_application_form_is_excluded_before_ranking(monkeypatch, tm
     assert reloaded_cache.get_by_identity("target_company:greenhouse:elastic", "1") is None
 
 
+def test_greenhouse_custom_domain_drop_emits_grouped_diagnostic(monkeypatch, tmp_path: Path, capsys) -> None:
+    unconfirmed = NormalizedVacancy(
+        source="target_company:greenhouse:elastic",
+        external_id="1",
+        title="Java Backend Engineer",
+        company="Elastic",
+        location="Remote",
+        employment="Full-time",
+        description="Java backend services -- must never appear in logs",
+        url="https://jobs.elastic.co/jobs?gh_jid=1",
+        published_at="2026-09-05T10:00:00Z",
+    )
+    result, _, _, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[unconfirmed],
+        analyze_limit=1,
+        analyze_limit_per_company=1,
+    )
+
+    assert result.dropped_unsupported_form == 1
+    out = capsys.readouterr().out
+    log_lines = [line for line in out.splitlines() if "Target companies: unsupported_form " in line]
+    assert len(log_lines) == 1
+    line = log_lines[0]
+    assert "provider=greenhouse" in line
+    assert "source_company=elastic" in line
+    assert "source=target_company:greenhouse:elastic" in line
+    assert "external_id=1" in line
+    assert "reason=greenhouse_custom_domain" in line
+    assert "url_host=jobs.elastic.co" in line
+    assert "url_path=/jobs" in line
+    assert "Java backend services" not in out
+
+
+def test_lever_non_canonical_url_drop_emits_grouped_diagnostic(monkeypatch, tmp_path: Path, capsys) -> None:
+    unconfirmed = NormalizedVacancy(
+        source="target_company:lever:loom",
+        external_id="1",
+        title="Java Backend Engineer",
+        company="Loom",
+        location="Remote",
+        employment="Full-time",
+        description="Java backend services -- must never appear in logs",
+        url="https://jobs.loom.com/apply?posting=1",
+        published_at="2026-09-05T10:00:00Z",
+    )
+    result, _, _, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        lever_vacancies=[unconfirmed],
+        include_lever_company=True,
+        analyze_limit=1,
+        analyze_limit_per_company=1,
+    )
+
+    assert result.dropped_unsupported_form == 1
+    out = capsys.readouterr().out
+    log_lines = [line for line in out.splitlines() if "Target companies: unsupported_form " in line]
+    assert len(log_lines) == 1
+    line = log_lines[0]
+    assert "provider=lever" in line
+    assert "source_company=loom" in line
+    assert "source=target_company:lever:loom" in line
+    assert "external_id=1" in line
+    assert "reason=lever_custom_domain" in line
+    assert "url_host=jobs.loom.com" in line
+    assert "url_path=/apply" in line
+    assert "Java backend services" not in out
+
+
+def test_supported_canonical_urls_do_not_emit_unsupported_form_diagnostic(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    gh_vacancy = _vacancy(external_id="1", title="Java Backend Engineer")
+    lever_vacancy = _lever_vacancy(external_id="501", title="Kotlin Backend Engineer")
+    result, _, _, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[gh_vacancy],
+        lever_vacancies=[lever_vacancy],
+        include_lever_company=True,
+    )
+
+    assert result.dropped_unsupported_form == 0
+    out = capsys.readouterr().out
+    assert "Target companies: unsupported_form " not in out
+
+
 def test_greenhouse_and_lever_watchers_are_combined(monkeypatch, tmp_path: Path) -> None:
     gh_vacancy = _vacancy(external_id="1", title="Java Backend Engineer")
     lever_vacancy = _lever_vacancy(external_id="501", title="Kotlin Backend Engineer")
