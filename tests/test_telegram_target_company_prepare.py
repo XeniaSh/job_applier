@@ -59,6 +59,10 @@ SOURCE = "target_company:greenhouse:agoda"
 EXTERNAL_ID = "6886113"
 URL = "https://job-boards.greenhouse.io/agoda/jobs/6886113"
 
+LEVER_SOURCE = "target_company:lever:qonto"
+LEVER_EXTERNAL_ID = "9911"
+LEVER_URL = "https://jobs.lever.co/qonto/9911"
+
 
 class _FakeAutofill:
     def __init__(
@@ -244,6 +248,20 @@ def _vacancy(*, description: str = "Java backend services") -> NormalizedVacancy
         employment="Full-time",
         description=description,
         url=URL,
+        published_at="2026-09-05T10:00:00Z",
+    )
+
+
+def _lever_vacancy() -> NormalizedVacancy:
+    return NormalizedVacancy(
+        source=LEVER_SOURCE,
+        external_id=LEVER_EXTERNAL_ID,
+        title="Backend Engineer",
+        company="Qonto",
+        location="Paris",
+        employment="Full-time",
+        description="Backend services",
+        url=LEVER_URL,
         published_at="2026-09-05T10:00:00Z",
     )
 
@@ -470,6 +488,41 @@ def test_linkedin_or_generic_greenhouse_prepapp_fails_safely(tmp_path: Path) -> 
     assert autofill.calls == []
     assert client.answers == [("cb-prep", "Preparation is not available for this vacancy.")]
     assert client.texts == []
+
+
+def test_lever_target_company_prepapp_callback_reaches_service_with_lever_source(tmp_path: Path) -> None:
+    """The `tcl.` Telegram callback code must decode to a
+    `target_company:lever:` source and reach the application prepare
+    service with that source -- proving the routing path end-to-end via the
+    real Telegram entry point, not just a direct LeverAdapter fixture.
+    """
+    storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
+    autofill = _FakeAutofill()
+    inner = PrepareApplicationService(autofill, storage)
+    service = _RecordingPrepareService(inner)
+    cache = _seed_cache(
+        tmp_path / "cache.json",
+        recommendation=RECOMMENDATION_APPLY_NOW,
+        vacancy=_lever_vacancy(),
+    )
+    client = _FakeClient()
+
+    cli_module._process_callback_update(
+        update=_callback_update(data=f"prepapp:tcl.qonto:{LEVER_EXTERNAL_ID}"),
+        client=client,
+        storage=storage,
+        configured_chat_id="222",
+        allowed_chat_ids=frozenset({"222"}),
+        application_prepare_service=service,
+        application_prepare_cache=cache,
+        application_prepare_sync=True,
+    )
+
+    assert service.calls[0][0].source == LEVER_SOURCE
+    assert service.calls[0][0].external_id == LEVER_EXTERNAL_ID
+    assert service.calls[0][1] is PrepareIntent.EXPLICIT
+    assert autofill.calls == [(LEVER_SOURCE, LEVER_EXTERNAL_ID, True)]
+    assert client.texts[0]["text"].startswith("Preparation completed.")
 
 
 def test_preparation_failure_is_reported_safely(tmp_path: Path) -> None:

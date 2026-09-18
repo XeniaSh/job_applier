@@ -62,6 +62,10 @@ class AutofillAdapter(Protocol):
 def default_adapter_for_source(source: str) -> AutofillAdapter:
     """Source-aware ATS adapter selection. Unknown sources keep the historical Greenhouse default."""
     if source.strip().startswith(TARGET_COMPANY_LEVER_PREFIX):
+        logger.warning(
+            "autofill_adapter_dispatch provider=lever adapter=LeverAdapter source=%s",
+            source,
+        )
         return LeverAdapter()
     return GreenhouseAdapter()
 

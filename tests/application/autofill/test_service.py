@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 from app.application.autofill.browser import BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
+from app.application.autofill.greenhouse import GreenhouseAdapter
+from app.application.autofill.lever import LeverAdapter
 from app.application.autofill.models import AutofillFailureReason, AutofillStatus
 from app.application.autofill.resolver import ResolvedVacancy, VacancyResolveError
-from app.application.autofill.service import AutofillService
+from app.application.autofill.service import AutofillService, default_adapter_for_source
 from app.application.candidate_profile import CandidateProfile
 
 
@@ -568,3 +571,27 @@ def test_service_explicit_adapter_overrides_source_based_selection() -> None:
     result = service.run("target_company:lever:qonto", "abc123", keep_open=False)
     assert result.status is AutofillStatus.READY_FOR_REVIEW
     assert seen == []
+
+
+def test_default_adapter_for_source_selects_lever_and_logs_dispatch(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="app.application.autofill.service")
+    adapter = default_adapter_for_source("target_company:lever:qonto")
+    assert isinstance(adapter, LeverAdapter)
+    dispatch_records = [
+        record for record in caplog.records if record.getMessage().startswith("autofill_adapter_dispatch")
+    ]
+    assert len(dispatch_records) == 1
+    assert dispatch_records[0].levelno == logging.WARNING
+    message = dispatch_records[0].getMessage()
+    assert "provider=lever" in message
+    assert "adapter=LeverAdapter" in message
+    assert "source=target_company:lever:qonto" in message
+
+
+def test_default_adapter_for_source_selects_greenhouse_without_dispatch_log(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="app.application.autofill.service")
+    adapter = default_adapter_for_source("target_company:greenhouse:agoda")
+    assert isinstance(adapter, GreenhouseAdapter)
+    assert not any(
+        record.getMessage().startswith("autofill_adapter_dispatch") for record in caplog.records
+    )
