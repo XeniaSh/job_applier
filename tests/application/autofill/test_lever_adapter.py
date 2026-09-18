@@ -7,11 +7,13 @@ import pytest
 from app.application.autofill.browser import BrowserSession, chromium_executable_available
 from app.application.autofill.classifier import ClassifiedField, classify_field
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.lever import LeverAdapter, LeverFormError
+from app.application.autofill.lever import LeverAdapter, LeverFormError, is_lever_job_detail_page
 from app.application.autofill.models import FieldClassification
 from app.application.candidate_profile import CandidateProfile
 
 LEVER_FIXTURE = Path("tests/fixtures/autofill/lever_application.html")
+LEVER_JOB_DETAIL_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail.html")
+LEVER_JOB_DETAIL_DEAD_END_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail_dead_end.html")
 UNRELATED_FIXTURE = Path("tests/fixtures/autofill/unrelated.html")
 RESUME_FIXTURE = Path("tests/fixtures/autofill/resume.txt")
 
@@ -198,5 +200,50 @@ def test_never_submits() -> None:
         page = session.page
         assert page.evaluate("window.__submitClicked") is False
         assert page.evaluate("window.__formSubmitted") is False
+    finally:
+        session.close()
+
+
+def test_recognizes_job_detail_page_before_navigation() -> None:
+    session = _open(LEVER_JOB_DETAIL_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        assert is_lever_job_detail_page(session.page) is True
+        # The job-detail page itself is not the application form yet.
+        assert adapter.recognize(session.page) is False
+    finally:
+        session.close()
+
+
+def test_prepare_page_navigates_from_job_detail_to_application_form() -> None:
+    session = _open(LEVER_JOB_DETAIL_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        adapter.prepare_page(session.page)
+        assert adapter.recognize(session.page) is True
+        assert is_lever_job_detail_page(session.page) is False
+
+        fields = adapter.discover_fields(session.page)
+        full_name = _field(fields, "Full name")
+        profile = _profile()
+        classified = classify_field(full_name, profile)
+        assert adapter.fill_field(session.page, classified) is True
+        assert adapter.read_back(session.page, full_name) == classified.value
+
+        page = session.page
+        assert page.evaluate("window.__submitClicked") is False
+        assert page.evaluate("window.__formSubmitted") is False
+    finally:
+        session.close()
+
+
+def test_prepare_page_fails_closed_when_apply_action_has_no_form() -> None:
+    session = _open(LEVER_JOB_DETAIL_DEAD_END_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        adapter.prepare_page(session.page)
+        assert adapter.recognize(session.page) is False
+        with pytest.raises(LeverFormError, match="UNSUPPORTED_FORM"):
+            adapter.discover_fields(session.page)
     finally:
         session.close()

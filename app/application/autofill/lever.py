@@ -19,11 +19,20 @@ from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout
 
 from app.application.autofill.classifier import ClassifiedField
 from app.application.autofill.fields import DiscoveredField
+from app.application.autofill.lever_url import is_canonical_lever_hosted_url
 from app.application.autofill.options import match_option, match_yes_no
 from app.application.autofill.questions import QuestionKind
 
 _TEXT_TYPES = frozenset({"text", "email", "tel", "url", "search", "number"})
 _FORM_READY_SELECTOR = "#application-form, form.application-form, input#name, input[name='name']"
+
+# Lever's own hosted job-detail template renders its "Apply for this job"
+# action as an <a data-qa="btn-apply-top|btn-apply-bottom"> inside the
+# posting header/footer. That `data-qa` attribute is specific to Lever's
+# template (unlike a generic "click the button that says Apply" rule), and
+# the submit control on the application form itself never carries it, so
+# this selector cannot accidentally match a submit button.
+_JOB_DETAIL_APPLY_SELECTOR = "a[data-qa='btn-apply-top'], a[data-qa='btn-apply-bottom']"
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +61,25 @@ def is_lever_application_page(page: Page) -> bool:
         return True
     url = page.url.lower()
     return "lever.co" in url and page.locator("form").count() > 0
+
+
+def _job_detail_apply_action(page: Page) -> Locator | None:
+    locator = page.locator(_JOB_DETAIL_APPLY_SELECTOR)
+    if locator.count() == 0:
+        return None
+    return locator.first
+
+
+def is_lever_job_detail_page(page: Page) -> bool:
+    """True for a Lever hosted job-detail page with an Apply action, not yet the form."""
+    if is_lever_application_page(page):
+        return False
+    if _job_detail_apply_action(page) is None:
+        return False
+    url = page.url
+    if url.startswith("file:"):
+        return True
+    return is_canonical_lever_hosted_url(url)
 
 
 def detect_security_challenge(page: Page) -> str | None:
@@ -84,7 +112,18 @@ class LeverAdapter:
         return detect_security_challenge(page)
 
     def prepare_page(self, page: Page) -> None:
-        """Wait until the application form is usable. Local fixtures skip the extra settle."""
+        """Wait until the application form is usable.
+
+        If the page is still Lever's job-detail page (the posting overview
+        with an "Apply for this job" action, not the form), navigate there
+        first. If that navigation does not land on the recognized
+        application form, fail closed: recognize() will then be False and
+        the caller reports UNSUPPORTED_FORM rather than guessing at an
+        unfamiliar page.
+        Local fixtures skip the extra settle.
+        """
+        if is_lever_job_detail_page(page):
+            self._navigate_from_job_detail(page)
         timeout = 2_000 if page.url.startswith("file:") else 30_000
         try:
             page.wait_for_selector(_FORM_READY_SELECTOR, timeout=timeout)
@@ -93,6 +132,20 @@ class LeverAdapter:
         if page.url.startswith("file:"):
             return
         page.wait_for_timeout(500)
+
+    def _navigate_from_job_detail(self, page: Page) -> None:
+        action = _job_detail_apply_action(page)
+        if action is None:
+            return
+        try:
+            action.click(timeout=5_000)
+        except PlaywrightError:
+            return
+        timeout = 2_000 if page.url.startswith("file:") else 15_000
+        try:
+            page.wait_for_selector(_FORM_READY_SELECTOR, timeout=timeout)
+        except PlaywrightTimeoutError:
+            return
 
     def discover_fields(self, page: Page) -> list[DiscoveredField]:
         if not self.recognize(page):
