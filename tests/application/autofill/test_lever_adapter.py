@@ -5,11 +5,14 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from app.application.autofill.answers import ApplicationAnswerGenerator
 from app.application.autofill.browser import BrowserSession, chromium_executable_available
 from app.application.autofill.classifier import ClassifiedField, classify_field
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.lever import LeverAdapter, LeverFormError, is_lever_job_detail_page
 from app.application.autofill.models import FieldClassification
+from app.application.autofill.resolver import ResolvedVacancy
+from app.application.autofill.service import _enrich_unresolved
 from app.application.candidate_profile import CandidateProfile
 
 LEVER_FIXTURE = Path("tests/fixtures/autofill/lever_application.html")
@@ -180,6 +183,62 @@ def test_required_linkedin_url_field_fills_from_professional_links() -> None:
         assert classified.value == profile.professional_links.linkedin
         assert adapter.fill_field(session.page, classified) is True
         assert adapter.read_back(session.page, linkedin) == profile.professional_links.linkedin
+    finally:
+        session.close()
+
+
+class _ConfidentLLM:
+    """Would answer any question confidently -- proves a caller-side gate,
+    not LLM reluctance, is what keeps 'Current company' blank.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def create_short_application_answer(self, *, question: str, **_: object) -> tuple[str, bool]:
+        self.calls.append(question)
+        return "Acme Corp", True
+
+
+def test_optional_current_company_never_enriched_via_service_llm_fallback() -> None:
+    """The full discover -> classify -> `AutofillService._enrich_unresolved`
+    path must never route the optional 'Current company' field to the
+    generic LLM answer fallback, even though it is left unresolved and even
+    with `employment.current_employer` set explicitly. A generator willing
+    to confidently answer anything must still never be asked.
+    """
+    session = _open(LEVER_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        profile = _profile(employment={"current_employer": "Acme Corp"})
+        fields = adapter.discover_fields(session.page)
+        current_company = _field(fields, "Current company")
+        assert current_company.required is False
+        classified = classify_field(current_company, profile)
+        assert classified.fill is False
+
+        llm = _ConfidentLLM()
+        vacancy = ResolvedVacancy(
+            source="target_company:lever:qonto",
+            external_id="d36db188-ab16-43b6-86a8-47ed9cdd29b1",
+            title="Backend Engineer",
+            company="Qonto",
+            url=LEVER_JOB_URL,
+            application_url=f"{LEVER_JOB_URL}/apply",
+        )
+        enriched = _enrich_unresolved(
+            classified,
+            profile=profile,
+            vacancy=vacancy,
+            cover_letter_text=None,
+            answer_generator=ApplicationAnswerGenerator(llm),
+        )
+        assert enriched.fill is False
+        assert enriched.value is None
+        assert llm.calls == []
+
+        assert adapter.fill_field(session.page, enriched) is False
+        assert adapter.read_back(session.page, current_company) is None
     finally:
         session.close()
 

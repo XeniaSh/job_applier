@@ -1469,6 +1469,41 @@ a task number or a prescribed fix.
 - Web UI
 - Workday before an explicit request
 
+## Stage 6 — Top-of-funnel discovery expansion
+
+This is the next product priority after the current Lever milestone. The goal
+is to determine why vacancy volume is low and materially expand discovery
+coverage without weakening candidate-fit filtering or application safety.
+
+### TASK-087 — Discovery volume diagnosis and coverage inventory
+
+- **Status:** todo
+- **Depends on:** none
+- **Goal:** Measure the current discovery funnel by source (configured,
+  reachable, parsed, title-filtered, analyzed, delivered) and identify the
+  first coverage gap that can be fixed safely from local evidence.
+- **Area:** collectors / company-watch runtime diagnostics
+- **Acceptance criteria:**
+  - Read-only diagnostics use existing runtime boundaries and do not expose
+    candidate PII or vacancy descriptions in logs.
+  - Existing collection, filtering, deduplication, and delivery behavior is
+    unchanged.
+  - The result identifies a bounded next coverage task rather than guessing a
+    provider from static configuration alone.
+- **Verification:** Focused collector/runtime tests and log-safety checks.
+
+### TASK-088 — First evidence-backed discovery coverage expansion
+
+- **Status:** todo
+- **Depends on:** TASK-087
+- **Goal:** Implement the highest-value bounded discovery expansion identified
+  by TASK-087, reusing existing collector interfaces and preserving the
+  generic backend-stack mismatch filter.
+- **Area:** one collector or company-watch source family per iteration
+- **Acceptance criteria:** Defined by TASK-087 evidence; no application
+  submission or ATS autofill behavior changes.
+- **Verification:** Focused fixture and collector/runtime regression tests.
+
 ---
 
 ## Suggested first implementation iteration
