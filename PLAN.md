@@ -50,6 +50,32 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 - Browser automation: Playwright (`BrowserSession`, Stage 1 Greenhouse autofill). Production runs headed by default; `BrowserSession(headed=False)` exists and is used by tests. Lazy-imported so ordinary collection/analysis does not require it.
 - No LangChain, no extra databases, no automated submit
 
+### Coverage audit — 2026-09-18
+
+The repository contains no persisted historical `dropped_unsupported_form`
+events, and the local SQLite database currently has zero
+`target_company:*` rows in `vacancy_prepare_cache`, `application_history`, or
+`telegram_deliveries`. Therefore actual unsupported-form frequency cannot be
+ranked from local runtime data without running the target-company collectors.
+
+The deterministic configuration inventory is 30 companies: 8 Greenhouse, 2
+Lever (Qonto — `https://jobs.lever.co/qonto`, Finom —
+`https://jobs.eu.lever.co/pnlfin`), 1 Ashby (TravelPerk / Perk —
+`https://jobs.ashbyhq.com/Perk`), 2 SmartRecruiters-labelled entries (Canva —
+`https://careers.smartrecruiters.com/canva`, Wise — `https://wise.jobs/Jobs`),
+1 Teamtailor (TradingView — `https://tradingview.teamtailor.com/jobs`), and
+16 custom/manual/ambiguous entries. The current `run` path watches only
+Greenhouse; the Lever/Ashby/SmartRecruiters watchers are standalone, and only
+Lever has a local autofill adapter.
+
+Recommendation: once runtime evidence is available, prioritize the next
+provider by observed unsupported count. On architecture fit alone, Lever is
+the safest next coverage task because it has two configured companies, an
+existing watcher, resolver, and fixture-tested adapter; wiring that vertical
+slice into Target Companies is preferable to guessing at a heterogeneous
+custom family. No provider-specific adapter task is selected from frequency
+until `dropped_unsupported_form` observations are persisted or supplied.
+
 Entry point:
 
 ```bash
