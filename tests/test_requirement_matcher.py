@@ -229,6 +229,97 @@ def test_golang_backend_without_jvm_is_ignore() -> None:
     assert result.decision == Decision.IGNORE
 
 
+def test_go_ruby_backend_with_mobile_kotlin_mention_is_ignored() -> None:
+    """A Kotlin mention scoped to a separate mobile team must not count as
+    backend JVM evidence and rescue a vacancy whose backend stack is
+    explicitly Go/Ruby, even though the candidate also has generic backend
+    skills (Docker, Kubernetes, PostgreSQL, ...) that overlap with the JD.
+    """
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["go", "ruby", "postgresql", "docker", "kubernetes", "microservices", "rest api"],
+            role_type="Backend Engineer",
+            short_summary=(
+                "Backend engineering role built with Go and Ruby; a separate "
+                "mobile team uses Kotlin for native apps."
+            ),
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Senior/Staff - Go Backend Engineer - remote friendly",
+    )
+    assert result.decision == Decision.IGNORE
+
+
+def test_go_ruby_backend_with_mobile_kotlin_as_structured_skill_is_ignored() -> None:
+    """Same failure mode as the prose case above, but the extractor also
+    (mistakenly) lifted the mobile-only Kotlin mention into a structured
+    mandatory-skill entry. A bare skill token has no context of its own, so
+    it must not be trusted outright when the vacancy's own prose scopes that
+    same term to a separate mobile team and the backend stack is explicitly
+    Go/Ruby.
+    """
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=[
+                "go",
+                "ruby",
+                "kotlin",
+                "postgresql",
+                "docker",
+                "kubernetes",
+                "microservices",
+                "rest api",
+            ],
+            role_type="Backend Engineer",
+            short_summary=(
+                "Backend engineering role built with Go and Ruby; a separate "
+                "mobile team uses Kotlin for native apps."
+            ),
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Senior/Staff - Go Backend Engineer - remote friendly",
+    )
+    assert result.decision == Decision.IGNORE
+
+
+def test_java_kotlin_backend_title_remains_not_falsely_ignored() -> None:
+    """A genuine Java/Kotlin backend vacancy must still match strongly -- the
+    mobile-Kotlin guard above must not overreach onto real JVM backends.
+    """
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java", "kotlin", "spring boot", "postgresql"],
+            role_type="Backend Engineer",
+            short_summary="Backend services built with Java and Kotlin.",
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Senior Java/Kotlin Backend Engineer",
+    )
+    assert result.decision == Decision.STRONG_MATCH
+
+
+def test_mobile_kotlin_mention_does_not_blunt_real_java_backend_match() -> None:
+    """A Kotlin-for-mobile-team mention must not be treated as backend JVM
+    evidence by itself, but it also must not blunt real Java evidence found
+    elsewhere in the same vacancy -- preserving existing semantics for a
+    genuine Java backend role that happens to also mention an unrelated
+    mobile team.
+    """
+    result = compare_requirements(
+        extraction=_extraction(
+            mandatory_skills=["java", "spring boot", "postgresql"],
+            role_type="Backend Engineer",
+            short_summary=(
+                "Backend engineering role built with Java and Spring Boot; "
+                "a separate mobile team uses Kotlin for native Android apps."
+            ),
+        ),
+        candidate_skills=_skills_profile(),
+        vacancy_title="Senior Backend Engineer",
+    )
+    assert result.decision == Decision.STRONG_MATCH
+
+
 def test_mlflow_is_not_conflicting_ml_stack() -> None:
     result = compare_requirements(
         extraction=_extraction(

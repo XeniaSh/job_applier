@@ -1006,8 +1006,11 @@ class CandidateProfile(BaseModel):
         return self.application_policy.remote_work_arrangement.preference
 
     def current_employer_for_autofill(self) -> str | None:
-        """Explicit current-employer name. Never guessed from employment history."""
-        return self.employment.current_employer
+        """Optional current-company/current-employer form fields always stay
+        blank, even when `employment.current_employer` is set explicitly --
+        that fact is not meant to be disclosed on this optional field.
+        """
+        return None
 
     def may_auto_acknowledge_required_privacy(self) -> bool:
         if self.application_consent.privacy_data_processing is False:

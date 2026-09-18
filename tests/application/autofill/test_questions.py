@@ -83,6 +83,20 @@ def test_known_questions_map_from_explicit_profile(
     assert mapped.fillable is True
 
 
+def test_required_linkedin_url_field_resolves_from_professional_links() -> None:
+    """A required Lever-style 'LinkedIn URL' field must resolve deterministically
+    from `professional_links.linkedin` -- the single source of truth -- and not
+    be left unfillable just because the field is marked required.
+    """
+    profile = _profile()
+    field = DiscoveredField(label="LinkedIn URL", name="urls[LinkedIn]", field_type="text", required=True)
+    mapped = map_question(field, profile)
+    assert mapped.kind is QuestionKind.LINKEDIN
+    assert mapped.value == "https://www.linkedin.com/in/ada-example-test"
+    assert mapped.value == profile.professional_links.linkedin
+    assert mapped.fillable is True
+
+
 def test_work_authorization_in_other_country_is_not_guessed() -> None:
     mapped = map_question(
         DiscoveredField(label="Are you legally authorized to work in the United States?"),
@@ -1572,12 +1586,15 @@ def test_current_employer_is_never_llm_eligible() -> None:
     assert is_llm_eligible_question(field, mapped) is False
 
 
-def test_current_employer_fills_from_explicit_profile_fact() -> None:
+def test_current_employer_stays_blank_even_with_explicit_current_employer() -> None:
+    """Optional current-company/current-employer fields never disclose
+    `employment.current_employer`, even when it is set explicitly.
+    """
     profile = _profile(employment={"current_employer": "Acme Corp"})
     mapped = map_question(DiscoveredField(label="Current company", name="org", field_type="text"), profile)
     assert mapped.kind is QuestionKind.CURRENT_EMPLOYER
-    assert mapped.fillable is True
-    assert mapped.value == "Acme Corp"
+    assert mapped.fillable is False
+    assert mapped.value is None
 
 
 def test_current_employer_does_not_shadow_employment_restrictions() -> None:

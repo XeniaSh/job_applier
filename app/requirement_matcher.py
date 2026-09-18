@@ -69,6 +69,35 @@ BACKEND_SIGNAL_TERMS = (
     "api",
     "server-side",
 )
+# A genuine alternate backend implementation language/framework -- distinct
+# from CONFLICTING_STACK_TERMS' broader domain/role markers (mobile, frontend,
+# qa, devops, ...), which describe a mismatched role rather than an explicit
+# non-JVM backend stack.
+NON_JVM_BACKEND_STACK_TERMS = (
+    "python",
+    "django",
+    "flask",
+    "fastapi",
+    "go",
+    "golang",
+    "node",
+    "nodejs",
+    "node.js",
+    "typescript",
+    "javascript",
+    "dotnet",
+    ".net",
+    "c#",
+    "ruby",
+    "rails",
+    "php",
+    "laravel",
+)
+MOBILE_CONTEXT_TERMS = (
+    "mobile",
+    "android",
+    "ios",
+)
 APPLICATION_BACKEND_EVIDENCE_TERMS = (
     "backend",
     "back-end",
@@ -319,6 +348,69 @@ def _has_application_backend_evidence(*parts: str) -> bool:
     return any(_contains_phrase(combined, term) for term in APPLICATION_BACKEND_EVIDENCE_TERMS)
 
 
+def _split_into_clauses(text: str) -> list[str]:
+    return [clause.strip() for clause in re.split(r"[.;\n]", text) if clause.strip()]
+
+
+def _mobile_scoped_jvm_terms(extraction: VacancyExtraction) -> frozenset[str]:
+    """JVM terms that prose ties specifically to a mobile/Android/iOS team.
+
+    An extractor can place a JVM term into mandatory/optional skills (a bare
+    token with no context of its own) even when the same vacancy's prose
+    explains that term is owned by a separate mobile team. That prose is the
+    only place such scoping can show up, so it must also discount the
+    structured skill entry for that same term, not just the prose mention.
+    """
+    scoped: set[str] = set()
+    prose_clauses = [*_split_into_clauses(extraction.short_summary), *extraction.responsibilities]
+    for clause in prose_clauses:
+        normalized_clause = _normalize_text(clause)
+        if not normalized_clause or not _contains_any(normalized_clause, MOBILE_CONTEXT_TERMS):
+            continue
+        for term in JVM_EVIDENCE_TERMS:
+            if _contains_any(normalized_clause, (term,)):
+                scoped.add(term)
+    return frozenset(scoped)
+
+
+def _has_backend_jvm_evidence(*, vacancy_title: str | None, extraction: VacancyExtraction) -> bool:
+    """True JVM evidence tied to the actual backend stack.
+
+    A JVM term (java/kotlin/...) declared in the title, role type, or as its
+    own mandatory/optional skill entry is trusted -- those are explicit,
+    structured signals -- unless prose elsewhere in the same vacancy scopes
+    that specific term to an unrelated mobile/Android/iOS team (see
+    `_mobile_scoped_jvm_terms`); otherwise a vacancy whose backend stack is
+    explicitly Go/Ruby/Python could be rescued by an incidental "mobile team
+    uses Kotlin" line, whether that line lands in prose or gets mirrored into
+    a skill entry. A JVM term that only appears in free-text prose counts
+    only when that same clause does not also scope it to mobile.
+    """
+    mobile_scoped_terms = _mobile_scoped_jvm_terms(extraction)
+    trusted_jvm_terms = tuple(term for term in JVM_EVIDENCE_TERMS if term not in mobile_scoped_terms)
+
+    atomic_segments = [
+        vacancy_title or "",
+        extraction.role_type,
+        *extraction.mandatory_skills,
+        *extraction.optional_skills,
+    ]
+    for segment in atomic_segments:
+        if _contains_any(_normalize_text(segment), trusted_jvm_terms):
+            return True
+
+    prose_clauses = [*_split_into_clauses(extraction.short_summary), *extraction.responsibilities]
+    for clause in prose_clauses:
+        normalized_clause = _normalize_text(clause)
+        if not normalized_clause:
+            continue
+        if _contains_any(normalized_clause, JVM_EVIDENCE_TERMS) and not _contains_any(
+            normalized_clause, MOBILE_CONTEXT_TERMS
+        ):
+            return True
+    return False
+
+
 def _apply_specialized_domain_cap(
     *,
     decision: Decision,
@@ -465,8 +557,8 @@ def compare_requirements(
     summary_text = _normalize_text(extraction.short_summary)
     title_text = _normalize_text(vacancy_title or "")
     evidence_text = f"{title_text} {role_text} {skills_text} {summary_text}"
-    has_jvm_evidence = _contains_any(evidence_text, JVM_EVIDENCE_TERMS)
-    has_conflicting_stack = _contains_any(evidence_text, CONFLICTING_STACK_TERMS)
+    has_jvm_evidence = _has_backend_jvm_evidence(vacancy_title=vacancy_title, extraction=extraction)
+    has_conflicting_stack = _contains_any(evidence_text, NON_JVM_BACKEND_STACK_TERMS)
     has_backend_signal = _contains_any(evidence_text, BACKEND_SIGNAL_TERMS)
 
     # Strong requires explicit positive JVM evidence.

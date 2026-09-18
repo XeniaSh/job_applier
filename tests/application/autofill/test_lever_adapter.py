@@ -163,6 +163,46 @@ def test_fills_text_fields_and_reads_them_back() -> None:
         session.close()
 
 
+def test_required_linkedin_url_field_fills_from_professional_links() -> None:
+    """The required 'LinkedIn URL' field must resolve from
+    `professional_links.linkedin` -- the single source of truth -- through the
+    real discover/classify/fill path, not be skipped for being required.
+    """
+    session = _open(LEVER_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        profile = _profile()
+        fields = adapter.discover_fields(session.page)
+        linkedin = _field(fields, "LinkedIn URL")
+        assert linkedin.required is True
+        classified = classify_field(linkedin, profile)
+        assert classified.classification is FieldClassification.SUPPORTED_DETERMINISTIC
+        assert classified.value == profile.professional_links.linkedin
+        assert adapter.fill_field(session.page, classified) is True
+        assert adapter.read_back(session.page, linkedin) == profile.professional_links.linkedin
+    finally:
+        session.close()
+
+
+def test_optional_current_company_stays_blank_with_explicit_current_employer() -> None:
+    """The optional 'Current company' field must never be filled from
+    `employment.current_employer`, even when that fact is set explicitly.
+    """
+    session = _open(LEVER_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        profile = _profile(employment={"current_employer": "Acme Corp"})
+        fields = adapter.discover_fields(session.page)
+        current_company = _field(fields, "Current company")
+        assert current_company.required is False
+        classified = classify_field(current_company, profile)
+        assert classified.fill is False
+        assert classified.value is None
+        assert adapter.read_back(session.page, current_company) is None
+    finally:
+        session.close()
+
+
 def test_select_visa_sponsorship_and_gender() -> None:
     session = _open(LEVER_FIXTURE)
     try:
