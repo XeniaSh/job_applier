@@ -20,19 +20,25 @@ from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout
 
 from app.application.autofill.classifier import ClassifiedField
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.lever_url import is_canonical_lever_hosted_url
+from app.application.autofill.lever_url import (
+    is_canonical_lever_hosted_url,
+    is_same_job_apply_url,
+)
 from app.application.autofill.options import match_option, match_yes_no
 from app.application.autofill.questions import QuestionKind
 
 _TEXT_TYPES = frozenset({"text", "email", "tel", "url", "search", "number"})
 _FORM_READY_SELECTOR = "#application-form, form.application-form, input#name, input[name='name']"
 
-# Lever's own hosted job-detail template renders its "Apply for this job"
-# action as an <a data-qa="btn-apply-top|btn-apply-bottom"> inside the
-# posting header/footer. That `data-qa` attribute is specific to Lever's
-# template (unlike a generic "click the button that says Apply" rule), and
-# the submit control on the application form itself never carries it, so
-# this selector cannot accidentally match a submit button.
+# Older Lever posting templates render "Apply for this job" as an
+# <a data-qa="btn-apply-top|btn-apply-bottom">. That `data-qa` attribute is
+# specific to Lever's own template (unlike a generic "click the button that
+# says Apply" rule), and the submit control on the application form itself
+# never carries it, so this selector cannot accidentally match a submit
+# button. Current Lever markup (observed live, e.g. Qonto's postings) drops
+# `data-qa` entirely -- `_same_job_apply_action` below is the primary
+# detection path and this selector is kept only for that older template
+# shape and existing fixtures built against it.
 _JOB_DETAIL_APPLY_SELECTOR = "a[data-qa='btn-apply-top'], a[data-qa='btn-apply-bottom']"
 
 logger = logging.getLogger(__name__)
@@ -98,10 +104,46 @@ def is_lever_application_page(page: Page) -> bool:
 
 
 def _job_detail_apply_action(page: Page) -> Locator | None:
-    locator = page.locator(_JOB_DETAIL_APPLY_SELECTOR)
-    if locator.count() == 0:
-        return None
-    return locator.first
+    """The "Apply for this job" action on a Lever job-detail page, if present.
+
+    Tries the legacy `data-qa` template first (still used by some fixtures/
+    older postings). On a canonical `jobs.lever.co` page its href is validated
+    the same way as the modern path -- via `_same_job_apply_action` -- so a
+    legacy-shaped anchor can never carry a wrong-job or external `/apply`
+    link. Non-canonical pages (e.g. local file fixtures) keep the original,
+    unvalidated legacy match, since `is_same_job_apply_url` cannot resolve a
+    same-job URL for those anyway.
+    """
+    legacy = page.locator(_JOB_DETAIL_APPLY_SELECTOR)
+    if legacy.count() > 0:
+        if not is_canonical_lever_hosted_url(page.url):
+            return legacy.first
+        validated = _same_job_apply_action(page, legacy)
+        if validated is not None:
+            return validated
+    return _same_job_apply_action(page)
+
+
+def _same_job_apply_action(page: Page, anchors: Locator | None = None) -> Locator | None:
+    """An anchor whose resolved href is exactly this job's own `/apply` link.
+
+    Only applies to a canonical `jobs.lever.co/<company>/<posting-id>` page;
+    matching is done on the anchor's browser-resolved absolute URL (`el.href`),
+    never on text/class/styling, so it cannot match an unrelated Lever page,
+    a different job's apply link, or an external `/apply` URL.
+    """
+    if anchors is None:
+        anchors = page.locator("a[href]")
+    count = anchors.count()
+    for index in range(count):
+        anchor = anchors.nth(index)
+        try:
+            href = anchor.evaluate("el => el.href")
+        except PlaywrightError:
+            continue
+        if isinstance(href, str) and is_same_job_apply_url(page.url, href):
+            return anchor
+    return None
 
 
 def is_lever_job_detail_page(page: Page) -> bool:

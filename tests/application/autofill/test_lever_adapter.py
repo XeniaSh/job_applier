@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -14,8 +15,20 @@ from app.application.candidate_profile import CandidateProfile
 LEVER_FIXTURE = Path("tests/fixtures/autofill/lever_application.html")
 LEVER_JOB_DETAIL_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail.html")
 LEVER_JOB_DETAIL_DEAD_END_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail_dead_end.html")
+LEVER_JOB_DETAIL_REAL_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail_real.html")
+LEVER_JOB_DETAIL_WRONG_JOB_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail_wrong_job.html")
+LEVER_JOB_DETAIL_LEGACY_WRONG_JOB_FIXTURE = Path(
+    "tests/fixtures/autofill/lever_job_detail_legacy_wrong_job.html"
+)
+LEVER_JOB_DETAIL_EXTERNAL_LINK_FIXTURE = Path("tests/fixtures/autofill/lever_job_detail_external_link.html")
+LEVER_COMPANY_LISTING_FIXTURE = Path("tests/fixtures/autofill/lever_company_listing.html")
 UNRELATED_FIXTURE = Path("tests/fixtures/autofill/unrelated.html")
 RESUME_FIXTURE = Path("tests/fixtures/autofill/resume.txt")
+
+# Real hosted job-detail URL shape, mirroring an actual observed Qonto posting.
+LEVER_JOB_PATH = "/qonto/d36db188-ab16-43b6-86a8-47ed9cdd29b1"
+LEVER_JOB_URL = f"https://jobs.lever.co{LEVER_JOB_PATH}"
+LEVER_JOB_APPLY_PATH = f"{LEVER_JOB_PATH}/apply"
 
 pytestmark = pytest.mark.skipif(
     not chromium_executable_available(),
@@ -51,6 +64,29 @@ def _profile(**overrides: object) -> CandidateProfile:
 def _open(path: Path) -> BrowserSession:
     session = BrowserSession(headed=False, keep_open=False)
     session.open_html_file(path)
+    return session
+
+
+def _open_mocked_lever_url(url: str, routes: dict[str, Path]) -> BrowserSession:
+    """Open `url` against real `jobs.lever.co` host without a network call.
+
+    `routes` maps a path (e.g. `LEVER_JOB_PATH`) to a local fixture file
+    served for that path, so detection logic that inspects `page.url` and
+    resolved anchor `href`s sees a genuine `jobs.lever.co` origin.
+    """
+    session = BrowserSession(headed=False, keep_open=False)
+    session.start()
+
+    def handler(route, request) -> None:  # noqa: ANN001
+        path = urlsplit(request.url).path
+        fixture = routes.get(path)
+        if fixture is None:
+            route.fulfill(status=404, content_type="text/plain", body="not found")
+            return
+        route.fulfill(status=200, content_type="text/html", body=fixture.read_text())
+
+    session.page.route("https://jobs.lever.co/**", handler)
+    session.page.goto(url, wait_until="domcontentloaded")
     return session
 
 
@@ -242,6 +278,121 @@ def test_prepare_page_fails_closed_when_apply_action_has_no_form() -> None:
     try:
         adapter = LeverAdapter()
         adapter.prepare_page(session.page)
+        assert adapter.recognize(session.page) is False
+        with pytest.raises(LeverFormError, match="UNSUPPORTED_FORM"):
+            adapter.discover_fields(session.page)
+    finally:
+        session.close()
+
+
+def test_recognizes_real_qonto_shaped_job_detail_page() -> None:
+    """Real Qonto markup has no `data-qa`: only class/styling and a same-job
+    `/apply` href. Detection must still recognize this as a job-detail page.
+    """
+    session = _open_mocked_lever_url(
+        LEVER_JOB_URL,
+        {LEVER_JOB_PATH: LEVER_JOB_DETAIL_REAL_FIXTURE, LEVER_JOB_APPLY_PATH: LEVER_FIXTURE},
+    )
+    try:
+        assert is_lever_job_detail_page(session.page) is True
+        assert LeverAdapter().recognize(session.page) is False
+    finally:
+        session.close()
+
+
+def test_prepare_page_navigates_from_real_job_detail_to_application_form() -> None:
+    session = _open_mocked_lever_url(
+        LEVER_JOB_URL,
+        {LEVER_JOB_PATH: LEVER_JOB_DETAIL_REAL_FIXTURE, LEVER_JOB_APPLY_PATH: LEVER_FIXTURE},
+    )
+    try:
+        adapter = LeverAdapter()
+        adapter.prepare_page(session.page)
+        assert adapter.recognize(session.page) is True
+        assert is_lever_job_detail_page(session.page) is False
+
+        fields = adapter.discover_fields(session.page)
+        full_name = _field(fields, "Full name")
+        profile = _profile()
+        classified = classify_field(full_name, profile)
+        assert adapter.fill_field(session.page, classified) is True
+        assert adapter.read_back(session.page, full_name) == classified.value
+
+        page = session.page
+        assert page.evaluate("window.__submitClicked") is False
+        assert page.evaluate("window.__formSubmitted") is False
+    finally:
+        session.close()
+
+
+def test_rejects_unrelated_lever_company_listing_page() -> None:
+    """A Lever careers/listing page (no single job path) must never be treated
+    as a job-detail page, even though it links to real postings.
+    """
+    session = _open_mocked_lever_url(
+        "https://jobs.lever.co/qonto",
+        {"/qonto": LEVER_COMPANY_LISTING_FIXTURE},
+    )
+    try:
+        assert is_lever_job_detail_page(session.page) is False
+        assert LeverAdapter().recognize(session.page) is False
+    finally:
+        session.close()
+
+
+def test_rejects_wrong_job_apply_link() -> None:
+    """An apply-shaped anchor pointing at a *different* posting-id must not be
+    treated as this job's Apply action, and the adapter must fail closed.
+    """
+    session = _open_mocked_lever_url(
+        LEVER_JOB_URL,
+        {LEVER_JOB_PATH: LEVER_JOB_DETAIL_WRONG_JOB_FIXTURE},
+    )
+    try:
+        adapter = LeverAdapter()
+        assert is_lever_job_detail_page(session.page) is False
+        adapter.prepare_page(session.page)
+        assert adapter.recognize(session.page) is False
+        with pytest.raises(LeverFormError, match="UNSUPPORTED_FORM"):
+            adapter.discover_fields(session.page)
+    finally:
+        session.close()
+
+
+def test_rejects_wrong_job_legacy_apply_link() -> None:
+    """A legacy `data-qa` apply anchor pointing at a *different* posting-id
+    must be rejected the same way as the modern (no `data-qa`) shape -- the
+    `data-qa` attribute is not itself proof the href is safe to follow.
+    """
+    session = _open_mocked_lever_url(
+        LEVER_JOB_URL,
+        {LEVER_JOB_PATH: LEVER_JOB_DETAIL_LEGACY_WRONG_JOB_FIXTURE},
+    )
+    try:
+        adapter = LeverAdapter()
+        assert is_lever_job_detail_page(session.page) is False
+        adapter.prepare_page(session.page)
+        assert session.page.url == LEVER_JOB_URL
+        assert adapter.recognize(session.page) is False
+        with pytest.raises(LeverFormError, match="UNSUPPORTED_FORM"):
+            adapter.discover_fields(session.page)
+    finally:
+        session.close()
+
+
+def test_rejects_external_apply_link() -> None:
+    """An apply-shaped anchor pointing off Lever's own host must never be
+    followed, and the adapter must fail closed rather than navigate there.
+    """
+    session = _open_mocked_lever_url(
+        LEVER_JOB_URL,
+        {LEVER_JOB_PATH: LEVER_JOB_DETAIL_EXTERNAL_LINK_FIXTURE},
+    )
+    try:
+        adapter = LeverAdapter()
+        assert is_lever_job_detail_page(session.page) is False
+        adapter.prepare_page(session.page)
+        assert session.page.url == LEVER_JOB_URL
         assert adapter.recognize(session.page) is False
         with pytest.raises(LeverFormError, match="UNSUPPORTED_FORM"):
             adapter.discover_fields(session.page)
