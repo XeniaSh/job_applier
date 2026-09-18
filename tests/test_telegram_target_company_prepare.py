@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import app.cli as cli_module
 from app.application.autofill.models import (
+    AutofillFailureReason,
     AutofillFieldResult,
     AutofillStatus,
     FieldClassification,
@@ -39,6 +41,7 @@ from app.telegram.application_prepare import (
     FAILED_TEXT,
     STARTING_TEXT,
     TelegramPrepareState,
+    format_application_prepare_failed_text,
     run_explicit_application_prepare,
 )
 from app.telegram.client import (
@@ -58,9 +61,15 @@ URL = "https://job-boards.greenhouse.io/agoda/jobs/6886113"
 
 
 class _FakeAutofill:
-    def __init__(self, *, status: AutofillStatus = AutofillStatus.READY_FOR_REVIEW) -> None:
+    def __init__(
+        self,
+        *,
+        status: AutofillStatus = AutofillStatus.READY_FOR_REVIEW,
+        failure_reason: AutofillFailureReason | None = None,
+    ) -> None:
         self.calls: list[tuple[str, str, bool]] = []
         self.status = status
+        self.failure_reason = failure_reason
 
     def run(self, source: str, external_id: str, *, keep_open: bool = True):
         self.calls.append((source, external_id, keep_open))
@@ -69,6 +78,7 @@ class _FakeAutofill:
             external_id=external_id,
             application_url=URL,
             status=self.status,
+            failure_reason=self.failure_reason,
             filled_fields=[
                 AutofillFieldResult(
                     label="First name",
@@ -203,6 +213,27 @@ class _FlakySendOnceClient(_FakeClient):
         )
 
 
+class _AlwaysFailSendClient(_FakeClient):
+    """Client whose `send_text_message` always fails with a definitely-
+    undelivered error, for permanent-failure tests. Tracks the number of
+    attempts so a test can confirm the bounded retry budget was exhausted
+    and nothing tried again afterwards."""
+
+    def __init__(self, *, error: TelegramRequestError | None = None) -> None:
+        super().__init__()
+        self.send_attempts = 0
+        self._error = error or TelegramRequestError(
+            "Too Many Requests",
+            http_status=429,
+            error_code=429,
+            description="Too Many Requests: retry after 1",
+        )
+
+    def send_text_message(self, text, *, chat_id=None, reply_to_message_id=None, buttons=None):
+        self.send_attempts += 1
+        raise self._error
+
+
 def _vacancy(*, description: str = "Java backend services") -> NormalizedVacancy:
     return NormalizedVacancy(
         source=SOURCE,
@@ -288,6 +319,7 @@ def _process(
     chat_id: str = "222",
     allowed_chat_ids: frozenset[str] | None = None,
     cache: TargetCompanyAnalysisCache | None = None,
+    client: _FakeClient | None = None,
 ) -> tuple[_FakeClient, _FakeAutofill, object, TelegramDeliveryStorage]:
     storage = TelegramDeliveryStorage(tmp_path / "jobs.db")
     if history_status is not None:
@@ -312,7 +344,7 @@ def _process(
     inner = PrepareApplicationService(runner, storage)
     service = prepare_service if prepare_service is not None else _RecordingPrepareService(inner)
     lookup = cache if cache is not None else _seed_cache(tmp_path / "cache.json", recommendation=recommendation)
-    client = _FakeClient()
+    client = client if client is not None else _FakeClient()
     cli_module._process_callback_update(
         update=_callback_update(chat_id=chat_id, data=data),
         client=client,
@@ -454,6 +486,63 @@ def test_autofill_failed_status_is_reported_safely(tmp_path: Path) -> None:
     client, _runner, _service, _storage = _process(tmp_path=tmp_path, autofill=autofill)
     assert autofill.calls == [(SOURCE, EXTERNAL_ID, True)]
     assert client.texts[0]["text"] == FAILED_TEXT
+
+
+def test_unsupported_form_outcome_send_recovers_after_transient_connection_failure(
+    tmp_path: Path,
+) -> None:
+    """A definitely-undelivered failure (connection reset before the
+    request was sent) on the ordinary prepare-outcome send -- not just the
+    review-ready handoff -- must get the same bounded retry, so a transient
+    Telegram/network blip right after an UNSUPPORTED_FORM result does not
+    silently drop the outcome.
+    """
+    autofill = _FakeAutofill(
+        status=AutofillStatus.FAILED,
+        failure_reason=AutofillFailureReason.UNSUPPORTED_FORM,
+    )
+    flaky_client = _FlakySendOnceClient(
+        error=TelegramRequestError(
+            "connection reset",
+            description="connection failed before request was sent",
+        )
+    )
+    client, runner, _service, _storage = _process(
+        tmp_path=tmp_path,
+        autofill=autofill,
+        client=flaky_client,
+    )
+    assert runner.calls == [(SOURCE, EXTERNAL_ID, True)]
+    expected_text = format_application_prepare_failed_text(
+        SimpleNamespace(failure_reason=AutofillFailureReason.UNSUPPORTED_FORM)
+    )
+    # Exactly one delivered message -- the retry recovered the same outcome,
+    # it never produced a second, duplicate delivery.
+    assert len(client.texts) == 1
+    assert client.texts[0]["text"] == expected_text
+
+
+def test_unsupported_form_outcome_send_fails_closed_without_duplicate_attempt(
+    tmp_path: Path,
+) -> None:
+    """A definitely-undelivered failure that persists past the bounded
+    retry budget must fail closed -- exhausting exactly that budget -- and
+    must not fall through to a second, unbounded send from the generic
+    exception handler.
+    """
+    autofill = _FakeAutofill(
+        status=AutofillStatus.FAILED,
+        failure_reason=AutofillFailureReason.UNSUPPORTED_FORM,
+    )
+    always_fail_client = _AlwaysFailSendClient()
+    client, runner, _service, _storage = _process(
+        tmp_path=tmp_path,
+        autofill=autofill,
+        client=always_fail_client,
+    )
+    assert runner.calls == [(SOURCE, EXTERNAL_ID, True)]
+    assert client.texts == []
+    assert client.send_attempts == cli_module._REVIEW_NOTICE_MAX_ATTEMPTS
 
 
 def test_wrong_chat_is_rejected(tmp_path: Path) -> None:

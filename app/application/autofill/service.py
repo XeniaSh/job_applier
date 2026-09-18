@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlparse
 import logging
 
 from app.application.autofill.answers import ApplicationAnswerGenerator
@@ -206,6 +207,14 @@ class AutofillService:
                 warnings=[f"Security challenge detected: {challenge}"],
             )
         if not adapter.recognize(page):
+            logger.warning(
+                "autofill recognition failed reason=UNSUPPORTED_FORM source=%s external_id=%s "
+                "application_host=%s page_host=%s",
+                vacancy.source,
+                vacancy.external_id,
+                _safe_host(vacancy.application_url),
+                _safe_host(getattr(page, "url", "")),
+            )
             return stage1_autofill_result(
                 source=vacancy.source,
                 external_id=vacancy.external_id,
@@ -397,6 +406,16 @@ def _enrich_unresolved(
         value=value,
         generated=True,
     )
+
+
+def _safe_host(url: object) -> str:
+    """Netloc only -- never the path, query, or fragment, which could carry PII or raw content."""
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        return urlparse(url).netloc.lower()
+    except ValueError:
+        return ""
 
 
 def _failed(

@@ -4184,13 +4184,26 @@ def _dispatch_target_company_application_prepare(
         def send_outcome(text: str, *, buttons: list[list[TelegramInlineButton]] | None = None) -> None:
             if notified["sent"]:
                 return
-            client.send_text_message(
-                text,
-                chat_id=chat_id,
-                reply_to_message_id=message_id if message_id > 0 else None,
-                buttons=buttons,
-            )
+            # Set before attempting delivery, same as on_ready below: once an
+            # outcome delivery has been attempted (even if it ultimately
+            # fails after bounded retries), a later call here -- e.g. the
+            # generic exception handler's fallback FAILED_TEXT -- must not
+            # fall through to a second, unbounded send attempt.
             notified["sent"] = True
+            _, sent = _send_with_bounded_retry(
+                lambda: client.send_text_message(
+                    text,
+                    chat_id=chat_id,
+                    reply_to_message_id=message_id if message_id > 0 else None,
+                    buttons=buttons,
+                )
+            )
+            if not sent:
+                logger.error(
+                    "Target company application prepare outcome could not be delivered for %s:%s",
+                    source,
+                    external_id,
+                )
 
         def on_ready(result) -> None:
             # The autofill runner is about to block this thread in

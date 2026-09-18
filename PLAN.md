@@ -61,6 +61,15 @@ Future cycles now emit one existing-runtime-log diagnostic per drop with
 provider, source company, source, external ID, deterministic form-family
 reason, and URL host/path; no vacancy description or candidate data is logged.
 
+Live Lever verification subsequently confirmed collection/delivery for Qonto,
+but both tested Qonto prepares failed at LeverAdapter DOM recognition with
+`UNSUPPORTED_FORM`. Resolver/source dispatch is locally correct; a safe adapter
+fix requires the actual Qonto page shape, so recognition remains unchanged
+until a supervised live run supplies that evidence. The configured Finom site
+`pnlfin` also returned HTTP 404 from the existing Lever watcher; no replacement
+identifier is derivable from local project evidence, and the watcher records
+that company error without blocking other Lever companies.
+
 The deterministic configuration inventory is 30 companies: 8 Greenhouse, 2
 Lever (Qonto — `https://jobs.lever.co/qonto`, Finom —
 `https://jobs.eu.lever.co/pnlfin`), 1 Ashby (TravelPerk / Perk —
@@ -202,6 +211,9 @@ Everything listed below was the "main remaining work" as of 2026-09-10 and is no
 - `application_answers` in the LinkedIn `PreparationService` (not the Stage 1 autofill answer generator) is a no-op placeholder.
 - `data/prepared/` retention (TASK-049) is a fixed 14-day age rule for LinkedIn cover-letter artifacts only; there is no CLI command to trigger cleanup on demand.
 - Lever/Ashby/SmartRecruiters watchers exist (`app/company_watch/watchers/`, TASK-042..044). Lever is now wired into the Target Companies `run`/Telegram delivery path and its existing autofill adapter; Ashby and SmartRecruiters remain standalone. `custom` / `manual` entries have no watcher. Greenhouse and Lever are the currently supported end-to-end providers.
+- Lever collection/delivery is locally complete, but live Qonto preparation is
+  blocked on the unobserved current Qonto form DOM; do not broaden the Lever
+  adapter from fixture assumptions.
 - Generic Greenhouse jobs in `run` are delivered to the LinkedIn Telegram destination. This matches “current discovery”, not Target Companies.
 - HH exists as CLI-only collection (`OQ-007`), not part of `run`.
 - Root `candidate_profile.md` is tracked in Git and may contain personal search context. Do not relocate unless requested (`OQ-010`).

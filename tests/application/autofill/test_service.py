@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from app.application.autofill.browser import BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
@@ -194,6 +195,31 @@ def test_service_unsupported_form_sets_failure_reason() -> None:
     assert "UNSUPPORTED_FORM" in result.warnings
     # An unsupported form is never left open for a nonexistent "review".
     assert session.closed is True
+
+
+def test_service_unsupported_form_logs_safe_host_diagnostics(caplog) -> None:
+    """A recognition failure must log enough to diagnose it against a live
+    ATS page -- the application/current page hosts -- without ever logging
+    the page body, candidate data, or raw HTML.
+    """
+    session = _FakeSession(page=SimpleNamespace(url="https://jobs.lever.co/qonto/some-redirect-target"))
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_UnsupportedFormAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    with caplog.at_level("WARNING"):
+        service.run("target_company:greenhouse:agoda", "1", keep_open=True)
+    diagnostics = [
+        record.getMessage()
+        for record in caplog.records
+        if "UNSUPPORTED_FORM" in record.getMessage() and "page_host" in record.getMessage()
+    ]
+    assert len(diagnostics) == 1
+    assert "job-boards.greenhouse.io" in diagnostics[0]
+    assert "jobs.lever.co" in diagnostics[0]
 
 
 def _raising_browser_factory():
