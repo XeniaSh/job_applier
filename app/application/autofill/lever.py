@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
@@ -36,6 +37,17 @@ _JOB_DETAIL_APPLY_SELECTOR = "a[data-qa='btn-apply-top'], a[data-qa='btn-apply-b
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_host(url: object) -> str:
+    """Netloc only -- never the path, query, or fragment, which could carry PII or raw content."""
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        return urlparse(url).netloc.lower()
+    except ValueError:
+        return ""
+
+
 _QUESTION_CONTEXT_JS = """el => {
     const container = el.closest('.application-question') || el.closest('li') || el.parentElement;
     if (!container) return {label: '', required: false};
@@ -51,16 +63,27 @@ class LeverFormError(Exception):
     """Raised when a Lever application page cannot be used."""
 
 
-def is_lever_application_page(page: Page) -> bool:
+def _application_page_check(page: Page) -> tuple[bool, str]:
+    """Same recognition logic as `is_lever_application_page`, plus a stable
+    reason token for diagnostics. Kept as a single implementation so the
+    logged reason can never diverge from the actual recognition result.
+    """
     if page.locator("#application-form, form.application-form").count() > 0:
-        return True
+        return True, "application_form_selector"
     if (
         page.locator('input[name="resume"]').count() > 0
         and page.locator('input#name, input[name="name"]').count() > 0
     ):
-        return True
+        return True, "resume_and_name_inputs"
     url = page.url.lower()
-    return "lever.co" in url and page.locator("form").count() > 0
+    if "lever.co" in url and page.locator("form").count() > 0:
+        return True, "lever_co_generic_form"
+    return False, "no_match"
+
+
+def is_lever_application_page(page: Page) -> bool:
+    matched, _ = _application_page_check(page)
+    return matched
 
 
 def _job_detail_apply_action(page: Page) -> Locator | None:
@@ -106,7 +129,14 @@ class LeverAdapter:
     last_privacy_trace: dict[str, object] | None = None
 
     def recognize(self, page: Page) -> bool:
-        return is_lever_application_page(page)
+        result, reason = _application_page_check(page)
+        logger.info(
+            "lever_prepare stage=form_recognition result=%s reason=%s page_host=%s",
+            result,
+            reason,
+            _safe_host(page.url),
+        )
+        return result
 
     def detect_challenge(self, page: Page) -> str | None:
         return detect_security_challenge(page)
@@ -122,7 +152,13 @@ class LeverAdapter:
         unfamiliar page.
         Local fixtures skip the extra settle.
         """
-        if is_lever_job_detail_page(page):
+        is_job_detail = is_lever_job_detail_page(page)
+        logger.info(
+            "lever_prepare stage=detail_detection is_job_detail=%s page_host=%s",
+            is_job_detail,
+            _safe_host(page.url),
+        )
+        if is_job_detail:
             self._navigate_from_job_detail(page)
         timeout = 2_000 if page.url.startswith("file:") else 30_000
         try:
@@ -134,18 +170,41 @@ class LeverAdapter:
         page.wait_for_timeout(500)
 
     def _navigate_from_job_detail(self, page: Page) -> None:
+        apply_locator_count = page.locator(_JOB_DETAIL_APPLY_SELECTOR).count()
+        logger.info(
+            "lever_prepare stage=apply_action apply_locator_count=%s",
+            apply_locator_count,
+        )
         action = _job_detail_apply_action(page)
         if action is None:
             return
+        pre_url = page.url
+        click_raised: str | None = None
         try:
             action.click(timeout=5_000)
-        except PlaywrightError:
+        except PlaywrightError as exc:
+            click_raised = type(exc).__name__
+        logger.info(
+            "lever_prepare stage=apply_action click_attempted=True click_raised=%s",
+            click_raised,
+        )
+        if click_raised is not None:
             return
         timeout = 2_000 if page.url.startswith("file:") else 15_000
+        form_ready_selector_found = True
         try:
             page.wait_for_selector(_FORM_READY_SELECTOR, timeout=timeout)
         except PlaywrightTimeoutError:
-            return
+            form_ready_selector_found = False
+        post_url = page.url
+        logger.info(
+            "lever_prepare stage=navigation pre_host=%s post_host=%s url_changed=%s "
+            "form_ready_selector_found=%s",
+            _safe_host(pre_url),
+            _safe_host(post_url),
+            pre_url != post_url,
+            form_ready_selector_found,
+        )
 
     def discover_fields(self, page: Page) -> list[DiscoveredField]:
         if not self.recognize(page):
