@@ -198,7 +198,7 @@ Everything listed below was the "main remaining work" as of 2026-09-10 and is no
 - `PreparationService` supports only `linkedin-email` cover-letter/resume packages. Target Companies uses `PrepareApplicationService` (TASK-078/079) plus Telegram **Prepare application** (TASK-037..039) with `PrepareIntent.EXPLICIT`. These remain two separate mechanisms; do not merge them.
 - `application_answers` in the LinkedIn `PreparationService` (not the Stage 1 autofill answer generator) is a no-op placeholder.
 - `data/prepared/` retention (TASK-049) is a fixed 14-day age rule for LinkedIn cover-letter artifacts only; there is no CLI command to trigger cleanup on demand.
-- Lever/Ashby/SmartRecruiters watchers exist (`app/company_watch/watchers/`, TASK-042..044) but are standalone: not called from `run` or Telegram, so those Target Companies entries are not actually delivered yet. `custom` / `manual` entries have no watcher. Only the Greenhouse watcher is wired end-to-end. There is no autofill adapter for any ATS other than Greenhouse.
+- Lever/Ashby/SmartRecruiters watchers exist (`app/company_watch/watchers/`, TASK-042..044). Lever is now wired into the Target Companies `run`/Telegram delivery path and its existing autofill adapter; Ashby and SmartRecruiters remain standalone. `custom` / `manual` entries have no watcher. Greenhouse and Lever are the currently supported end-to-end providers.
 - Generic Greenhouse jobs in `run` are delivered to the LinkedIn Telegram destination. This matches “current discovery”, not Target Companies.
 - HH exists as CLI-only collection (`OQ-007`), not part of `run`.
 - Root `candidate_profile.md` is tracked in Git and may contain personal search context. Do not relocate unless requested (`OQ-010`).
@@ -207,7 +207,7 @@ Everything listed below was the "main remaining work" as of 2026-09-10 and is no
 
 ### Intentionally later
 
-- TASK-046: additional-ATS autofill adapters (beyond Greenhouse), one per iteration; depends on TASK-033 (done) and the matching watcher existing — Lever/Ashby/SmartRecruiters watchers (TASK-042..044) already exist, so this task has no unmet dependency, it simply has not been picked up yet
+- TASK-046: additional-ATS autofill adapters (beyond Greenhouse), one per iteration; Lever is done through the existing watcher, resolver, adapter, and Target Companies delivery path; Ashby/SmartRecruiters remain later candidates
 - TASK-047: auto-submit policy computation only (no submit action); depends on TASK-033 and TASK-041 (both done), so it also has no unmet dependency
 - Workday (`OQ-006`), including TASK-045 — blocked on an explicit user request
 
@@ -1465,9 +1465,9 @@ blocked:
 
 - TASK-045 (Workday watcher) is `blocked` on an explicit user request
   (`OQ-006`).
-- TASK-046 (additional autofill adapters) is `todo` with no unmet
-  dependency: it depends on TASK-033 (done) and a matching watcher, and
-  Lever/Ashby/SmartRecruiters watchers (TASK-042..044) already exist.
+- TASK-046 (additional autofill adapters) is done for Lever, including runtime
+  Target Companies collection/delivery wiring; Ashby and SmartRecruiters are
+  not started.
 - TASK-047 (auto-submit policy computation only) is `todo` with no unmet
   dependency: it depends on TASK-033 and TASK-041 (both done).
 - TASK-048 (auto-submit execution) is `done`: implemented behind
