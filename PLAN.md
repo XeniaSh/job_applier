@@ -64,17 +64,18 @@ Lever (Qonto — `https://jobs.lever.co/qonto`, Finom —
 `https://jobs.ashbyhq.com/Perk`), 2 SmartRecruiters-labelled entries (Canva —
 `https://careers.smartrecruiters.com/canva`, Wise — `https://wise.jobs/Jobs`),
 1 Teamtailor (TradingView — `https://tradingview.teamtailor.com/jobs`), and
-16 custom/manual/ambiguous entries. The current `run` path watches only
-Greenhouse; the Lever/Ashby/SmartRecruiters watchers are standalone, and only
-Lever has a local autofill adapter.
+16 custom/manual/ambiguous entries. The current `run` path now watches
+Greenhouse and Lever; Ashby/SmartRecruiters watchers remain standalone, and
+only Lever has a local autofill adapter.
 
 Recommendation: once runtime evidence is available, prioritize the next
 provider by observed unsupported count. On architecture fit alone, Lever is
 the safest next coverage task because it has two configured companies, an
 existing watcher, resolver, and fixture-tested adapter; wiring that vertical
 slice into Target Companies is preferable to guessing at a heterogeneous
-custom family. No provider-specific adapter task is selected from frequency
-until `dropped_unsupported_form` observations are persisted or supplied.
+custom family. The bounded Lever vertical slice is now implemented; Ashby,
+SmartRecruiters, custom, and other providers remain out of scope until runtime
+evidence supports a next task.
 
 Entry point:
 

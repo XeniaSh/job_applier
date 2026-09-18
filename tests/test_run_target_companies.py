@@ -10,6 +10,7 @@ from app.company_watch.candidate_constraints import CandidateConstraints
 from app.company_watch.feasibility import ApplicationFeasibility
 from app.company_watch.seniority import SeniorityClassification
 from app.company_watch.watchers.greenhouse import GreenhouseWatchResult
+from app.company_watch.watchers.lever import LeverWatchResult
 from app.models import (
     Decision,
     RecommendedCoverTemplate,
@@ -41,6 +42,18 @@ companies:
     job_board_url: https://job-boards.greenhouse.io/jetbrains
     role_keywords: [java, backend]
 """
+
+LEVER_COMPANY_CONFIG = """  - name: Loom
+    priority: A
+    language: english
+    relocation_status: confirmed_role_based
+    watcher_type: lever
+    ats: lever
+    job_board_url: https://jobs.lever.co/loom
+    role_keywords: [java, backend]
+"""
+
+LEVER_ONLY_CONFIG = "companies:\n" + LEVER_COMPANY_CONFIG
 
 
 def _constraints() -> CandidateConstraints:
@@ -95,6 +108,28 @@ def _vacancy(
     )
 
 
+def _lever_vacancy(
+    *,
+    company: str = "Loom",
+    slug: str | None = None,
+    external_id: str = "501",
+    title: str = "Java Backend Engineer",
+    description: str = "Java backend services",
+) -> NormalizedVacancy:
+    site = slug or company.lower()
+    return NormalizedVacancy(
+        source=f"target_company:lever:{site}",
+        external_id=external_id,
+        title=title,
+        company=company,
+        location="Bangkok",
+        employment="Full-time",
+        description=description,
+        url=f"https://jobs.lever.co/{site}/{external_id}",
+        published_at="2026-09-05T10:00:00Z",
+    )
+
+
 def _feasibility() -> ApplicationFeasibility:
     return ApplicationFeasibility(
         label="UNCLEAR",
@@ -112,11 +147,12 @@ def _seniority() -> SeniorityClassification:
     return SeniorityClassification(label="SENIOR", reasons=["title has senior"])
 
 
-def _write_config(tmp_path: Path) -> Path:
+def _write_config(tmp_path: Path, *, include_lever: bool = False) -> Path:
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_file = config_dir / "target_companies.yaml"
-    config_file.write_text(MINIMAL_CONFIG, encoding="utf-8")
+    content = MINIMAL_CONFIG + (LEVER_COMPANY_CONFIG if include_lever else "")
+    config_file.write_text(content, encoding="utf-8")
     return config_file
 
 
@@ -145,6 +181,15 @@ def _fake_watcher(vacancies: list[NormalizedVacancy]):
             return GreenhouseWatchResult(vacancies=list(vacancies), errors=[], raw_fetched=len(vacancies))
 
     return FakeWatcher()
+
+
+def _fake_lever_watcher(vacancies: list[NormalizedVacancy]):
+    class FakeLeverWatcher:
+        def watch(self, companies: object) -> LeverWatchResult:
+            _ = companies
+            return LeverWatchResult(vacancies=list(vacancies), errors=[], raw_fetched=len(vacancies))
+
+    return FakeLeverWatcher()
 
 
 class _CountingAnalyzer:
@@ -176,6 +221,8 @@ def _run_cycle(
     tmp_path: Path,
     *,
     vacancies: list[NormalizedVacancy],
+    lever_vacancies: list[NormalizedVacancy] | None = None,
+    include_lever_company: bool = False,
     analyzer: _CountingAnalyzer | None = None,
     telegram: _FakeTelegram | None = None,
     deliveries: TelegramDeliveryStorage | None = None,
@@ -187,7 +234,7 @@ def _run_cycle(
     if reset_sent_memory:
         cli_module._TARGET_COMPANY_SENT_IN_PROCESS.clear()
     _set_base_env(monkeypatch, tmp_path, target_chat_id=target_chat_id)
-    config_file = _write_config(tmp_path)
+    config_file = _write_config(tmp_path, include_lever=include_lever_company)
     monkeypatch.setattr(cli_module, "load_candidate_constraints", lambda path: _constraints())
     analyzer = analyzer or _CountingAnalyzer()
     telegram = telegram or _FakeTelegram(chat_id=target_chat_id)
@@ -201,6 +248,7 @@ def _run_cycle(
         analyze_limit=analyze_limit,
         analyze_limit_per_company=analyze_limit_per_company,
         watcher=_fake_watcher(vacancies),
+        lever_watcher=_fake_lever_watcher(lever_vacancies or []),
         telegram_client=telegram,
     )
     return result, analyzer, telegram, deliveries
@@ -429,6 +477,174 @@ def test_unconfirmed_application_form_is_excluded_before_ranking(monkeypatch, tm
     reloaded_cache.load()
     assert reloaded_cache.get(unconfirmed) is None
     assert reloaded_cache.get_by_identity("target_company:greenhouse:elastic", "1") is None
+
+
+def test_greenhouse_and_lever_watchers_are_combined(monkeypatch, tmp_path: Path) -> None:
+    gh_vacancy = _vacancy(external_id="1", title="Java Backend Engineer")
+    lever_vacancy = _lever_vacancy(external_id="501", title="Kotlin Backend Engineer")
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, deliveries = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[gh_vacancy],
+        lever_vacancies=[lever_vacancy],
+        include_lever_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.watched == 2
+    assert result.sent == 2
+    assert {getattr(card, "source") for card in telegram.cards} == {gh_vacancy.source, lever_vacancy.source}
+    assert deliveries.get_message_ref(
+        source=lever_vacancy.source,
+        external_id=lever_vacancy.external_id,
+        chat_id="222",
+    ) is not None
+    assert deliveries.get_message_ref(
+        source=gh_vacancy.source,
+        external_id=gh_vacancy.external_id,
+        chat_id="222",
+    ) is not None
+
+
+def test_lever_vacancy_with_canonical_hosted_url_passes_supported_form_gate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    lever_vacancy = _lever_vacancy(external_id="501", title="Java Backend Engineer")
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        lever_vacancies=[lever_vacancy],
+        include_lever_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.dropped_unsupported_form == 0
+    assert result.selected == 1
+    assert len(analyzer.calls) == 1
+    assert telegram.cards
+    assert getattr(telegram.cards[0], "external_id") == "501"
+
+
+def test_lever_unsupported_form_url_is_excluded_before_ranking(monkeypatch, tmp_path: Path) -> None:
+    # Discovered via Lever (source=target_company:lever:loom), but the URL is
+    # not Lever's own hosted job-board shape -- see
+    # app.application.autofill.lever_url.is_canonical_lever_hosted_url.
+    unconfirmed = NormalizedVacancy(
+        source="target_company:lever:loom",
+        external_id="1",
+        title="Java Backend Engineer",
+        company="Loom",
+        location="Remote",
+        employment="Full-time",
+        description="Java backend services",
+        url="https://jobs.loom.com/apply?posting=1",
+        published_at="2026-09-05T10:00:00Z",
+    )
+    remaining = _lever_vacancy(external_id="2", title="Office Coordinator")
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        lever_vacancies=[unconfirmed, remaining],
+        include_lever_company=True,
+        analyzer=analyzer,
+        analyze_limit=1,
+        analyze_limit_per_company=1,
+    )
+
+    assert result.dropped_unsupported_form == 1
+    assert result.selected == 1
+    assert len(analyzer.calls) == 1
+    assert "Office Coordinator" in analyzer.calls[0]
+    assert telegram.cards
+    assert getattr(telegram.cards[0], "external_id") == "2"
+
+
+def test_greenhouse_unsupported_form_still_dropped_with_lever_configured(
+    monkeypatch, tmp_path: Path
+) -> None:
+    unconfirmed = NormalizedVacancy(
+        source="target_company:greenhouse:elastic",
+        external_id="1",
+        title="Java Backend Engineer",
+        company="Elastic",
+        location="Remote",
+        employment="Full-time",
+        description="Java backend services",
+        url="https://jobs.elastic.co/jobs?gh_jid=1",
+        published_at="2026-09-05T10:00:00Z",
+    )
+    lever_vacancy = _lever_vacancy(external_id="2", title="Office Coordinator")
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[unconfirmed],
+        lever_vacancies=[lever_vacancy],
+        include_lever_company=True,
+        analyzer=analyzer,
+        analyze_limit=1,
+        analyze_limit_per_company=1,
+    )
+
+    assert result.dropped_unsupported_form == 1
+    assert result.selected == 1
+    assert telegram.cards
+    assert getattr(telegram.cards[0], "external_id") == "2"
+
+
+def test_cycle_enabled_with_only_lever_companies(monkeypatch, tmp_path: Path) -> None:
+    _set_base_env(monkeypatch, tmp_path, target_chat_id="222")
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "target_companies.yaml"
+    config_file.write_text(LEVER_ONLY_CONFIG, encoding="utf-8")
+    monkeypatch.setattr(cli_module, "load_candidate_constraints", lambda path: _constraints())
+    analyzer = _CountingAnalyzer()
+    telegram = _FakeTelegram(chat_id="222")
+    deliveries = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    lever_vacancy = _lever_vacancy(external_id="1")
+
+    result = cli_module._run_target_companies_cycle(
+        settings=cli_module.Settings(),
+        analyzer=analyzer,
+        deliveries=deliveries,
+        config_path=config_file,
+        cache_path=tmp_path / "analysis_cache.json",
+        watcher=_fake_watcher([]),
+        lever_watcher=_fake_lever_watcher([lever_vacancy]),
+        telegram_client=telegram,
+    )
+
+    assert result.enabled is True
+    assert result.skip_reason is None
+    assert result.sent == 1
+
+
+def test_cycle_skips_when_no_supported_target_companies(monkeypatch, tmp_path: Path) -> None:
+    _set_base_env(monkeypatch, tmp_path, target_chat_id="222")
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "target_companies.yaml"
+    config_file.write_text("companies: []\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "load_candidate_constraints", lambda path: _constraints())
+
+    result = cli_module._run_target_companies_cycle(
+        settings=cli_module.Settings(),
+        analyzer=_CountingAnalyzer(),
+        deliveries=TelegramDeliveryStorage(db_path=tmp_path / "jobs.db"),
+        config_path=config_file,
+        cache_path=tmp_path / "analysis_cache.json",
+        watcher=_fake_watcher([]),
+        lever_watcher=_fake_lever_watcher([]),
+    )
+
+    assert result.enabled is False
+    assert result.skip_reason == "no_supported_target_companies"
 
 
 def test_lead_manager_skip_is_not_sent_while_senior_ic_is(monkeypatch, tmp_path: Path) -> None:

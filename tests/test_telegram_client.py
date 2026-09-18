@@ -168,6 +168,38 @@ def test_target_company_greenhouse_callback_round_trip() -> None:
     assert map_code_to_source("gh") == "greenhouse"
 
 
+def test_target_company_lever_callback_round_trip() -> None:
+    full_loom = "target_company:lever:loom"
+    full_notion = "target_company:lever:notion"
+    assert map_source_to_code(full_loom) == "tcl.loom"
+    assert map_source_to_code("tcl.loom") == "tcl.loom"
+    assert map_code_to_source("tcl.loom") == full_loom
+    assert map_code_to_source(full_loom) == full_loom
+    assert map_code_to_source(map_source_to_code(full_loom)) == full_loom
+    assert map_source_to_code(map_code_to_source("tcl.notion")) == "tcl.notion"
+
+    parsed_loom = parse_callback_data("skip:tcl.loom:12")
+    parsed_notion = parse_callback_data("applied:tcl.notion:12")
+    assert parsed_loom == ("skip", full_loom, "12", None)
+    assert parsed_notion == ("applied", full_notion, "12", None)
+    assert parsed_loom[1] != parsed_notion[1]
+    assert parse_callback_data("undo:tcl.loom:739281:abc12345") == (
+        "undo",
+        full_loom,
+        "739281",
+        "abc12345",
+    )
+    assert parse_callback_data("prepapp:tcl.loom:6886113") == (
+        APPLICATION_PREPARE_ACTION,
+        full_loom,
+        "6886113",
+        None,
+    )
+
+    # Greenhouse and Lever target-company codes never collide with each other.
+    assert map_source_to_code(full_loom) != map_source_to_code("target_company:greenhouse:loom")
+
+
 def test_prepare_is_hidden_for_target_companies_and_generic_greenhouse() -> None:
     url = "https://job-boards.greenhouse.io/agoda/jobs/739281"
     linkedin = build_action_buttons(
@@ -217,6 +249,31 @@ def test_prepare_is_hidden_for_target_companies_and_generic_greenhouse() -> None
     assert generic[0][0].callback_data == "applied:gh:12"
     assert target_full[-1][0].url == url
     assert generic[-1][0].text == "🔗 Open vacancy"
+
+
+def test_application_prepare_is_supported_for_target_company_lever() -> None:
+    url = "https://jobs.lever.co/loom/739281"
+    target_full = build_action_buttons("target_company:lever:loom", "739281", url)
+    target_code = build_action_buttons("tcl.loom", "739281", url)
+
+    assert source_supports_prepare("target_company:lever:loom") is False
+    assert source_supports_prepare("tcl.loom") is False
+    assert source_supports_application_prepare("target_company:lever:loom") is True
+    assert source_supports_application_prepare("tcl.loom") is True
+
+    for buttons in (target_full, target_code):
+        labels = [button.text for row in buttons for button in row]
+        assert "🛠 Prepare" not in labels
+        assert labels == [
+            APPLICATION_PREPARE_BUTTON_TEXT,
+            "✅ Applied",
+            "⏭ Skip",
+            "🔗 Open vacancy",
+        ]
+        assert buttons[0][0].callback_data == "prepapp:tcl.loom:739281"
+        assert buttons[1][0].callback_data == "applied:tcl.loom:739281"
+        assert buttons[2][0].callback_data == "skip:tcl.loom:739281"
+    assert target_full[-1][0].url == url
 
 
 def test_send_prepared_application_payload_contains_buttons(monkeypatch) -> None:

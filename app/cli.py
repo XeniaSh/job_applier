@@ -61,6 +61,7 @@ from app.company_watch.watchers.greenhouse import (
     GreenhouseTargetWatcher,
     is_greenhouse_target,
 )
+from app.company_watch.watchers.lever import LeverTargetWatcher, is_lever_target
 from app.collectors.email_imap_client import (
     EmailAuthenticationError,
     EmailConnectionError,
@@ -139,6 +140,7 @@ from app.telegram.application_prepare import (
     run_explicit_application_prepare,
 )
 from app.application.autofill.greenhouse_url import is_canonical_greenhouse_hosted_url
+from app.application.autofill.lever_url import is_canonical_lever_hosted_url
 from app.application.autofill.review_session import ReviewSessionRegistry, default_review_registry
 from app.telegram.formatter import (
     card_display_sections,
@@ -1183,14 +1185,20 @@ def _is_unchanged_cached_skip(
     return cached.recommendation.label == RECOMMENDATION_SKIP
 
 
+_TARGET_COMPANY_LEVER_SOURCE_PREFIX = "target_company:lever:"
+
+
 def _has_unconfirmed_application_form(vacancy: NormalizedVacancy) -> bool:
     """Stage 1 delivery gate only: True when we cannot yet confirm the
     application form is supported without a browser (see
-    `greenhouse_url.is_canonical_greenhouse_hosted_url`). This is not a
+    `greenhouse_url.is_canonical_greenhouse_hosted_url` and
+    `lever_url.is_canonical_lever_hosted_url`). This is not a
     recommendation and must never be treated as SKIP — a custom-domain
     Greenhouse embed may still work once an adapter/heuristic can confirm
     it; we just can't tell before Telegram delivery today.
     """
+    if vacancy.source.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX):
+        return not is_canonical_lever_hosted_url(vacancy.url)
     return not is_canonical_greenhouse_hosted_url(vacancy.url)
 
 
@@ -1210,6 +1218,7 @@ def _run_target_companies_cycle(
     analyze_limit: int = _RUN_TARGET_COMPANY_ANALYZE_LIMIT,
     analyze_limit_per_company: int | None = _RUN_TARGET_COMPANY_ANALYZE_LIMIT_PER_COMPANY,
     watcher: GreenhouseTargetWatcher | None = None,
+    lever_watcher: LeverTargetWatcher | None = None,
     telegram_client: TelegramClient | None = None,
 ) -> _TargetCompaniesCycleResult:
     chat_id = _target_companies_run_chat_id(settings)
@@ -1223,9 +1232,10 @@ def _run_target_companies_cycle(
         return _TargetCompaniesCycleResult(enabled=False, skip_reason="config_load_error")
 
     greenhouse_companies = [item for item in loaded.companies if is_greenhouse_target(item)]
-    if not greenhouse_companies:
-        _run_log("Target companies: skipped (no Greenhouse target companies)", component="main")
-        return _TargetCompaniesCycleResult(enabled=False, skip_reason="no_greenhouse_companies")
+    lever_companies = [item for item in loaded.companies if is_lever_target(item)]
+    if not greenhouse_companies and not lever_companies:
+        _run_log("Target companies: skipped (no supported target companies)", component="main")
+        return _TargetCompaniesCycleResult(enabled=False, skip_reason="no_supported_target_companies")
 
     try:
         constraints = load_candidate_constraints(constraints_path)
@@ -1245,14 +1255,19 @@ def _run_target_companies_cycle(
     )
     analysis_cache = TargetCompanyAnalysisCache(cache_path)
     analysis_cache.load()
-    companies_by_name = {item.name.casefold(): item for item in greenhouse_companies}
-    watch_result = (watcher or GreenhouseTargetWatcher()).watch(greenhouse_companies)
+    companies_by_name = {
+        item.name.casefold(): item for item in (*greenhouse_companies, *lever_companies)
+    }
+    greenhouse_watch_result = (watcher or GreenhouseTargetWatcher()).watch(greenhouse_companies)
+    lever_watch_result = (lever_watcher or LeverTargetWatcher()).watch(lever_companies)
+    watched_vacancies = [*greenhouse_watch_result.vacancies, *lever_watch_result.vacancies]
+    watch_errors = [*greenhouse_watch_result.errors, *lever_watch_result.errors]
 
     candidates: list[NormalizedVacancy] = []
     dropped_delivered = 0
     dropped_cached_skip = 0
     dropped_unsupported_form = 0
-    for vacancy in watch_result.vacancies:
+    for vacancy in watched_vacancies:
         if _target_company_already_delivered(
             deliveries,
             source=vacancy.source,
@@ -1307,7 +1322,7 @@ def _run_target_companies_cycle(
     result = _TargetCompaniesCycleResult(
         enabled=True,
         chat_id=target_chat_id,
-        watched=len(watch_result.vacancies),
+        watched=len(watched_vacancies),
         dropped_delivered=dropped_delivered,
         dropped_cached_skip=dropped_cached_skip,
         dropped_unsupported_form=dropped_unsupported_form,
@@ -1333,7 +1348,7 @@ def _run_target_companies_cycle(
         component="main",
     )
     if verbose:
-        for error in watch_result.errors:
+        for error in watch_errors:
             _run_log(f"Target companies watcher error: {error.company_name}: {error.message}", component="main")
     if telegram_client is None:
         close_client = getattr(target_client, "close", None)

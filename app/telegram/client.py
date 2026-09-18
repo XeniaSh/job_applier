@@ -466,6 +466,12 @@ def build_ready_text(*, title: str, company: str | None, recommended_resume: str
 
 _TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX = "target_company:greenhouse:"
 _TARGET_COMPANY_GREENHOUSE_CODE_PREFIX = "tcg."
+_TARGET_COMPANY_LEVER_SOURCE_PREFIX = "target_company:lever:"
+_TARGET_COMPANY_LEVER_CODE_PREFIX = "tcl."
+_TARGET_COMPANY_ATS_PREFIXES = (
+    (_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX, _TARGET_COMPANY_GREENHOUSE_CODE_PREFIX),
+    (_TARGET_COMPANY_LEVER_SOURCE_PREFIX, _TARGET_COMPANY_LEVER_CODE_PREFIX),
+)
 _PREPARE_SUPPORTED_SOURCES = frozenset({"linkedin-email"})
 APPLICATION_PREPARE_ACTION = "prepapp"
 APPLICATION_PREPARE_BUTTON_TEXT = "Prepare application"
@@ -514,7 +520,9 @@ def source_supports_prepare(source: str) -> bool:
 def source_supports_application_prepare(source: str) -> bool:
     """Return whether explicit Target Company application prepare is offered."""
     canonical = _canonical_source(source)
-    return canonical.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX)
+    return canonical.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX) or canonical.startswith(
+        _TARGET_COMPANY_LEVER_SOURCE_PREFIX
+    )
 
 
 def _canonical_source(source: str) -> str:
@@ -535,12 +543,13 @@ def map_source_to_code(source: str) -> str:
     mapped = mapping.get(source)
     if mapped is not None:
         return mapped
-    board = _target_company_greenhouse_board(source, prefix=_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX)
-    if board is not None:
-        return f"{_TARGET_COMPANY_GREENHOUSE_CODE_PREFIX}{board}"
-    board = _target_company_greenhouse_board(source, prefix=_TARGET_COMPANY_GREENHOUSE_CODE_PREFIX)
-    if board is not None:
-        return source
+    for source_prefix, code_prefix in _TARGET_COMPANY_ATS_PREFIXES:
+        board = _target_company_board(source, prefix=source_prefix)
+        if board is not None:
+            return f"{code_prefix}{board}"
+        board = _target_company_board(source, prefix=code_prefix)
+        if board is not None:
+            return source
     raise ValueError(f"Unknown source: {source}")
 
 
@@ -554,16 +563,17 @@ def map_code_to_source(code: str) -> str:
     mapped = reverse.get(code)
     if mapped is not None:
         return mapped
-    board = _target_company_greenhouse_board(code, prefix=_TARGET_COMPANY_GREENHOUSE_CODE_PREFIX)
-    if board is not None:
-        return f"{_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX}{board}"
-    board = _target_company_greenhouse_board(code, prefix=_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX)
-    if board is not None:
-        return code
+    for source_prefix, code_prefix in _TARGET_COMPANY_ATS_PREFIXES:
+        board = _target_company_board(code, prefix=code_prefix)
+        if board is not None:
+            return f"{source_prefix}{board}"
+        board = _target_company_board(code, prefix=source_prefix)
+        if board is not None:
+            return code
     raise ValueError(f"Unknown source code: {code}")
 
 
-def _target_company_greenhouse_board(value: str, *, prefix: str) -> str | None:
+def _target_company_board(value: str, *, prefix: str) -> str | None:
     if not value.startswith(prefix):
         return None
     board = value[len(prefix) :]
