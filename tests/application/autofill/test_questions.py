@@ -1842,3 +1842,277 @@ def test_named_skill_set_ambiguous_multi_match_uses_explicit_primary_language() 
     assert mapped.kind is QuestionKind.SKILL_SET_CHOICE
     assert mapped.fillable is True
     assert mapped.value == "Ruby"
+
+
+# --- Combined visa/relocation elaboration textarea (e.g. "Do you need visa
+# and/or relocation support for this role? If yes, please, elaborate.") must
+# never collapse to a boolean from generic relocation willingness or generic
+# sponsorship alone ---
+
+
+def test_visa_relocation_elaboration_textarea_is_unresolved_never_boolean_true() -> None:
+    profile = _profile(application_policy={"relocation": {"willing": True}})
+    mapped = map_question(
+        DiscoveredField(
+            label="Do you need visa and/or relocation support for this role? If yes, please, elaborate.",
+            field_type="textarea",
+            required=True,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.VISA_SPONSORSHIP
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_visa_relocation_elaboration_ignores_generic_sponsorship_fact_too() -> None:
+    profile = _profile(work_eligibility={"requires_visa_sponsorship": True})
+    mapped = map_question(
+        DiscoveredField(
+            label="Do you need visa and/or relocation support for this role? If yes, please, elaborate.",
+            field_type="textarea",
+            required=True,
+        ),
+        profile,
+    )
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_plain_relocation_question_is_unaffected_by_the_elaboration_check() -> None:
+    """A plain "are you willing to relocate?" question (no visa/sponsor
+    mention) must keep answering from generic relocation willingness."""
+    profile = _profile(application_policy={"relocation": {"willing": True}})
+    mapped = map_question(
+        DiscoveredField(label="Are you willing to relocate to Singapore?"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.RELOCATION
+    assert mapped.fillable is True
+
+
+# --- Option text participates in acknowledgement classification (e.g. Wolt's
+# "Wolt Recruitment Privacy Statement" select, whose label alone carries no
+# privacy cue but whose only real option does) ---
+
+
+def test_option_text_privacy_statement_select_is_required_privacy_acknowledgement() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Wolt Recruitment Privacy Statement",
+            field_type="select",
+            required=True,
+            options=[
+                "",
+                "I understand that my personal data will be processed in accordance with "
+                "Wolt’s recruitment privacy statement.",
+            ],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.PRIVACY_CONSENT
+    assert mapped.fillable is True
+    assert "personal data" in str(mapped.value).lower()
+
+
+def test_option_text_does_not_broaden_optional_talent_pool_consent() -> None:
+    """A talent-pool/newsletter select must stay NEWSLETTER even though its
+    label alone is generic -- option text must not pull it into privacy."""
+    mapped = map_question(
+        DiscoveredField(
+            label="Stay in touch",
+            field_type="select",
+            options=["Yes, keep my profile in the talent pool for future opportunities", "No"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.NEWSLETTER
+
+
+# --- Wolt-shaped "currently located in <region>, or would you need to
+# relocate?" tri-state select: already-located / would-relocate / remote.
+# Implemented for this question shape generically, not by company name. ---
+
+
+def test_located_or_relocate_choice_picks_already_located_when_residing_there() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Helsinki, Finland",
+            "country": "Finland",
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you currently located in Helsinki, or would you need to relocate?",
+            field_type="select",
+            required=True,
+            options=[
+                "I'm already located in a hiring region",
+                "I would need to relocate",
+                "I'm looking for a remote job",
+            ],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.RELOCATION
+    assert mapped.value == "I'm already located in a hiring region"
+    assert mapped.fillable is True
+
+
+def test_located_or_relocate_choice_multi_city_picks_would_relocate_when_willing() -> None:
+    profile = _profile(application_policy={"relocation": {"willing": True}})
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you currently located in Helsinki or Stockholm or would you need to relocate?",
+            field_type="select",
+            required=True,
+            options=[
+                "I'm already located in a hiring region",
+                "I would need to relocate",
+                "I'm looking for a remote job",
+            ],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.RELOCATION
+    assert mapped.value == "I would need to relocate"
+    assert mapped.fillable is True
+
+
+def test_located_or_relocate_choice_never_picks_remote() -> None:
+    """Remote must never be picked merely because willingness/residence is
+    unresolved -- remote-friendliness of the vacancy is irrelevant here."""
+    profile = _profile(application_policy={"relocation": {"willing": True}})
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you currently located in Helsinki, or would you need to relocate?",
+            field_type="select",
+            required=True,
+            options=["I'm already located in a hiring region", "I'm looking for a remote job"],
+        ),
+        profile,
+    )
+    # No option carries a "need to relocate" cue, so this must stay unresolved
+    # rather than falling back to the remote option.
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_located_or_relocate_choice_stays_unresolved_without_facts() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you currently located in Helsinki, or would you need to relocate?",
+            field_type="select",
+            required=True,
+            options=[
+                "I'm already located in a hiring region",
+                "I would need to relocate",
+                "I'm looking for a remote job",
+            ],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.RELOCATION
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+# --- Required demographic age: only ever selects an explicit decline option,
+# never derives or stores an age ---
+
+
+def test_age_decline_option_is_selected_when_required() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="What's your age?",
+            field_type="select",
+            required=True,
+            options=["I don't wish to answer", "18-24", "25-34"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.AGE
+    assert mapped.value == "I don't wish to answer"
+    assert mapped.fillable is True
+
+
+def test_age_without_decline_option_is_never_derived() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="What's your age?",
+            field_type="select",
+            required=True,
+            options=["18-24", "25-34"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.AGE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_optional_age_is_never_derived() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="What's your age?",
+            field_type="select",
+            required=False,
+            options=["I don't wish to answer", "18-24", "25-34"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.AGE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+# --- "Are you a national of the country where you are applying to work?"
+# needs vacancy context `map_question` does not have; it must stay
+# unresolved here and only resolve via the service layer's vacancy-aware
+# enrichment (see test_service.py) ---
+
+
+def test_nationality_question_is_unresolved_without_vacancy_context() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you a national of the country where you are applying to work?",
+            field_type="select",
+            required=True,
+            options=["Yes", "No"],
+        ),
+        _profile(work_eligibility={"citizenship": ["Germany"]}),
+    )
+    assert mapped.kind is QuestionKind.NATIONALITY
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_nationality_question_never_substitutes_residence_or_work_authorization() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Berlin, Germany",
+            "country": "Germany",
+        },
+        work_eligibility={
+            "citizenship": [],
+            "work_authorizations": [{"country": "Germany", "authorized": True}],
+        },
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you a national of the country where you are applying to work?",
+            required=True,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.NATIONALITY
+    assert mapped.fillable is False
+    assert mapped.value is None

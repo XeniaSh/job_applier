@@ -85,6 +85,54 @@ def test_optional_gender_is_sensitive_and_unfilled() -> None:
     assert classified.classification is FieldClassification.SENSITIVE_OPTIONAL
 
 
+def test_age_policy_selects_decline_option_when_required() -> None:
+    classified = classify_field(
+        DiscoveredField(
+            label="What's your age?",
+            field_type="select",
+            required=True,
+            options=["I don't wish to answer", "18-24", "25-34"],
+        ),
+        _profile(),
+    )
+    assert classified.kind.value == "age"
+    assert classified.fill is True
+    assert classified.value == "I don't wish to answer"
+    assert classified.classification is FieldClassification.SUPPORTED_DETERMINISTIC
+
+
+def test_required_age_without_decline_option_is_unknown_required() -> None:
+    classified = classify_field(
+        DiscoveredField(
+            label="What's your age?",
+            field_type="select",
+            required=True,
+            options=["18-24", "25-34"],
+        ),
+        _profile(),
+    )
+    assert classified.kind.value == "age"
+    assert classified.fill is False
+    assert classified.value is None
+    assert classified.classification is FieldClassification.UNKNOWN_REQUIRED
+
+
+def test_optional_age_is_sensitive_and_unfilled() -> None:
+    classified = classify_field(
+        DiscoveredField(
+            label="What's your age?",
+            field_type="select",
+            required=False,
+            options=["18-24", "25-34"],
+        ),
+        _profile(),
+    )
+    assert classified.kind.value == "age"
+    assert classified.fill is False
+    assert classified.value is None
+    assert classified.classification is FieldClassification.SENSITIVE_OPTIONAL
+
+
 def test_sensitive_optional_is_not_filled() -> None:
     classified = classify_field(
         DiscoveredField(label="Ethnicity", field_type="select", required=False),

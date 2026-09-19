@@ -168,6 +168,23 @@ def test_match_affirmative_option_accepts_acknowledge_confirm() -> None:
     assert match_affirmative_option(True, ["Yes", "No"]) == "Yes"
 
 
+def test_match_affirmative_option_accepts_i_understand_with_privacy_cue() -> None:
+    options = [
+        "Please select",
+        "I understand that my personal data will be processed in accordance "
+        "with Wolt’s recruitment privacy statement.",
+    ]
+    assert match_affirmative_option(True, options) == options[1]
+
+
+def test_match_affirmative_option_rejects_unrelated_i_understand() -> None:
+    options = [
+        "Please select",
+        "I understand this role requires occasional weekend on-call shifts.",
+    ]
+    assert match_affirmative_option(True, options) is None
+
+
 def test_match_application_source_prefers_website_over_linkedin() -> None:
     options = ["Employee Referral", "LinkedIn", "Company Careers Site", "Other"]
     assert match_application_source(options, ["Company Website", "LinkedIn", "Other"]) == "Company Careers Site"

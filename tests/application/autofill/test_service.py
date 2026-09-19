@@ -10,10 +10,11 @@ from app.application.autofill.browser import BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.greenhouse import GreenhouseAdapter
 from app.application.autofill.lever import LeverAdapter
-from app.application.autofill.models import AutofillFailureReason, AutofillStatus
+from app.application.autofill.models import AutofillFailureReason, AutofillStatus, FieldClassification
 from app.application.autofill.resolver import ResolvedVacancy, VacancyResolveError
 from app.application.autofill.service import AutofillService, default_adapter_for_source
 from app.application.candidate_profile import CandidateProfile
+from app.collectors.vacancy_collector import NormalizedVacancy
 
 
 def _profile() -> CandidateProfile:
@@ -680,3 +681,359 @@ def test_service_lever_source_dispatches_and_logs_unsupported_form_diagnostics(c
     assert "jobs.lever.co" in form_recognition_log
     assert all(r.levelno == logging.WARNING for r in caplog.records)
     assert not any("utm_source" in m or "#top" in m for m in messages)
+
+
+class _RequiredSensitiveAndUnsupportedAdapter(_FakeAdapter):
+    """A required demographic field with no decline option, plus a required
+    unsupported (signature) control -- neither is fillable, and both must
+    still count toward unresolved_required_fields.
+    """
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(label="First Name", name="first_name", required=True),
+            DiscoveredField(label="Ethnicity", name="ethnicity", field_type="select", required=True),
+            DiscoveredField(label="Sign here to certify", name="signature", field_type="signature", required=True),
+        ]
+
+
+def test_service_required_sensitive_and_unsupported_fields_count_as_unresolved_required() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_RequiredSensitiveAndUnsupportedAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == "Ethnicity" for item in result.sensitive_fields)
+    assert any(item.label == "Ethnicity" for item in result.unresolved_required_fields)
+    assert any("Sign here" in item.label for item in result.unsupported_fields)
+    assert any("Sign here" in item.label for item in result.unresolved_required_fields)
+    # No duplicate accounting: each field appears in unresolved_required once.
+    labels = [item.label for item in result.unresolved_required_fields]
+    assert labels.count("Ethnicity") == 1
+    assert labels.count("Sign here to certify") == 1
+
+
+class _OptionalSensitiveAndUnsupportedAdapter(_FakeAdapter):
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(label="First Name", name="first_name", required=True),
+            DiscoveredField(label="Ethnicity", name="ethnicity", field_type="select", required=False),
+            DiscoveredField(label="Sign here to certify", name="signature", field_type="signature", required=False),
+        ]
+
+
+def test_service_optional_sensitive_and_unsupported_fields_are_not_unresolved_required() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_OptionalSensitiveAndUnsupportedAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == "Ethnicity" for item in result.sensitive_fields)
+    assert any("Sign here" in item.label for item in result.unsupported_fields)
+    assert not any(item.label == "Ethnicity" for item in result.unresolved_required_fields)
+    assert not any("Sign here" in item.label for item in result.unresolved_required_fields)
+
+
+_NATIONALITY_LABEL = "Are you a national of the country where you are applying to work?"
+
+
+class _NationalityFakeAdapter:
+    """Records whatever value AutofillService fills and echoes it back on
+    read-back, like a real select control's post-fill visible text would.
+    """
+
+    def __init__(self) -> None:
+        self.filled: dict[str | None, object] = {}
+
+    def detect_challenge(self, page: object) -> str | None:
+        _ = page
+        return None
+
+    def recognize(self, page: object) -> bool:
+        _ = page
+        return True
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(
+                label=_NATIONALITY_LABEL,
+                name="nationality",
+                field_type="select",
+                options=["Yes", "No"],
+                required=True,
+            )
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        if not getattr(classified, "fill", False):
+            return False
+        self.filled[classified.field.name] = classified.value
+        return True
+
+    def upload_resume(self, page: object, resume_path: object, field: object) -> bool:
+        _ = page, resume_path, field
+        return False
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        value = self.filled.get(field.name)
+        return None if value is None else str(value)
+
+
+class _NationalityResolver:
+    """Resolves to a vacancy whose structured location is `location`, like
+    the real Greenhouse/Lever resolvers' `NormalizedVacancy.location`.
+    """
+
+    def __init__(self, location: str | None) -> None:
+        self._location = location
+
+    def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
+        normalized = NormalizedVacancy(
+            source=source,
+            external_id=external_id,
+            title="Backend Engineer",
+            company="Wolt",
+            location=self._location,
+            employment=None,
+            description="",
+            url="https://example.test/apply",
+            published_at=None,
+        )
+        return ResolvedVacancy(
+            source=source,
+            external_id=external_id,
+            title="Backend Engineer",
+            company="Wolt",
+            url="https://example.test/apply",
+            application_url="https://example.test/apply",
+            vacancy=normalized,
+        )
+
+
+def _profile_with_citizenship(citizenship: list[str]) -> CandidateProfile:
+    return CandidateProfile.model_validate(
+        {
+            "identity": {
+                "first_name": "Ada",
+                "last_name": "Example",
+                "email": "ada.example@example.test",
+                "phone": "+15555550100",
+            },
+            "work_eligibility": {"citizenship": citizenship},
+            "application_files": {"default_resume": "tests/fixtures/autofill/resume.txt"},
+        }
+    )
+
+
+def test_service_nationality_answers_yes_when_citizenship_matches_vacancy_country() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_NationalityResolver("Berlin, Germany"),
+        profile_loader=lambda: _profile_with_citizenship(["Germany"]),
+        adapter=_NationalityFakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == _NATIONALITY_LABEL for item in result.filled_fields)
+    assert not any(item.label == _NATIONALITY_LABEL for item in result.unresolved_required_fields)
+    filled_item = next(item for item in result.filled_fields if item.label == _NATIONALITY_LABEL)
+    # A vacancy-aware deterministic enrichment must report as such, not as
+    # the pre-enrichment UNKNOWN_REQUIRED classification it started from.
+    assert filled_item.classification is FieldClassification.SUPPORTED_DETERMINISTIC
+
+
+def test_service_nationality_answers_no_when_citizenship_does_not_match_vacancy_country() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_NationalityResolver("Berlin, Germany"),
+        profile_loader=lambda: _profile_with_citizenship(["Spain"]),
+        adapter=_NationalityFakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == _NATIONALITY_LABEL for item in result.filled_fields)
+    assert not any(item.label == _NATIONALITY_LABEL for item in result.unresolved_required_fields)
+
+
+def test_service_nationality_stays_unresolved_when_vacancy_country_is_ambiguous() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_NationalityResolver("Berlin, Germany or Amsterdam, Netherlands"),
+        profile_loader=lambda: _profile_with_citizenship(["Germany"]),
+        adapter=_NationalityFakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == _NATIONALITY_LABEL for item in result.unresolved_required_fields)
+    assert not any(item.label == _NATIONALITY_LABEL for item in result.filled_fields)
+
+
+def test_service_nationality_stays_unresolved_when_citizenship_is_missing() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_NationalityResolver("Berlin, Germany"),
+        profile_loader=lambda: _profile_with_citizenship([]),
+        adapter=_NationalityFakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == _NATIONALITY_LABEL for item in result.unresolved_required_fields)
+    assert not any(item.label == _NATIONALITY_LABEL for item in result.filled_fields)
+
+
+def test_service_nationality_stays_unresolved_when_vacancy_location_is_none() -> None:
+    """A vacancy with no structured location at all (not merely an ambiguous
+    one) must fail closed the same way -- `_single_vacancy_work_country`
+    returns None before `countries_mentioned` is even consulted.
+    """
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_NationalityResolver(None),
+        profile_loader=lambda: _profile_with_citizenship(["Germany"]),
+        adapter=_NationalityFakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == _NATIONALITY_LABEL for item in result.unresolved_required_fields)
+    assert not any(item.label == _NATIONALITY_LABEL for item in result.filled_fields)
+
+
+def _profile_with_citizenship_and_matching_residence(
+    citizenship: list[str],
+    *,
+    current_location: str,
+    country: str,
+    work_authorized_country: str,
+) -> CandidateProfile:
+    return CandidateProfile.model_validate(
+        {
+            "identity": {
+                "first_name": "Ada",
+                "last_name": "Example",
+                "email": "ada.example@example.test",
+                "phone": "+15555550100",
+                "current_location": current_location,
+                "country": country,
+            },
+            "work_eligibility": {
+                "citizenship": citizenship,
+                "work_authorizations": [{"country": work_authorized_country, "authorized": True}],
+            },
+            "application_files": {"default_resume": "tests/fixtures/autofill/resume.txt"},
+        }
+    )
+
+
+def test_service_nationality_stays_unresolved_when_residence_and_work_authorization_match_but_citizenship_is_empty() -> None:
+    """Residence and work authorization must never substitute for citizenship.
+    Both explicitly point at Germany here, the vacancy's single work
+    country, yet with citizenship left empty the nationality question must
+    still stay unresolved instead of being answered from either fact.
+    """
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_NationalityResolver("Berlin, Germany"),
+        profile_loader=lambda: _profile_with_citizenship_and_matching_residence(
+            [],
+            current_location="Berlin, Germany",
+            country="Germany",
+            work_authorized_country="Germany",
+        ),
+        adapter=_NationalityFakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == _NATIONALITY_LABEL for item in result.unresolved_required_fields)
+    assert not any(item.label == _NATIONALITY_LABEL for item in result.filled_fields)
+
+
+_ADYEN_VISA_RELOCATION_LABEL = (
+    "Do you need visa and/or relocation support for this role? If yes, please, elaborate."
+)
+
+
+class _AdyenVisaRelocationAdapter(_FakeAdapter):
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(label="First Name", name="first_name", required=True),
+            DiscoveredField(
+                label=_ADYEN_VISA_RELOCATION_LABEL,
+                name="visa_relocation",
+                field_type="textarea",
+                required=True,
+            ),
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        if getattr(classified.field, "name", None) == "visa_relocation":
+            raise AssertionError(
+                "fill_field must not be called for the unresolved visa/relocation textarea"
+            )
+        return bool(getattr(classified, "fill", False))
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        if field.name == "first_name":
+            return "Ada"
+        return None
+
+
+def test_service_adyen_combined_visa_relocation_textarea_stays_unresolved_required() -> None:
+    """Exact regression for the Adyen-shaped combined visa/relocation
+    elaboration textarea: discovered required, never filled, an empty
+    read-back, and counted exactly once as unresolved-required -- never in
+    filled_fields. Mirrors the adapter-level coverage in
+    test_visually_required_elaboration_textarea_stays_unresolved_required_never_true.
+    """
+    adapter = _AdyenVisaRelocationAdapter()
+    field = DiscoveredField(
+        label=_ADYEN_VISA_RELOCATION_LABEL,
+        name="visa_relocation",
+        field_type="textarea",
+        required=True,
+    )
+    assert field.required is True
+    assert adapter.read_back(object(), field) is None
+
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    unresolved_labels = [item.label for item in result.unresolved_required_fields]
+    assert unresolved_labels.count(_ADYEN_VISA_RELOCATION_LABEL) == 1
+    assert not any(item.label == _ADYEN_VISA_RELOCATION_LABEL for item in result.filled_fields)

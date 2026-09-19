@@ -35,7 +35,7 @@ def classify_field(field: DiscoveredField, profile: CandidateProfile) -> Classif
 
     mapped = map_question(field, profile)
 
-    if mapped.kind is QuestionKind.GENDER:
+    if mapped.kind in (QuestionKind.GENDER, QuestionKind.AGE):
         if mapped.fillable:
             return ClassifiedField(
                 field=field,

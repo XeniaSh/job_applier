@@ -25,6 +25,10 @@ _COUNTRY_ALIASES = {
     "thailand": "thailand",
     "pl": "poland",
     "poland": "poland",
+    "fi": "finland",
+    "finland": "finland",
+    "se": "sweden",
+    "sweden": "sweden",
 }
 
 
@@ -801,6 +805,17 @@ class CandidateProfile(BaseModel):
             if normalize_country_name(item.country) == needle:
                 return item.authorized
         return None
+
+    def is_national_of(self, country: str) -> bool | None:
+        """Explicit citizenship match for a country. None when citizenship is unset.
+
+        Never inferred from current_location, identity.country, or work
+        authorization -- those describe residence/eligibility, not nationality.
+        """
+        needle = normalize_country_name(country)
+        if not needle or not self.work_eligibility.citizenship:
+            return None
+        return any(normalize_country_name(item) == needle for item in self.work_eligibility.citizenship)
 
     def sponsorship_required_for(self, country: str | None) -> bool | None:
         """Country-specific visa-sponsorship need. Unset means do not answer.

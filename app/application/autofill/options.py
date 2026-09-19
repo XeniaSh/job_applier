@@ -24,6 +24,10 @@ _LOCATED_IN_RE = re.compile(
     r"(?:currently\s+)?(?:located in|reside(?:s)? in|residing in|live in|living in)\s+(.+?)(?:\s*\?|$)",
     re.IGNORECASE,
 )
+_LOCATED_OR_RELOCATE_RE = re.compile(
+    r"(?:currently\s+)?located in\s+(.+?)\s*,?\s*(?:or\s+)?(?:would you\s+)?(?:need|require)(?:\s+to)?\s+relocat",
+    re.IGNORECASE,
+)
 _PLACE_SPLIT_RE = re.compile(r"\s*(?:,|/|\bor\b|\band\b)\s*", re.IGNORECASE)
 _RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
 _PLUS_RE = re.compile(
@@ -219,6 +223,60 @@ def parse_located_in_places(text: str) -> list[str]:
         seen.add(key)
         places.append(cleaned)
     return places
+
+
+def is_located_or_relocate_choice(text: str) -> bool:
+    """True for a combined "are you currently located in <places>, or would
+    you need to relocate?" question shape, distinct from a plain located-in
+    presence question (no relocate clause) or a plain relocation question
+    (no named hiring region to be "already located" in).
+    """
+    return bool(_LOCATED_OR_RELOCATE_RE.search(text or ""))
+
+
+def parse_located_or_relocate_places(text: str) -> list[str]:
+    """Named hiring-region places from a combined located-in-or-relocate
+    question, stopping before the "...or would you need to relocate" clause.
+
+    `parse_located_in_places` cannot be reused here: its regex assumes no
+    trailing clause and would otherwise swallow the relocate clause into the
+    place list.
+    """
+    match = _LOCATED_OR_RELOCATE_RE.search(text or "")
+    if not match:
+        return []
+    blob = match.group(1).strip().rstrip("?.,")
+    places: list[str] = []
+    seen: set[str] = set()
+    for part in _PLACE_SPLIT_RE.split(blob):
+        cleaned = _strip_leading_the(part).strip(" ?.,!")
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        places.append(cleaned)
+    return places
+
+
+def match_located_or_relocate_option(choice: str | None, options: list[str]) -> str | None:
+    """Map a semantic 'already_located' / 'would_relocate' choice to a visible
+    option. Never selects a remote-job option: remote availability answers a
+    different question than where the candidate lives or would relocate.
+    Only returns a match when exactly one non-remote option carries the cue,
+    so an ambiguous option set stays unresolved rather than guessing.
+    """
+    if choice not in {"already_located", "would_relocate"}:
+        return None
+    labels = [item.strip() for item in options if item and item.strip()]
+    non_remote = [item for item in labels if "remote" not in item.lower()]
+    if choice == "already_located":
+        cues = ("already located", "already in", "already based", "no relocation", "no need to relocate")
+    else:
+        cues = ("need to relocate", "would relocate", "willing to relocate", "relocate")
+    matches = [item for item in non_remote if any(cue in item.lower() for cue in cues)]
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 
 def _strip_leading_the(value: str) -> str:
@@ -434,6 +492,14 @@ def match_yes_no(value: bool, options: list[str]) -> str | None:
     return None
 
 
+_PRIVACY_DATA_CUES = (
+    "privacy",
+    "personal data",
+    "data processing",
+    "processed in accordance",
+)
+
+
 _AFFIRMATIVE_ACK_LABELS = (
     "acknowledge/confirm",
     "acknowledge",
@@ -462,7 +528,12 @@ def match_affirmative_option(value: bool, options: list[str]) -> str | None:
         if token in lowered:
             return lowered[token]
     for item in labels:
-        if "acknowledge" in item.lower():
+        lowered_item = item.lower()
+        if "acknowledge" in lowered_item:
+            return item
+        if "i understand" in lowered_item and any(
+            cue in lowered_item for cue in _PRIVACY_DATA_CUES
+        ):
             return item
     return None
 
@@ -661,6 +732,14 @@ def match_prefer_not_to_disclose_gender(options: list[str]) -> str | None:
             if needle in option.lower():
                 return option
     return declined[0]
+
+
+def match_decline_to_answer_option(options: list[str]) -> str | None:
+    """Generic 'I don't wish to answer' style option, not tied to gender
+    semantics -- the underlying decline phrasing (prefer not to say / decline
+    / do not wish to answer) is the same across demographic questions.
+    """
+    return match_prefer_not_to_disclose_gender(options)
 
 
 def match_gender_option(wanted: str, options: list[str]) -> str | None:

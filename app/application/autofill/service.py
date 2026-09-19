@@ -27,6 +27,7 @@ from app.application.autofill.models import (
     FieldClassification,
     stage1_autofill_result,
 )
+from app.application.autofill.options import match_yes_no
 from app.application.autofill.questions import QuestionKind
 from app.application.autofill.resolver import (
     TARGET_COMPANY_LEVER_PREFIX,
@@ -40,7 +41,7 @@ from app.application.autofill.submit import (
     attempt_auto_submit,
     default_submit_adapter_for_source,
 )
-from app.application.candidate_profile import CandidateProfile
+from app.application.candidate_profile import CandidateProfile, countries_mentioned
 from app.application.candidate_profile_loader import CandidateProfileLoadError, load_structured_candidate_profile
 
 logger = logging.getLogger(__name__)
@@ -270,9 +271,13 @@ class AutofillService:
                 continue
             if item.classification is FieldClassification.SENSITIVE_OPTIONAL:
                 sensitive.append(record)
+                if item.field.required:
+                    unresolved_required.append(record)
                 continue
             if item.classification is FieldClassification.UNSUPPORTED:
                 unsupported.append(record)
+                if item.field.required:
+                    unresolved_required.append(record)
                 continue
             if item.kind is QuestionKind.RESUME and item.fill:
                 resume_items.append(item)
@@ -309,13 +314,15 @@ class AutofillService:
                     warnings.append(
                         f"Cover letter was left unresolved for '{item.field.label}'."
                     )
-            if item.classification is FieldClassification.UNKNOWN_REQUIRED:
+            # Generic on `field.required`, not the classification enum: any
+            # active item that reaches this point unfilled must be accounted
+            # for, even if a future classification value doesn't match
+            # UNKNOWN_REQUIRED/UNKNOWN_OPTIONAL exactly.
+            if item.field.required:
                 unresolved_required.append(record)
                 if item.unresolved_reason:
                     warnings.append(item.unresolved_reason)
-            elif item.classification is FieldClassification.UNKNOWN_OPTIONAL:
-                if item.kind is QuestionKind.GITLAB_USERNAME:
-                    continue
+            elif item.kind is not QuestionKind.GITLAB_USERNAME:
                 unresolved_optional.append(record)
 
         for item in resume_items:
@@ -394,6 +401,11 @@ def _enrich_unresolved(
             value=cover_letter_text,
             generated=True,
         )
+    if item.kind is QuestionKind.NATIONALITY:
+        enriched = _enrich_nationality(item, profile=profile, vacancy=vacancy)
+        if enriched is not None:
+            return enriched
+        return item
     if answer_generator is None:
         return item
     answer = answer_generator.generate(item.field, profile, vacancy)
@@ -410,6 +422,45 @@ def _enrich_unresolved(
         value=value,
         generated=True,
     )
+
+
+def _single_vacancy_work_country(vacancy: ResolvedVacancy) -> str | None:
+    """The vacancy's work country, only when exactly one is deterministically
+    named in its structured location. Ambiguous or missing locations fail
+    closed (None), never guessing a country.
+    """
+    normalized = vacancy.vacancy
+    location = normalized.location if normalized else None
+    if not location:
+        return None
+    countries = countries_mentioned(location)
+    if len(countries) != 1:
+        return None
+    return countries[0]
+
+
+def _enrich_nationality(
+    item: ClassifiedField,
+    *,
+    profile: CandidateProfile,
+    vacancy: ResolvedVacancy,
+) -> ClassifiedField | None:
+    """Answers "are you a national of the country where you are applying to
+    work?" only when the vacancy names exactly one work country and the
+    candidate's citizenship list is explicitly non-empty. Never substitutes
+    residence or work authorization for citizenship. No private values are
+    logged here.
+    """
+    country = _single_vacancy_work_country(vacancy)
+    if country is None:
+        return None
+    answer = profile.is_national_of(country)
+    if answer is None:
+        return None
+    value = match_yes_no(answer, item.field.options) if item.field.options else answer
+    if value is None:
+        return None
+    return replace(item, fill=True, value=value, classification=FieldClassification.SUPPORTED_DETERMINISTIC)
 
 
 def _safe_host(url: object) -> str:

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — Visually Required Textarea</title>
+</head>
+<body>
+  <h1>Backend Engineer</h1>
+  <form id="application_form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+
+    <div class="field text">
+      <label for="visa_relocation">Do you need visa and/or relocation support for this role? If yes, please, elaborate. *</label>
+      <textarea id="visa_relocation" name="job_application_answers_attributes_0_text_value"></textarea>
+    </div>
+
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+</body>
+</html>

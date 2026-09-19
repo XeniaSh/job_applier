@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.application.candidate_profile import CandidateProfile
+from app.application.candidate_profile import CandidateProfile, countries_mentioned
 
 
 def _valid_payload(**overrides: object) -> dict[str, object]:
@@ -285,3 +285,20 @@ def test_known_technology_names_combines_stack_and_technology_years() -> None:
         )
     )
     assert profile.known_technology_names() == ["Kotlin", "Java", "Kafka"]
+
+
+def test_countries_mentioned_recognizes_finland() -> None:
+    assert countries_mentioned("Helsinki, Finland") == ["finland"]
+    assert countries_mentioned("Remote (FI)") == ["finland"]
+
+
+def test_countries_mentioned_recognizes_sweden() -> None:
+    assert countries_mentioned("Stockholm, Sweden") == ["sweden"]
+    assert countries_mentioned("Remote (SE)") == ["sweden"]
+
+
+def test_countries_mentioned_does_not_match_finland_or_sweden_as_substrings() -> None:
+    # "fi"/"se" are whole-word matched only, so ordinary words containing
+    # those letters must never be mistaken for the Finland/Sweden aliases.
+    assert countries_mentioned("Office located near the seaside") == []
+    assert countries_mentioned("Remote-first engineering team") == []

@@ -12,8 +12,11 @@ from app.application.autofill.acknowledgements import (
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import (
     find_known_technologies_in_text,
+    is_located_or_relocate_choice,
     match_application_source,
+    match_decline_to_answer_option,
     match_interest_option,
+    match_located_or_relocate_option,
     match_named_skill_set,
     match_option,
     match_prefer_not_to_disclose_gender,
@@ -23,6 +26,7 @@ from app.application.autofill.options import (
     match_affirmative_option,
     match_sponsorship_option,
     parse_located_in_places,
+    parse_located_or_relocate_places,
     parse_max_choices,
     parse_named_skill_set,
     parse_relocation_destination,
@@ -81,6 +85,8 @@ class QuestionKind(StrEnum):
     WHY_COMPANY = "why_company"
     PROFESSIONAL_FREE_TEXT = "professional_free_text"
     GENDER = "gender"
+    AGE = "age"
+    NATIONALITY = "nationality"
     SENSITIVE = "sensitive"
     UNKNOWN = "unknown"
 
@@ -102,6 +108,8 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.SMS_UPDATES,
         QuestionKind.QUESTION_OVERRIDE,
         QuestionKind.GENDER,
+        QuestionKind.AGE,
+        QuestionKind.NATIONALITY,
         QuestionKind.FIRST_NAME,
         QuestionKind.LAST_NAME,
         QuestionKind.FULL_NAME,
@@ -148,6 +156,33 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
     if _is_gender(text):
         value = _gender_value(field, profile)
         return MappedQuestion(kind=QuestionKind.GENDER, value=value, fillable=bool(value))
+
+    if _is_age(text):
+        value = _age_decline_value(field)
+        return MappedQuestion(kind=QuestionKind.AGE, value=value, fillable=bool(value))
+
+    if _is_nationality_of_vacancy_country(text):
+        # No vacancy context is available here; the resolved vacancy's work
+        # country and the candidate's citizenship are only known once the
+        # service layer enriches this against `ResolvedVacancy`.
+        return MappedQuestion(
+            kind=QuestionKind.NATIONALITY,
+            fillable=False,
+            unresolved_reason=(
+                "nationality relative to the vacancy's work country requires "
+                "vacancy-aware enrichment"
+            ),
+        )
+
+    if _is_visa_relocation_elaboration(text, field):
+        return MappedQuestion(
+            kind=QuestionKind.VISA_SPONSORSHIP,
+            fillable=False,
+            unresolved_reason=(
+                "combined visa/relocation elaboration requires an explicit "
+                "truthful vacancy-country-relative answer"
+            ),
+        )
 
     if _is_sensitive(text):
         return MappedQuestion(kind=QuestionKind.SENSITIVE, fillable=False)
@@ -196,7 +231,8 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             fillable=True,
         )
 
-    acknowledgement = classify_acknowledgement(text)
+    acknowledgement_text = _acknowledgement_search_text(field, text)
+    acknowledgement = classify_acknowledgement(acknowledgement_text)
     if acknowledgement is AcknowledgementClass.MARKETING:
         answer = profile.newsletter_opt_in_answer()
         return MappedQuestion(
@@ -209,7 +245,7 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
 
     if acknowledgement is AcknowledgementClass.APPLICATION_PRIVACY or _is_privacy_consent(text):
         answer = profile.privacy_acknowledgement_answer(required=field.required)
-        if answer is None and is_safe_required_privacy_acknowledgement(field, text):
+        if answer is None and is_safe_required_privacy_acknowledgement(field, acknowledgement_text):
             answer = True
         value: QuestionValue = None
         if answer is True:
@@ -428,6 +464,22 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             fillable=bool(value),
         )
 
+    if is_located_or_relocate_choice(text):
+        places = parse_located_or_relocate_places(field.label) or parse_located_or_relocate_places(text)
+        residing = profile.resides_in_any(places) if places else None
+        willing = profile.relocation_willingness()
+        choice: str | None = None
+        if residing is True:
+            choice = "already_located"
+        elif residing is False and willing is True:
+            choice = "would_relocate"
+        value = match_located_or_relocate_option(choice, field.options) if choice else None
+        return MappedQuestion(
+            kind=QuestionKind.RELOCATION,
+            value=value,
+            fillable=value is not None,
+        )
+
     if _is_relocation(text):
         destination = parse_relocation_destination(field.label) or parse_relocation_destination(text)
         answer = profile.relocation_answer_for(destination)
@@ -598,6 +650,69 @@ def _search_text(field: DiscoveredField) -> str:
         field.element_id or "",
     ]
     return " ".join(part for part in parts if part).lower()
+
+
+def _acknowledgement_search_text(field: DiscoveredField, text: str) -> str:
+    """`text` plus visible option copy, for acknowledgement classification only.
+
+    A required select/checkbox often carries its actual privacy/consent
+    meaning in the option text (e.g. "I understand that my personal data
+    will be processed...") rather than in a generic label like "Recruitment
+    Privacy Statement". Scoped to acknowledgement classification so it
+    cannot broaden unrelated kinds (marketing detection above still uses the
+    label-only `text`).
+    """
+    if not field.options:
+        return text
+    options_text = " ".join(option.lower() for option in field.options if option)
+    return f"{text} {options_text}".strip()
+
+
+def _is_age(text: str) -> bool:
+    if re.search(r"\byour age\b", text):
+        return True
+    if re.fullmatch(r"age\s*\??", text.strip()):
+        return True
+    return "how old are you" in text
+
+
+def _age_decline_value(field: DiscoveredField) -> str | None:
+    """Only ever selects an explicit decline-to-answer option. Never derives age."""
+    if not field.required or not field.options:
+        return None
+    return match_decline_to_answer_option(field.options)
+
+
+_NATIONALITY_OF_WORK_COUNTRY_RE = re.compile(
+    r"national(?:ity)? of the country (?:where|in which) you (?:are|would be) applying",
+    re.IGNORECASE,
+)
+
+
+def _is_nationality_of_vacancy_country(text: str) -> bool:
+    """Explicit citizenship relative to the vacancy's work country.
+
+    Never conflated with residence/current-location, work authorization, or
+    visa questions, all of which are matched separately.
+    """
+    return bool(_NATIONALITY_OF_WORK_COUNTRY_RE.search(text))
+
+
+def _is_visa_relocation_elaboration(text: str, field: DiscoveredField) -> bool:
+    """A combined free-text visa-and-relocation explanation, e.g. "Do you need
+    visa and/or relocation support for this role? If yes, please, elaborate."
+
+    Distinct from a plain "are you willing to relocate?" yes/no question
+    (still handled by `_is_relocation` below): this shape asks for prose
+    that would have to weigh both visa and relocation facts together, which
+    cannot be truthfully answered without vacancy-country context this
+    function does not have, and must never collapse to a boolean.
+    """
+    if not (_is_sponsorship(text) or "visa" in text) or not _is_relocation(text):
+        return False
+    if field.field_type == "textarea":
+        return True
+    return any(term in text for term in ("elaborate", "please describe", "please explain"))
 
 
 def _is_gender(text: str) -> bool:

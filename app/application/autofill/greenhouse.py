@@ -51,6 +51,8 @@ _MENU_CHOICE_KINDS = _BOOLEAN_CHOICE_KINDS | frozenset(
     {
         QuestionKind.GENDER,
         QuestionKind.FIELD_OF_INTEREST,
+        QuestionKind.AGE,
+        QuestionKind.NATIONALITY,
     }
 )
 
@@ -92,6 +94,43 @@ _CHECKBOX_QUESTION_META_JS = """el => {
     const required = ariaRequired === 'true' || markedRequired || /\\*/.test(firstLine);
     return {context: text, required};
 }"""
+
+# Bounded visual/container required-marker detection for ordinary (non-checkbox)
+# text/textarea/select controls. Mirrors the checkbox walk above -- same
+# named/broader stop condition, same marker selectors -- but caps the climb
+# to a few ancestors so it cannot wander into an unrelated sibling
+# question's asterisk. `required`/`aria-required` on the control itself is
+# checked separately by `_is_required`; this only covers the case where the
+# requirement is communicated purely by a visible label marker.
+_ORDINARY_REQUIRED_MARKER_JS = """(el, optionLabel) => {
+    const option = String(optionLabel || '').replace(/\\s+/g, ' ').trim();
+    let node = el.parentElement;
+    let root = null;
+    for (let i = 0; i < 4 && node && node.tagName && !['FORM', 'BODY', 'HTML'].includes(node.tagName); i++) {
+        const text = (node.innerText || '').replace(/\\s+/g, ' ').trim();
+        const marker = String(node.className || '') + ' ' + String(node.id || '');
+        const named = /question/i.test(marker)
+            || /(?:^|\\s)field\\b/i.test(marker)
+            || ['FIELDSET', 'SECTION'].includes(node.tagName);
+        const broader = option
+            ? (text.toLowerCase().includes(option.toLowerCase()) && text.length > option.length + 6)
+            : text.length > 24;
+        if (named || broader) {
+            root = node;
+            break;
+        }
+        node = node.parentElement;
+    }
+    if (!root) return false;
+    const ariaRequired = ((root.getAttribute('aria-required')) || '').toLowerCase();
+    const markedRequired = !!root.querySelector(
+        '[aria-required="true"], [class*="asterisk"], [data-required="true"]'
+    );
+    const firstLine = (root.innerText || '').split('\\n').map(s => s.trim()).find(Boolean) || '';
+    return ariaRequired === 'true' || markedRequired || /\\*/.test(firstLine);
+}"""
+
+_ORDINARY_VISUAL_REQUIRED_TYPES = frozenset({"text", "textarea", "select", "multiselect"} | _TEXT_TYPES)
 
 
 class GreenhouseFormError(Exception):
@@ -469,6 +508,8 @@ def _discover_control(
     required = _is_required(locator)
     if field_type == "checkbox" and not required:
         required = context_required
+    elif not required and field_type in _ORDINARY_VISUAL_REQUIRED_TYPES:
+        required = _has_ordinary_visual_required_marker(locator, label)
     return DiscoveredField(
         label=label,
         name=name,
@@ -592,6 +633,13 @@ def _is_required(locator: Locator) -> bool:
         return True
     aria = (locator.get_attribute("aria-required") or "").lower()
     return aria == "true"
+
+
+def _has_ordinary_visual_required_marker(locator: Locator, label: str) -> bool:
+    try:
+        return bool(locator.evaluate(_ORDINARY_REQUIRED_MARKER_JS, label))
+    except PlaywrightError:
+        return False
 
 
 def _checkbox_display_label(option_label: str, context: str) -> str:

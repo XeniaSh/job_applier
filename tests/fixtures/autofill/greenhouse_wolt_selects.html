@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — Wolt Recruitment Selects</title>
+</head>
+<body>
+  <h1>Backend Engineer</h1>
+  <form id="application_form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+
+    <label for="wolt_privacy">Wolt Recruitment Privacy Statement</label>
+    <select id="wolt_privacy" name="job_application_answers_attributes_0_text_value" required>
+      <option value="">Please select</option>
+      <option>I understand that my personal data will be processed in accordance with Wolt’s recruitment privacy statement.</option>
+    </select>
+
+    <label for="wolt_relocate_single">Are you currently located in Helsinki, or would you need to relocate?</label>
+    <select id="wolt_relocate_single" name="job_application_answers_attributes_1_text_value" required>
+      <option value="">Please select</option>
+      <option>I'm already located in a hiring region</option>
+      <option>I would need to relocate</option>
+      <option>I'm looking for a remote job</option>
+    </select>
+
+    <label for="wolt_relocate_multi">Are you currently located in Helsinki or Stockholm or would you need to relocate?</label>
+    <select id="wolt_relocate_multi" name="job_application_answers_attributes_2_text_value" required>
+      <option value="">Please select</option>
+      <option>I'm already located in a hiring region</option>
+      <option>I would need to relocate</option>
+      <option>I'm looking for a remote job</option>
+    </select>
+
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+</body>
+</html>
