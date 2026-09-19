@@ -512,7 +512,51 @@ def _fill_and_confirm(adapter: AutofillAdapter, page: object, item: ClassifiedFi
     ok = adapter.fill_field(page, item)
     check_item = _with_confirmed_multiselect(adapter, item)
     read_back = adapter.read_back(page, item.field)
-    return bool(ok and _readback_matches(check_item, read_back))
+    confirmed = bool(ok and _readback_matches(check_item, read_back))
+    if not confirmed:
+        _log_unconfirmed_select_choice(check_item, ok=ok, read_back=read_back)
+    return confirmed
+
+
+_SELECT_CHOICE_DIAGNOSTIC_KINDS = frozenset(
+    {QuestionKind.AGE, QuestionKind.RELOCATION, QuestionKind.PRIVACY_CONSENT}
+)
+
+
+def _log_unconfirmed_select_choice(item: ClassifiedField, *, ok: bool, read_back: str | None) -> None:
+    """Bounded structural diagnostic for the three select kinds this module
+    fixes (required privacy acknowledgement, located-or-relocate, and age
+    decline) when both fill+confirm attempts still could not verify the
+    selection.
+
+    Logs only sanitized structural facts -- the field's own question label
+    (normalized whitespace, not a candidate value), required flag, kind,
+    option count, and where (if anywhere) the read-back landed among the
+    discovered options as an index. Never logs option text, the resolved
+    value, or any other candidate/profile value.
+    """
+    if item.kind not in _SELECT_CHOICE_DIAGNOSTIC_KINDS:
+        return
+    options = item.field.options or []
+    selected_index = -1
+    if read_back:
+        needle = read_back.strip().lower()
+        for index, option in enumerate(options):
+            if option.strip().lower() == needle:
+                selected_index = index
+                break
+    logger.warning(
+        "select_choice_unconfirmed field_label=%r kind=%s required=%s "
+        "option_count=%d selected_index=%d interaction_attempted=select_option "
+        "fill_reported_ok=%s readback_checked=%s",
+        " ".join(item.field.label.split()),
+        item.kind.value,
+        item.field.required,
+        len(options),
+        selected_index,
+        ok,
+        bool(read_back),
+    )
 
 
 def _with_confirmed_multiselect(adapter: object, item: ClassifiedField) -> ClassifiedField:
@@ -636,6 +680,7 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
             QuestionKind.SMS_UPDATES,
             QuestionKind.QUESTION_OVERRIDE,
             QuestionKind.GENDER,
+            QuestionKind.AGE,
             QuestionKind.COVER_LETTER,
             QuestionKind.WHY_COMPANY,
             QuestionKind.PROFESSIONAL_FREE_TEXT,
