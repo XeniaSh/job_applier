@@ -6,8 +6,8 @@
   introduced the age-decline select flow, but was never added to this
   allowlist, so a real-site read-back that isn't a byte-for-byte match (but
   is clearly the same option) would be wrongly treated as unconfirmed.
-- `_fill_and_confirm`'s bounded diagnostic, logged only for the three select
-  kinds this covers, only as sanitized structural facts.
+- `_fill_and_confirm`'s bounded diagnostic, logged only for the select kinds
+  this covers, only as sanitized structural facts.
 
 None of this touches a real browser: `_fill_and_confirm` only calls
 `adapter.fill_field` / `adapter.read_back`, so a minimal fake adapter is
@@ -78,6 +78,28 @@ def _gender_field() -> DiscoveredField:
         field_type="select",
         required=True,
         options=["Please select", "Prefer not to disclose"],
+    )
+
+
+def _privacy_field() -> DiscoveredField:
+    return DiscoveredField(
+        label="I acknowledge that my data will be processed as described in the Privacy Policy",
+        field_type="select",
+        required=True,
+        options=[
+            "Please select",
+            "I understand that my personal data will be processed in accordance with the Privacy Policy",
+        ],
+    )
+
+
+def _privacy_item(value: bool = True) -> ClassifiedField:
+    return ClassifiedField(
+        field=_privacy_field(),
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=value,
+        fill=True,
+        kind=QuestionKind.PRIVACY_CONSENT,
     )
 
 
@@ -164,9 +186,43 @@ def test_fill_and_confirm_logs_bounded_diagnostic_for_unconfirmed_relocation_sel
     assert "remote job" not in message
 
 
-def test_fill_and_confirm_diagnostic_scoped_to_the_three_select_kinds(caplog) -> None:
-    """GENDER already works and is out of scope for this fix -- the bounded
-    diagnostic must not fire for it, to keep the new logging targeted.
+def test_fill_and_confirm_diagnostic_scoped_to_the_menu_choice_kinds(caplog) -> None:
+    """Only the bounded set of menu-choice kinds gets this diagnostic --
+    demonstrated here with a kind outside that set (ACADEMIC_LEVEL already
+    has its own semantic-canonical comparator in `_readback_matches` and
+    isn't part of this mechanism).
+    """
+    field = DiscoveredField(
+        label="Highest level of education",
+        field_type="select",
+        required=True,
+        options=["Please select", "Master's Degree"],
+    )
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value="MASTERS",
+        fill=True,
+        kind=QuestionKind.ACADEMIC_LEVEL,
+    )
+    adapter = _FakeAdapter(read_back_value="Please select")
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        confirmed = service._fill_and_confirm(adapter, object(), item)
+
+    assert confirmed is False
+    assert not any(r.getMessage().startswith("select_choice_unconfirmed") for r in caplog.records)
+
+
+def test_fill_and_confirm_logs_bounded_diagnostic_for_unconfirmed_gender_select(caplog) -> None:
+    """GENDER was originally left out of `_SELECT_CHOICE_DIAGNOSTIC_KINDS`
+    on the (mistaken) assumption that it "already works". In fact its known
+    failure mode -- a discovery-time placeholder value that never matches
+    the live-selected option's real wording -- is fixed separately by
+    `_with_confirmed_choice` (see the fake-locator coverage in
+    test_react_controls_custom_select_fake_dom.py), but that fix cannot
+    rule out other real-site React-select DOM shapes this module cannot
+    observe directly. GENDER is included here as a safety net so any
+    remaining read-back failure for it is now visible too.
     """
     field = _gender_field()
     item = ClassifiedField(
@@ -181,4 +237,67 @@ def test_fill_and_confirm_diagnostic_scoped_to_the_three_select_kinds(caplog) ->
         confirmed = service._fill_and_confirm(adapter, object(), item)
 
     assert confirmed is False
+    diagnostics = [r.getMessage() for r in caplog.records if r.getMessage().startswith("select_choice_unconfirmed")]
+    assert len(diagnostics) == 1
+    message = diagnostics[0]
+    assert "kind=gender" in message
+    assert "control_tag=unknown" in message
+    assert "branch=unknown" in message
+    # Never the candidate's resolved value or any option text.
+    assert "Prefer not to disclose" not in message
+
+
+def test_readback_matches_confirms_privacy_ack_via_i_understand_with_privacy_cue() -> None:
+    item = _privacy_item()
+    # A required privacy acknowledgement resolved to boolean True has no
+    # native option text at discovery time; the live custom React-select can
+    # read back its actual "I understand ..." wording instead of a literal
+    # yes/acknowledge/confirm string.
+    assert (
+        service._readback_matches(
+            item,
+            "I understand that my personal data will be processed in accordance with the Privacy Policy",
+        )
+        is True
+    )
+
+
+def test_readback_matches_rejects_unrelated_i_understand_text_for_privacy_ack() -> None:
+    item = _privacy_item()
+    # "I understand" alone is not a privacy acknowledgement -- it must carry
+    # a privacy/data-processing cue, otherwise an unrelated confirmation
+    # (e.g. acknowledging job requirements) would be wrongly accepted.
+    assert service._readback_matches(item, "I understand the job responsibilities") is False
+
+
+def test_fill_and_confirm_confirms_privacy_ack_on_first_attempt_with_i_understand_readback(
+    caplog,
+) -> None:
+    item = _privacy_item()
+    adapter = _FakeAdapter(
+        read_back_value=(
+            "I understand that my personal data will be processed in accordance with the Privacy Policy"
+        )
+    )
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        confirmed = service._fill_and_confirm(adapter, object(), item)
+    assert confirmed is True
+    assert adapter.fill_calls == 1
     assert not any(r.getMessage().startswith("select_choice_unconfirmed") for r in caplog.records)
+
+
+def test_fill_and_confirm_logs_bounded_diagnostic_when_privacy_ack_readback_is_unrelated(
+    caplog,
+) -> None:
+    item = _privacy_item()
+    adapter = _FakeAdapter(read_back_value="Please select")
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        confirmed = service._fill_and_confirm(adapter, object(), item)
+
+    assert confirmed is False
+    diagnostics = [r.getMessage() for r in caplog.records if r.getMessage().startswith("select_choice_unconfirmed")]
+    assert len(diagnostics) == 1
+    message = diagnostics[0]
+    assert "kind=privacy_consent" in message
+    # Never the candidate's resolved value or any option text.
+    assert "I understand" not in message

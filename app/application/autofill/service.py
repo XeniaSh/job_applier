@@ -505,35 +505,47 @@ def _field_result(item: ClassifiedField) -> AutofillFieldResult:
 
 def _fill_and_confirm(adapter: AutofillAdapter, page: object, item: ClassifiedField) -> bool:
     ok = adapter.fill_field(page, item)
-    check_item = _with_confirmed_multiselect(adapter, item)
+    check_item = _with_confirmed_choice(adapter, _with_confirmed_multiselect(adapter, item))
     read_back = adapter.read_back(page, item.field)
     if ok and _readback_matches(check_item, read_back):
         return True
     ok = adapter.fill_field(page, item)
-    check_item = _with_confirmed_multiselect(adapter, item)
+    check_item = _with_confirmed_choice(adapter, _with_confirmed_multiselect(adapter, item))
     read_back = adapter.read_back(page, item.field)
     confirmed = bool(ok and _readback_matches(check_item, read_back))
     if not confirmed:
-        _log_unconfirmed_select_choice(check_item, ok=ok, read_back=read_back)
+        _log_unconfirmed_select_choice(check_item, adapter, ok=ok, read_back=read_back)
     return confirmed
 
 
 _SELECT_CHOICE_DIAGNOSTIC_KINDS = frozenset(
-    {QuestionKind.AGE, QuestionKind.RELOCATION, QuestionKind.PRIVACY_CONSENT}
+    {QuestionKind.AGE, QuestionKind.RELOCATION, QuestionKind.PRIVACY_CONSENT, QuestionKind.GENDER}
 )
 
 
-def _log_unconfirmed_select_choice(item: ClassifiedField, *, ok: bool, read_back: str | None) -> None:
-    """Bounded structural diagnostic for the three select kinds this module
-    fixes (required privacy acknowledgement, located-or-relocate, and age
-    decline) when both fill+confirm attempts still could not verify the
-    selection.
+def _log_unconfirmed_select_choice(
+    item: ClassifiedField, adapter: object, *, ok: bool, read_back: str | None
+) -> None:
+    """Bounded structural diagnostic for the menu-choice kinds this module
+    fixes (required privacy acknowledgement, located-or-relocate, age
+    decline, and gender) when both fill+confirm attempts still could not
+    verify the selection.
+
+    GENDER was originally left out of this set: its known failure mode at
+    the time (see `_with_confirmed_choice`) was a discovery-time placeholder
+    value that never matched the live-selected option text, which
+    `_with_confirmed_choice` now resolves before this diagnostic even runs.
+    That fix does not rule out real-site React-select DOM shapes this
+    module cannot observe directly (e.g. a value-root or selected-value
+    class convention `react_controls` does not recognize), so GENDER is
+    included here too as a safety net for the read-back mechanism itself.
 
     Logs only sanitized structural facts -- the field's own question label
     (normalized whitespace, not a candidate value), required flag, kind,
-    option count, and where (if anywhere) the read-back landed among the
-    discovered options as an index. Never logs option text, the resolved
-    value, or any other candidate/profile value.
+    control tag/role and interaction branch, option count, and where (if
+    anywhere) the read-back landed among the discovered options as an
+    index. Never logs option text, the resolved value, or any other
+    candidate/profile value.
     """
     if item.kind not in _SELECT_CHOICE_DIAGNOSTIC_KINDS:
         return
@@ -545,13 +557,18 @@ def _log_unconfirmed_select_choice(item: ClassifiedField, *, ok: bool, read_back
             if option.strip().lower() == needle:
                 selected_index = index
                 break
+    trace = getattr(adapter, "last_choice_trace", None) or {}
     logger.warning(
         "select_choice_unconfirmed field_label=%r kind=%s required=%s "
+        "control_tag=%s control_role=%s branch=%s "
         "option_count=%d selected_index=%d interaction_attempted=select_option "
         "fill_reported_ok=%s readback_checked=%s",
         " ".join(item.field.label.split()),
         item.kind.value,
         item.field.required,
+        trace.get("control_tag", "unknown"),
+        trace.get("control_role", "unknown"),
+        trace.get("branch", "unknown"),
         len(options),
         selected_index,
         ok,
@@ -563,6 +580,24 @@ def _with_confirmed_multiselect(adapter: object, item: ClassifiedField) -> Class
     selected = getattr(adapter, "last_multiselect_selected", None)
     if isinstance(item.value, list) and selected:
         return replace(item, value=list(selected))
+    return item
+
+
+def _with_confirmed_choice(adapter: object, item: ClassifiedField) -> ClassifiedField:
+    """A single menu-choice value can be resolved against the live DOM's
+    open-menu options only at fill time (`GreenhouseAdapter._fill_choice`),
+    which can differ textually from a discovery-time placeholder value --
+    e.g. GENDER's non-disclosure default is the literal string "prefer not
+    to disclose" whenever discovery could not read live options (the usual
+    case for a custom React-select, since only native `<select>` elements
+    expose `el.options`), while the real page might label that choice "I
+    don't wish to answer". Confirming read-back against that placeholder
+    instead of the option actually clicked reports a correct fill as
+    failed. Mirrors `_with_confirmed_multiselect`'s same trick for lists.
+    """
+    selected = getattr(adapter, "last_choice_selected", None)
+    if selected and isinstance(item.value, str):
+        return replace(item, value=selected)
     return item
 
 
@@ -594,14 +629,21 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
     expected = item.value
     actual = raw.strip()
     if isinstance(expected, bool):
-        from app.application.autofill.react_controls import semantic_choice_matches
+        from app.application.autofill.react_controls import (
+            _affirmative_ack_matches,
+            semantic_choice_matches,
+        )
 
         lowered = actual.lower()
         if lowered in {"true", "1", "on", "yes"}:
             return expected is True
         if lowered in {"false", "0", "off", "no"}:
             return expected is False
-        return semantic_choice_matches(expected, actual)
+        if semantic_choice_matches(expected, actual):
+            return True
+        if item.kind is QuestionKind.PRIVACY_CONSENT:
+            return _affirmative_ack_matches(expected, actual)
+        return False
     if item.kind is QuestionKind.PRIVACY_CONSENT and actual.lower() in {"true", "1", "on", "yes"}:
         if expected is True:
             return True

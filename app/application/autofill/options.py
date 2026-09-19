@@ -492,7 +492,7 @@ def match_yes_no(value: bool, options: list[str]) -> str | None:
     return None
 
 
-_PRIVACY_DATA_CUES = (
+PRIVACY_DATA_CUES = (
     "privacy",
     "personal data",
     "data processing",
@@ -532,7 +532,7 @@ def match_affirmative_option(value: bool, options: list[str]) -> str | None:
         if "acknowledge" in lowered_item:
             return item
         if "i understand" in lowered_item and any(
-            cue in lowered_item for cue in _PRIVACY_DATA_CUES
+            cue in lowered_item for cue in PRIVACY_DATA_CUES
         ):
             return item
     return None

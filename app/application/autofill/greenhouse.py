@@ -172,6 +172,8 @@ class GreenhouseAdapter:
     last_cover_letter_error: str | None = None
     last_multiselect_selected: list[str] | None = None
     last_privacy_trace: dict[str, object] | None = None
+    last_choice_selected: str | None = None
+    last_choice_trace: dict[str, object] | None = None
 
     def recognize(self, page: Page) -> bool:
         return is_greenhouse_application_page(page)
@@ -224,6 +226,8 @@ class GreenhouseAdapter:
 
     def fill_field(self, page: Page, classified: ClassifiedField) -> bool:
         self.last_multiselect_selected = None
+        self.last_choice_selected = None
+        self.last_choice_trace = None
         if not classified.fill or classified.value is None:
             return False
         field = classified.field
@@ -254,10 +258,13 @@ class GreenhouseAdapter:
             if field.field_type == "radio":
                 return _fill_radio(page, field, classified.value)
             if classified.kind is QuestionKind.COUNTRY:
-                if _fill_choice(page, locator, field, classified.value, kind=classified.kind):
+                resolved: dict[str, str] = {}
+                if _fill_choice(page, locator, field, classified.value, kind=classified.kind, resolved=resolved):
+                    self.last_choice_selected = resolved.get("label")
                     return True
                 return _fill_combobox(page, locator, str(classified.value))
             if classified.kind in _MENU_CHOICE_KINDS or isinstance(classified.value, bool):
+                resolved = {}
                 ok = _fill_choice(
                     page,
                     locator,
@@ -265,7 +272,10 @@ class GreenhouseAdapter:
                     classified.value,
                     kind=classified.kind,
                     referenced_country=classified.country,
+                    resolved=resolved,
                 )
+                self.last_choice_selected = resolved.get("label")
+                self.last_choice_trace = _describe_choice_interaction(locator, field, classified.kind, ok)
                 if classified.kind is QuestionKind.PRIVACY_CONSENT:
                     self.last_privacy_trace = {
                         "discovered": True,
@@ -1189,6 +1199,7 @@ def _fill_choice(
     *,
     kind: QuestionKind | None = None,
     referenced_country: str | None = None,
+    resolved: dict[str, str] | None = None,
 ) -> bool:
     if isinstance(value, bool):
         if kind is QuestionKind.VISA_SPONSORSHIP:
@@ -1219,7 +1230,41 @@ def _fill_choice(
             return False
         match = matched or wanted
     react_controls.dismiss_menu(page)
+    # `wanted` here is the discovery-time value (e.g. GENDER's non-disclosure
+    # placeholder, chosen before any live option text is known -- see
+    # `_gender_value`). `match` is what the live open-menu search actually
+    # resolved and is about to click, which is often worded differently on
+    # a real site. Surface the divergence so the caller can confirm against
+    # what was truly selected instead of the stale placeholder.
+    if resolved is not None and match != wanted:
+        resolved["label"] = match
     return react_controls.select_single_option(page, locator, match)
+
+
+def _describe_choice_interaction(
+    locator: Locator,
+    field: DiscoveredField,
+    kind: QuestionKind | None,
+    ok: bool,
+) -> dict[str, object]:
+    """Sanitized structural facts about a menu-choice fill attempt, for
+    diagnostics only. Never includes option text, the resolved/selected
+    value, or any candidate/profile data.
+    """
+    try:
+        control_tag = locator.evaluate("el => el.tagName.toLowerCase()")
+    except PlaywrightError:
+        control_tag = "unknown"
+    control_role = (locator.get_attribute("role") or "").lower() or "none"
+    branch = "native_select" if _is_native_select(locator) else "custom_react_select"
+    return {
+        "control_tag": control_tag,
+        "control_role": control_role,
+        "branch": branch,
+        "kind": kind.value if kind is not None else None,
+        "option_count": len(field.options or []),
+        "fill_reported_ok": ok,
+    }
 
 
 def _live_choice_match(

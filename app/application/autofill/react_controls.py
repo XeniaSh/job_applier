@@ -7,6 +7,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from app.application.autofill.options import (
+    PRIVACY_DATA_CUES,
     label_matches,
     match_affirmative_option,
     match_option,
@@ -299,13 +300,15 @@ def _affirmative_ack_matches(expected: bool, actual: str) -> bool:
     if not expected:
         return False
     cleaned = actual.strip().lower()
-    return "acknowledge" in cleaned or cleaned in {
+    if "acknowledge" in cleaned or cleaned in {
         "confirm",
         "i agree",
         "i accept",
         "agree",
         "accept",
-    }
+    }:
+        return True
+    return "i understand" in cleaned and any(cue in cleaned for cue in PRIVACY_DATA_CUES)
 
 
 def is_checked(locator: Locator) -> bool:
