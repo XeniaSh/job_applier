@@ -67,3 +67,20 @@ def test_optional_privacy_is_classified_but_not_safe_required() -> None:
     assert classify_acknowledgement(text) is AcknowledgementClass.APPLICATION_PRIVACY
     field = DiscoveredField(label=text, field_type="checkbox", required=False)
     assert is_safe_required_privacy_acknowledgement(field, text) is False
+
+
+def test_bare_recruitment_privacy_statement_label_is_application_privacy() -> None:
+    """A custom React-select's discovery-time label alone (no option text
+    readable yet -- see Wolt's "Wolt Recruitment Privacy Statement" combobox)
+    must still classify as application privacy, not fall through to OTHER.
+    """
+    text = "wolt recruitment privacy statement"
+    assert classify_acknowledgement(text) is AcknowledgementClass.APPLICATION_PRIVACY
+    field = DiscoveredField(label=text, field_type="combobox", required=True)
+    assert is_safe_required_privacy_acknowledgement(field, text) is True
+
+
+def test_bare_privacy_statement_without_recruitment_framing_is_not_privacy() -> None:
+    """A generic "Privacy Statement" mention with no recruitment/applicant/
+    candidate/hiring framing must not be broadened into application privacy."""
+    assert classify_acknowledgement("read our privacy statement") is AcknowledgementClass.OTHER

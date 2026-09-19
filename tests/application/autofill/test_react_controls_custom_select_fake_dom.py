@@ -43,7 +43,8 @@ from app.application.autofill.classifier import ClassifiedField
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.greenhouse import GreenhouseAdapter
 from app.application.autofill.models import FieldClassification
-from app.application.autofill.questions import QuestionKind
+from app.application.autofill.options import ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE
+from app.application.autofill.questions import AGE_DECLINE_INTENT, QuestionKind
 
 _LOGGER_NAME = "app.application.autofill.service"
 
@@ -204,11 +205,17 @@ class _CustomReactSelectPage:
     `.keyboard`, `.wait_for_function`, `.wait_for_timeout`.
     """
 
-    def __init__(self, live_options: list[str], *, control_class: str = "select__control") -> None:
+    def __init__(
+        self,
+        live_options: list[str],
+        *,
+        control_class: str = "select__control",
+        element_id: str = "gender",
+    ) -> None:
         self.control = _FakeElement("div", classes=control_class)
         value_container = self.control.add_child(_FakeElement("div", classes="select__value-container"))
         self.single_value = value_container.add_child(_FakeElement("div", classes="select__single-value"))
-        self.hidden_input = value_container.add_child(_FakeElement("input", elem_id="gender"))
+        self.hidden_input = value_container.add_child(_FakeElement("input", elem_id=element_id))
         self.menu = _FakeElement("div", role="listbox")
         self.menu.visible = False
         self.options: list[_FakeElement] = []
@@ -364,3 +371,165 @@ def test_gender_custom_react_select_stale_value_root_class_logs_bounded_diagnost
     assert "prefer not to disclose" not in message.lower()
     assert "Female" not in message
     assert "Male" not in message
+
+
+# --- The same custom React-select shape (no `field.options` at discovery
+# time) for AGE, PRIVACY_CONSENT, and RELOCATION -- the three Wolt-observed
+# kinds whose live-verified fill was blank because `map_question` requires
+# `field.options` to resolve a semantic intent. These prove the intent
+# carried through by `map_question` reaches `GreenhouseAdapter.fill_field`
+# and confirms via `_live_choice_match` / `select_yes_no` against the
+# opened menu's live options -- never a discovery-time guess. ---
+
+
+def _age_field(element_id: str = "age") -> DiscoveredField:
+    return DiscoveredField(
+        label="What's your age?",
+        field_type="combobox",
+        required=True,
+        options=[],
+        element_id=element_id,
+    )
+
+
+def _age_item(value: str = AGE_DECLINE_INTENT) -> ClassifiedField:
+    return ClassifiedField(
+        field=_age_field(),
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=value,
+        fill=True,
+        kind=QuestionKind.AGE,
+    )
+
+
+def test_age_custom_react_select_resolves_live_decline_option_without_discovery_options() -> None:
+    page = _CustomReactSelectPage(["I don't wish to answer", "18-24", "25-34"], element_id="age")
+    adapter = GreenhouseAdapter()
+    item = _age_item()
+
+    confirmed = service._fill_and_confirm(adapter, page, item)
+
+    assert confirmed is True
+    assert page.single_value.text == "I don't wish to answer"
+    assert adapter.read_back(page, item.field) == "I don't wish to answer"
+
+
+def test_age_custom_react_select_stays_unfilled_without_live_decline_option() -> None:
+    """The decline intent must never fall back to clicking its own sentinel
+    text (or any other live option) when no live option is an explicit
+    decline -- age is never inferred."""
+    page = _CustomReactSelectPage(["18-24", "25-34"], element_id="age")
+    adapter = GreenhouseAdapter()
+    item = _age_item()
+
+    confirmed = service._fill_and_confirm(adapter, page, item)
+
+    assert confirmed is False
+    assert page.single_value.text == ""
+
+
+def _privacy_field(element_id: str = "wolt_privacy") -> DiscoveredField:
+    return DiscoveredField(
+        label="Wolt Recruitment Privacy Statement",
+        field_type="combobox",
+        required=True,
+        options=[],
+        element_id=element_id,
+    )
+
+
+def _privacy_item() -> ClassifiedField:
+    return ClassifiedField(
+        field=_privacy_field(),
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=True,
+        fill=True,
+        kind=QuestionKind.PRIVACY_CONSENT,
+    )
+
+
+def test_privacy_custom_react_select_selects_live_understand_option_without_discovery_options() -> None:
+    page = _CustomReactSelectPage(
+        [
+            "I understand that my personal data will be processed in accordance "
+            "with Wolt’s recruitment privacy statement."
+        ],
+        element_id="wolt_privacy",
+    )
+    adapter = GreenhouseAdapter()
+    item = _privacy_item()
+
+    confirmed = service._fill_and_confirm(adapter, page, item)
+
+    assert confirmed is True
+    assert "personal data" in page.single_value.text.lower()
+
+
+def _relocation_field(element_id: str = "wolt_relocate") -> DiscoveredField:
+    return DiscoveredField(
+        label="Are you currently located in Helsinki, or would you need to relocate?",
+        field_type="combobox",
+        required=True,
+        options=[],
+        element_id=element_id,
+    )
+
+
+def _relocation_item(value: str) -> ClassifiedField:
+    return ClassifiedField(
+        field=_relocation_field(),
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=value,
+        fill=True,
+        kind=QuestionKind.RELOCATION,
+    )
+
+
+def test_relocation_custom_react_select_resolves_already_located_without_discovery_options() -> None:
+    page = _CustomReactSelectPage(
+        [
+            "I'm already located in a hiring region",
+            "I would need to relocate",
+            "I'm looking for a remote job",
+        ],
+        element_id="wolt_relocate",
+    )
+    adapter = GreenhouseAdapter()
+    item = _relocation_item(ALREADY_LOCATED_CHOICE)
+
+    confirmed = service._fill_and_confirm(adapter, page, item)
+
+    assert confirmed is True
+    assert page.single_value.text == "I'm already located in a hiring region"
+
+
+def test_relocation_custom_react_select_resolves_would_relocate_without_discovery_options() -> None:
+    page = _CustomReactSelectPage(
+        [
+            "I'm already located in a hiring region",
+            "I would need to relocate",
+            "I'm looking for a remote job",
+        ],
+        element_id="wolt_relocate",
+    )
+    adapter = GreenhouseAdapter()
+    item = _relocation_item(WOULD_RELOCATE_CHOICE)
+
+    confirmed = service._fill_and_confirm(adapter, page, item)
+
+    assert confirmed is True
+    assert page.single_value.text == "I would need to relocate"
+
+
+def test_relocation_custom_react_select_never_selects_remote_only_option() -> None:
+    """Even when the only live option is remote-flavored, the semantic
+    intent must never resolve to it -- remote availability answers a
+    different question than where the candidate lives or would relocate."""
+    page = _CustomReactSelectPage(["I'm looking for a remote job"], element_id="wolt_relocate")
+    adapter = GreenhouseAdapter()
+    item = _relocation_item(ALREADY_LOCATED_CHOICE)
+
+    confirmed = service._fill_and_confirm(adapter, page, item)
+
+    assert confirmed is False
+    assert page.single_value.text == ""

@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.questions import QuestionKind, map_question
+from app.application.autofill.options import ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE
+from app.application.autofill.questions import AGE_DECLINE_INTENT, QuestionKind, map_question
 from app.application.candidate_profile import CandidateProfile
 
 
@@ -1915,6 +1916,28 @@ def test_option_text_privacy_statement_select_is_required_privacy_acknowledgemen
     assert "personal data" in str(mapped.value).lower()
 
 
+def test_bare_recruitment_privacy_statement_label_resolves_without_option_text() -> None:
+    """A custom React-select (the real Wolt production shape) has no
+    readable `field.options` at discovery time -- only the label itself is
+    available. The generic "<Company> Recruitment Privacy Statement" label
+    must still resolve to the semantic affirmative intent so it reaches
+    `greenhouse.select_yes_no`, which searches the opened menu's live
+    options for the "I understand ..." acknowledgement.
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label="Wolt Recruitment Privacy Statement",
+            field_type="combobox",
+            required=True,
+            options=[],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.PRIVACY_CONSENT
+    assert mapped.fillable is True
+    assert mapped.value is True
+
+
 def test_option_text_does_not_broaden_optional_talent_pool_consent() -> None:
     """A talent-pool/newsletter select must stay NEWSLETTER even though its
     label alone is generic -- option text must not pull it into privacy."""
@@ -2021,6 +2044,68 @@ def test_located_or_relocate_choice_stays_unresolved_without_facts() -> None:
     assert mapped.value is None
 
 
+def test_located_or_relocate_choice_custom_react_select_carries_intent_when_already_located() -> None:
+    """A custom React-select has no readable `field.options` at discovery
+    time. When an explicit profile fact determines the candidate already
+    resides in the hiring region, the semantic intent must still resolve as
+    fillable so `greenhouse._live_choice_match` can map it to exactly one
+    matching non-remote live option once the menu is opened.
+    """
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Helsinki, Finland",
+            "country": "Finland",
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you currently located in Helsinki, or would you need to relocate?",
+            field_type="combobox",
+            required=True,
+            options=[],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.RELOCATION
+    assert mapped.fillable is True
+    assert mapped.value == ALREADY_LOCATED_CHOICE
+
+
+def test_located_or_relocate_choice_custom_react_select_carries_intent_when_would_relocate() -> None:
+    profile = _profile(application_policy={"relocation": {"willing": True}})
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you currently located in Helsinki, or would you need to relocate?",
+            field_type="combobox",
+            required=True,
+            options=[],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.RELOCATION
+    assert mapped.fillable is True
+    assert mapped.value == WOULD_RELOCATE_CHOICE
+
+
+def test_located_or_relocate_choice_custom_react_select_stays_unresolved_without_facts() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you currently located in Helsinki, or would you need to relocate?",
+            field_type="combobox",
+            required=True,
+            options=[],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.RELOCATION
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
 # --- Required demographic age: only ever selects an explicit decline option,
 # never derives or stores an age ---
 
@@ -2062,6 +2147,43 @@ def test_optional_age_is_never_derived() -> None:
             field_type="select",
             required=False,
             options=["I don't wish to answer", "18-24", "25-34"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.AGE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_required_age_custom_react_select_carries_decline_intent_without_options() -> None:
+    """A custom React-select (e.g. Greenhouse's real "What's your age?"
+    combobox) has no readable `field.options` at discovery time. The
+    semantic decline-to-answer intent must still resolve as fillable so it
+    reaches `greenhouse._live_choice_match`, which searches the opened
+    menu's live options for the explicit decline option -- age itself is
+    never inferred or guessed.
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label="What's your age?",
+            field_type="combobox",
+            required=True,
+            options=[],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.AGE
+    assert mapped.fillable is True
+    assert mapped.value == AGE_DECLINE_INTENT
+
+
+def test_optional_age_custom_react_select_stays_unresolved_without_options() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="What's your age?",
+            field_type="combobox",
+            required=False,
+            options=[],
         ),
         _profile(),
     )

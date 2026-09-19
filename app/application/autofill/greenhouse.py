@@ -10,10 +10,14 @@ from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout
 from app.application.autofill.classifier import ClassifiedField
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import (
+    ALREADY_LOCATED_CHOICE,
+    WOULD_RELOCATE_CHOICE,
     label_matches,
     match_academic_option,
     match_application_source,
+    match_decline_to_answer_option,
     match_gender_option,
+    match_located_or_relocate_option,
     match_option,
     match_prefer_not_to_disclose_gender,
     match_sponsorship_option,
@@ -1228,6 +1232,16 @@ def _fill_choice(
         if kind is QuestionKind.VISA_SPONSORSHIP and matched is None and _semantic_bool(wanted) is not None:
             react_controls.dismiss_menu(page)
             return False
+        if matched is None and (
+            kind is QuestionKind.AGE
+            or (kind is QuestionKind.RELOCATION and wanted in {ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE})
+        ):
+            # `wanted` is a semantic intent/sentinel here (never real option
+            # text -- see `_age_decline_value` / the located-or-relocate
+            # branch of `map_question`), so it must never be clicked as a
+            # literal label when the live menu has no matching option.
+            react_controls.dismiss_menu(page)
+            return False
         match = matched or wanted
     react_controls.dismiss_menu(page)
     # `wanted` here is the discovery-time value (e.g. GENDER's non-disclosure
@@ -1282,6 +1296,13 @@ def _live_choice_match(
         return match_prefer_not_to_disclose_gender(live) or match_gender_option(wanted, live)
     if kind is QuestionKind.ACADEMIC_LEVEL:
         return match_academic_option(wanted, live)
+    if kind is QuestionKind.AGE:
+        # AGE never carries any wanted text other than a decline intent (see
+        # `_age_decline_value`), so the live menu is always searched for the
+        # explicit decline option regardless of what `wanted` holds.
+        return match_decline_to_answer_option(live)
+    if kind is QuestionKind.RELOCATION and wanted in {ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE}:
+        return match_located_or_relocate_option(wanted, live)
     if kind is QuestionKind.VISA_SPONSORSHIP:
         semantic = _semantic_bool(wanted)
         if semantic is None:

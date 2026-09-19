@@ -11,6 +11,8 @@ from app.application.autofill.acknowledgements import (
 )
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import (
+    ALREADY_LOCATED_CHOICE,
+    WOULD_RELOCATE_CHOICE,
     find_known_technologies_in_text,
     is_located_or_relocate_choice,
     match_application_source,
@@ -470,10 +472,17 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         willing = profile.relocation_willingness()
         choice: str | None = None
         if residing is True:
-            choice = "already_located"
+            choice = ALREADY_LOCATED_CHOICE
         elif residing is False and willing is True:
-            choice = "would_relocate"
-        value = match_located_or_relocate_option(choice, field.options) if choice else None
+            choice = WOULD_RELOCATE_CHOICE
+        if choice and field.options:
+            value = match_located_or_relocate_option(choice, field.options)
+        else:
+            # A custom React-select has no readable `field.options` at
+            # discovery time; the semantic choice is carried through as-is
+            # for `greenhouse._live_choice_match` to resolve against the
+            # opened menu's live (non-remote) options instead.
+            value = choice
         return MappedQuestion(
             kind=QuestionKind.RELOCATION,
             value=value,
@@ -676,10 +685,24 @@ def _is_age(text: str) -> bool:
     return "how old are you" in text
 
 
+AGE_DECLINE_INTENT = "decline_to_answer"
+
+
 def _age_decline_value(field: DiscoveredField) -> str | None:
-    """Only ever selects an explicit decline-to-answer option. Never derives age."""
-    if not field.required or not field.options:
+    """Only ever selects an explicit decline-to-answer option. Never derives age.
+
+    A custom React-select (e.g. Greenhouse's "What's your age?" combobox)
+    has no readable `field.options` at discovery time -- only the opened
+    menu's live options carry the real "I don't wish to answer" text. When
+    required and no discovery-time options exist, the semantic decline
+    intent is carried through as `AGE_DECLINE_INTENT` for live-choice
+    matching (`greenhouse._live_choice_match`) to resolve against the live
+    menu; it is never treated as literal option text to click.
+    """
+    if not field.required:
         return None
+    if not field.options:
+        return AGE_DECLINE_INTENT
     return match_decline_to_answer_option(field.options)
 
 

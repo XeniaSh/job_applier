@@ -258,6 +258,11 @@ def parse_located_or_relocate_places(text: str) -> list[str]:
     return places
 
 
+ALREADY_LOCATED_CHOICE = "already_located"
+WOULD_RELOCATE_CHOICE = "would_relocate"
+_LOCATED_OR_RELOCATE_CHOICES = frozenset({ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE})
+
+
 def match_located_or_relocate_option(choice: str | None, options: list[str]) -> str | None:
     """Map a semantic 'already_located' / 'would_relocate' choice to a visible
     option. Never selects a remote-job option: remote availability answers a
@@ -265,11 +270,11 @@ def match_located_or_relocate_option(choice: str | None, options: list[str]) -> 
     Only returns a match when exactly one non-remote option carries the cue,
     so an ambiguous option set stays unresolved rather than guessing.
     """
-    if choice not in {"already_located", "would_relocate"}:
+    if choice not in _LOCATED_OR_RELOCATE_CHOICES:
         return None
     labels = [item.strip() for item in options if item and item.strip()]
     non_remote = [item for item in labels if "remote" not in item.lower()]
-    if choice == "already_located":
+    if choice == ALREADY_LOCATED_CHOICE:
         cues = ("already located", "already in", "already based", "no relocation", "no need to relocate")
     else:
         cues = ("need to relocate", "would relocate", "willing to relocate", "relocate")

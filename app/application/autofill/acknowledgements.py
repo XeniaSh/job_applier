@@ -119,4 +119,13 @@ def _is_application_privacy(text: str) -> bool:
         term in text for term in ("acknowledge", "consent", "notice", "policy", "process")
     ):
         return True
+    # A bare "<Company> Recruitment Privacy Statement" label (e.g. Wolt's
+    # custom React-select, whose live acknowledgement option text is only
+    # readable after the menu is opened, not at discovery time) carries no
+    # acknowledge/consent/notice/policy/process word of its own -- only the
+    # recruitment/candidate framing plus "privacy statement" identify it.
+    if "privacy statement" in text and any(
+        term in text for term in ("recruitment", "applicant", "candidate", "hiring")
+    ):
+        return True
     return False
