@@ -957,3 +957,190 @@ def test_successful_send_with_save_sent_failure_does_not_block_or_resend(monkeyp
     assert second_cycle.send_errors == 0
     assert len(telegram.cards) == 2
     assert inner.get_message_ref(source=first.source, external_id="persist-1", chat_id="222") is None
+
+
+# --- TASK-089: provider-level funnel diagnostics -----------------------------
+
+
+def test_provider_funnel_counts_greenhouse_and_lever_combined(monkeypatch, tmp_path: Path, capsys) -> None:
+    gh_vacancy = _vacancy(external_id="1", title="Java Backend Engineer")
+    lever_vacancy = _lever_vacancy(external_id="501", title="Kotlin Backend Engineer")
+    result, analyzer, telegram, deliveries = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[gh_vacancy],
+        lever_vacancies=[lever_vacancy],
+        include_lever_company=True,
+    )
+
+    gh = result.provider_funnels["greenhouse"]
+    lv = result.provider_funnels["lever"]
+    assert gh.configured_companies == 2  # Agoda + JetBrains from MINIMAL_CONFIG
+    assert gh.raw_fetched == 1
+    assert gh.title_prefilter_pass == 1
+    assert gh.watcher_errors == 0
+    assert gh.post_gate_candidates == 1
+    assert gh.selected == 1
+    assert gh.analyzed == 1
+    assert gh.sent == 1
+
+    assert lv.configured_companies == 1  # Loom
+    assert lv.raw_fetched == 1
+    assert lv.title_prefilter_pass == 1
+    assert lv.watcher_errors == 0
+    assert lv.post_gate_candidates == 1
+    assert lv.selected == 1
+    assert lv.analyzed == 1
+    assert lv.sent == 1
+
+    out = capsys.readouterr().out
+    gh_lines = [line for line in out.splitlines() if "Target companies funnel[greenhouse]:" in line]
+    lv_lines = [line for line in out.splitlines() if "Target companies funnel[lever]:" in line]
+    assert len(gh_lines) == 1
+    assert len(lv_lines) == 1
+    assert "configured=2" in gh_lines[0]
+    assert "sent=1" in gh_lines[0]
+    assert "configured=1" in lv_lines[0]
+    assert "sent=1" in lv_lines[0]
+    # Existing aggregate log line remains unchanged and present.
+    assert any("Target companies: watched=" in line for line in out.splitlines())
+
+
+def test_provider_funnel_zero_valued_when_provider_not_configured(monkeypatch, tmp_path: Path, capsys) -> None:
+    gh_vacancy = _vacancy(external_id="1")
+    result, *_ = _run_cycle(monkeypatch, tmp_path, vacancies=[gh_vacancy])
+
+    lv = result.provider_funnels["lever"]
+    assert lv.configured_companies == 0
+    assert lv.raw_fetched == 0
+    assert lv.title_prefilter_pass == 0
+    assert lv.watcher_errors == 0
+    assert lv.post_gate_candidates == 0
+    assert lv.selected == 0
+    assert lv.analyzed == 0
+    assert lv.sent == 0
+
+    out = capsys.readouterr().out
+    lv_lines = [line for line in out.splitlines() if "Target companies funnel[lever]:" in line]
+    assert len(lv_lines) == 1
+    assert "configured=0" in lv_lines[0]
+    assert "sent=0" in lv_lines[0]
+
+
+def test_provider_funnel_counts_watcher_errors_without_leaking_details(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from app.company_watch.watchers.greenhouse import GreenhouseCompanyError
+
+    class ErrorWatcher:
+        def watch(self, companies: object) -> GreenhouseWatchResult:
+            _ = companies
+            return GreenhouseWatchResult(
+                vacancies=[],
+                errors=[
+                    GreenhouseCompanyError(
+                        company_name="Agoda",
+                        message="super secret internal failure detail",
+                        response_snippet="<html>leaked-response-body</html>",
+                    )
+                ],
+                raw_fetched=0,
+            )
+
+    _set_base_env(monkeypatch, tmp_path, target_chat_id="222")
+    config_file = _write_config(tmp_path)
+    monkeypatch.setattr(cli_module, "load_candidate_constraints", lambda path: _constraints())
+    result = cli_module._run_target_companies_cycle(
+        settings=cli_module.Settings(),
+        analyzer=_CountingAnalyzer(),
+        deliveries=TelegramDeliveryStorage(db_path=tmp_path / "jobs.db"),
+        config_path=config_file,
+        cache_path=tmp_path / "analysis_cache.json",
+        watcher=ErrorWatcher(),
+        lever_watcher=_fake_lever_watcher([]),
+    )
+
+    gh = result.provider_funnels["greenhouse"]
+    assert gh.configured_companies == 2
+    assert gh.raw_fetched == 0
+    assert gh.title_prefilter_pass == 0
+    assert gh.watcher_errors == 1
+    assert gh.post_gate_candidates == 0
+    assert gh.selected == 0
+    assert gh.analyzed == 0
+    assert gh.sent == 0
+
+    out = capsys.readouterr().out
+    funnel_lines = [line for line in out.splitlines() if "Target companies funnel[" in line]
+    assert len(funnel_lines) == 2  # one for greenhouse, one for lever
+    for line in funnel_lines:
+        assert "secret" not in line
+        assert "leaked" not in line
+        assert "Agoda" not in line
+        assert "html" not in line
+        assert "gh_jid" not in line
+
+
+def test_provider_funnel_post_gate_candidates_reflects_drops(monkeypatch, tmp_path: Path) -> None:
+    delivered = _vacancy(external_id="1", title="Java Backend Engineer")
+    remaining = _vacancy(external_id="2", title="Office Coordinator")
+    deliveries = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    deliveries.save_sent(
+        source=delivered.source,
+        external_id=delivered.external_id,
+        chat_id="222",
+        message_id=9,
+    )
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[delivered, remaining],
+        deliveries=deliveries,
+        analyze_limit=1,
+        analyze_limit_per_company=1,
+    )
+
+    gh = result.provider_funnels["greenhouse"]
+    assert gh.title_prefilter_pass == 2
+    assert gh.post_gate_candidates == 1  # one dropped as already delivered
+    assert gh.selected == 1
+    assert gh.analyzed == 1
+    assert gh.sent == 1
+
+
+def test_provider_funnel_analyzed_excludes_analysis_errors(monkeypatch, tmp_path: Path) -> None:
+    class _FailingAnalyzer:
+        def analyze(self, vacancy_text: str, content_completeness: str = "FULL") -> VacancyEvaluation:
+            _ = vacancy_text, content_completeness
+            raise RuntimeError("sensitive-analyzer-failure-detail")
+
+    vacancy = _vacancy(external_id="1")
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[vacancy],
+        analyzer=_FailingAnalyzer(),
+    )
+
+    assert result.analyzed == 0
+    gh = result.provider_funnels["greenhouse"]
+    assert gh.selected == 1
+    assert gh.analyzed == 0
+    assert gh.sent == 0
+
+
+def test_provider_funnel_sent_only_counts_successful_delivery(monkeypatch, tmp_path: Path) -> None:
+    vacancy = _vacancy(external_id="1")
+    failing = _FakeTelegram(fail=True)
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[vacancy],
+        telegram=failing,
+    )
+
+    gh = result.provider_funnels["greenhouse"]
+    assert result.sent == 0
+    assert result.send_errors == 1
+    assert gh.analyzed == 1
+    assert gh.sent == 0

@@ -1512,6 +1512,30 @@ pass the deliberately broad title filter but remain subject to the generic
 backend-stack mismatch analysis. Focused config/watcher/prefilter/runtime tests:
 59 passed; Ruff and diff checks passed.
 
+### TASK-089 — Target-company source funnel diagnostics
+
+- **Status:** done (2026-09-19)
+- **Depends on:** TASK-087, TASK-088
+- **Goal:** Preserve provider-level counts through the recurring target-company
+  cycle so future low-volume diagnosis does not require private database access
+  or ad-hoc public-board probes.
+- **Area:** target-company runtime result/logging
+- **Acceptance criteria:** For each runtime-supported provider (Greenhouse and
+  Lever), expose value-free counts for configured companies, raw fetched jobs,
+  title-prefilter pass, watcher errors, post-gate candidates, selected,
+  analyzed, and sent. Do not log vacancy titles, descriptions, URLs, candidate
+  data, or error response bodies. Existing aggregate counters, filtering,
+  deduplication, selection, analysis, and delivery behavior remain unchanged.
+- **Verification:** Focused recurring-cycle tests covering both providers,
+  empty/error cases, and log safety.
+
+Implemented with a typed per-provider funnel on the cycle result and one
+counts-only log line for each of Greenhouse and Lever. The diagnostics preserve
+the existing aggregate line and report configured, raw fetched,
+title-prefilter-pass, watcher-error, post-gate, selected, analyzed, and sent
+counts. No vacancy/candidate content or error payload is included. Focused
+cycle tests: 27 passed; Ruff and diff checks passed.
+
 ---
 
 ## Suggested first implementation iteration

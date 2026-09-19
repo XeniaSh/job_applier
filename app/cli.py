@@ -1057,6 +1057,24 @@ class _TargetCompanyAnalyzeStats:
 
 
 @dataclass
+class _ProviderFunnelCounts:
+    """Value-free per-provider counters for the Target Companies cycle.
+
+    Only counts, never titles/URLs/candidate data/error text, so this is safe
+    to log at any verbosity (TASK-089).
+    """
+
+    configured_companies: int = 0
+    raw_fetched: int = 0
+    title_prefilter_pass: int = 0
+    watcher_errors: int = 0
+    post_gate_candidates: int = 0
+    selected: int = 0
+    analyzed: int = 0
+    sent: int = 0
+
+
+@dataclass
 class _TargetCompaniesCycleResult:
     enabled: bool
     skip_reason: str | None = None
@@ -1071,6 +1089,7 @@ class _TargetCompaniesCycleResult:
     cache_misses: int = 0
     sent: int = 0
     send_errors: int = 0
+    provider_funnels: dict[str, _ProviderFunnelCounts] = field(default_factory=dict)
 
 
 def _analyze_target_company_vacancy(
@@ -1280,6 +1299,24 @@ def _target_companies_run_chat_id(settings: Settings) -> str:
     return str(settings.telegram.target_companies_chat_id or "").strip()
 
 
+def _log_provider_funnel(provider: str, counts: _ProviderFunnelCounts) -> None:
+    """One value-free diagnostic line per provider (TASK-089): counts only,
+    never titles/URLs/candidate data/error text/company names.
+    """
+    _run_log(
+        f"Target companies funnel[{provider}]: "
+        f"configured={counts.configured_companies} "
+        f"raw_fetched={counts.raw_fetched} "
+        f"title_prefilter_pass={counts.title_prefilter_pass} "
+        f"watcher_errors={counts.watcher_errors} "
+        f"post_gate_candidates={counts.post_gate_candidates} "
+        f"selected={counts.selected} "
+        f"analyzed={counts.analyzed} "
+        f"sent={counts.sent}",
+        component="main",
+    )
+
+
 def _run_target_companies_cycle(
     *,
     settings: Settings,
@@ -1337,6 +1374,21 @@ def _run_target_companies_cycle(
     watched_vacancies = [*greenhouse_watch_result.vacancies, *lever_watch_result.vacancies]
     watch_errors = [*greenhouse_watch_result.errors, *lever_watch_result.errors]
 
+    provider_funnels: dict[str, _ProviderFunnelCounts] = {
+        "greenhouse": _ProviderFunnelCounts(
+            configured_companies=len(greenhouse_companies),
+            raw_fetched=greenhouse_watch_result.raw_fetched,
+            title_prefilter_pass=len(greenhouse_watch_result.vacancies),
+            watcher_errors=len(greenhouse_watch_result.errors),
+        ),
+        "lever": _ProviderFunnelCounts(
+            configured_companies=len(lever_companies),
+            raw_fetched=lever_watch_result.raw_fetched,
+            title_prefilter_pass=len(lever_watch_result.vacancies),
+            watcher_errors=len(lever_watch_result.errors),
+        ),
+    }
+
     candidates: list[NormalizedVacancy] = []
     dropped_delivered = 0
     dropped_cached_skip = 0
@@ -1358,6 +1410,7 @@ def _run_target_companies_cycle(
             _log_unsupported_application_form_drop(vacancy)
             continue
         candidates.append(vacancy)
+        provider_funnels[_target_company_form_provider(vacancy.source)].post_gate_candidates += 1
 
     selection_order = _normalize_analyze_selection_order(
         None,
@@ -1369,6 +1422,8 @@ def _run_target_companies_cycle(
         analyze_limit_per_company=analyze_limit_per_company,
         selection_order=selection_order,
     )
+    for vacancy in to_analyze:
+        provider_funnels[_target_company_form_provider(vacancy.source)].selected += 1
     analyzed_items, analyze_stats = _analyze_target_company_vacancies(
         to_analyze,
         get_analyzer=lambda: analyzer,
@@ -1378,6 +1433,9 @@ def _run_target_companies_cycle(
         read_cache=True,
         write_cache=True,
     )
+    for item in analyzed_items:
+        if item.evaluation is not None:
+            provider_funnels[_target_company_form_provider(item.vacancy.source)].analyzed += 1
 
     sent = 0
     send_errors = 0
@@ -1391,6 +1449,7 @@ def _run_target_companies_cycle(
             chat_id=target_chat_id,
         ):
             sent += 1
+            provider_funnels[_target_company_form_provider(item.vacancy.source)].sent += 1
         else:
             send_errors += 1
 
@@ -1407,6 +1466,7 @@ def _run_target_companies_cycle(
         cache_misses=analyze_stats.cache_misses,
         sent=sent,
         send_errors=send_errors,
+        provider_funnels=provider_funnels,
     )
     _run_log(
         "Target companies: "
@@ -1422,6 +1482,8 @@ def _run_target_companies_cycle(
         f"send_errors={result.send_errors}",
         component="main",
     )
+    for provider_name in ("greenhouse", "lever"):
+        _log_provider_funnel(provider_name, provider_funnels[provider_name])
     if verbose:
         for error in watch_errors:
             _run_log(f"Target companies watcher error: {error.company_name}: {error.message}", component="main")
