@@ -1494,7 +1494,7 @@ coverage without weakening candidate-fit filtering or application safety.
 
 ### TASK-088 — First evidence-backed discovery coverage expansion
 
-- **Status:** todo
+- **Status:** done (2026-09-19; Wolt Greenhouse source)
 - **Depends on:** TASK-087
 - **Goal:** Implement the highest-value bounded discovery expansion identified
   by TASK-087, reusing existing collector interfaces and preserving the
@@ -1503,6 +1503,14 @@ coverage without weakening candidate-fit filtering or application safety.
 - **Acceptance criteria:** Defined by TASK-087 evidence; no application
   submission or ATS autofill behavior changes.
 - **Verification:** Focused fixture and collector/runtime regression tests.
+
+Implemented by adding Wolt through the existing target-company configuration;
+no source-specific runtime branch or filter exception was added. Acceptance
+recheck: 236 public-board jobs mapped, 12 passed the configured title filter,
+and all 12 had canonical Greenhouse application URLs. Go backend titles may
+pass the deliberately broad title filter but remain subject to the generic
+backend-stack mismatch analysis. Focused config/watcher/prefilter/runtime tests:
+59 passed; Ruff and diff checks passed.
 
 ---
 

@@ -4,8 +4,18 @@ import httpx
 import respx
 
 from app.collectors.greenhouse_collector import greenhouse_jobs_endpoint
+from app.collectors.vacancy_collector import NormalizedVacancy
+from app.company_watch.config_loader import (
+    DEFAULT_TARGET_COMPANIES_PATH,
+    load_target_companies_config,
+)
 from app.company_watch.models import TargetCompany
-from app.company_watch.watchers.greenhouse import GreenhouseTargetWatcher
+from app.company_watch.prefilter import passes_role_prefilter
+from app.company_watch.watchers.greenhouse import (
+    GreenhouseTargetWatcher,
+    is_greenhouse_target,
+    resolve_greenhouse_board_slug,
+)
 
 
 def _watcher(**overrides):
@@ -413,3 +423,43 @@ def test_delay_between_companies_is_called_without_real_sleep() -> None:
     assert sleeps == [1.5]
     assert {item.company for item in result.vacancies} == {"Agoda", "Adyen"}
     assert result.errors == []
+
+
+def _wolt_company_from_real_config() -> TargetCompany:
+    config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
+    return next(company for company in config.companies if company.name == "Wolt")
+
+
+def _vacancy_with_title(title: str) -> NormalizedVacancy:
+    return NormalizedVacancy(
+        source="target_company:greenhouse:wolt",
+        external_id="1",
+        title=title,
+        company="Wolt",
+        location="Helsinki",
+        employment=None,
+        description="",
+        url="https://job-boards.greenhouse.io/wolt/jobs/1",
+        published_at=None,
+    )
+
+
+def test_wolt_routes_to_greenhouse_watcher_from_real_config() -> None:
+    wolt = _wolt_company_from_real_config()
+
+    assert is_greenhouse_target(wolt) is True
+    assert resolve_greenhouse_board_slug(wolt) == "wolt"
+
+
+def test_wolt_title_prefilter_from_real_config_accepts_backend_kotlin_rejects_unrelated_and_keywordless_go_title() -> None:
+    wolt = _wolt_company_from_real_config()
+
+    assert passes_role_prefilter(_vacancy_with_title("Senior Backend Engineer, Kotlin"), wolt) is True
+    # Unrelated role: excluded by the generic non-IC title exclude list, not by stack.
+    assert passes_role_prefilter(_vacancy_with_title("Senior Product Marketing Manager"), wolt) is False
+    # Go-only title with no backend/software-engineer keyword: excluded here by the
+    # generic title prefilter alone, before any stack check runs. This does not cover
+    # Go roles titled e.g. "Backend Engineer, Go" - those pass title filtering and are
+    # expected to be rejected downstream by the generic backend-stack mismatch filter,
+    # not by this prefilter.
+    assert passes_role_prefilter(_vacancy_with_title("Senior Golang Engineer"), wolt) is False

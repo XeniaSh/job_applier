@@ -599,3 +599,24 @@ companies:
     notes:
       - Strong Java/distributed systems target; remote/hybrid options vary by role.
       - Check sponsorship on every role.
+
+  - name: Wolt
+    priority: A
+    category: food_delivery_logistics
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid, remote_region_limited]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Helsinki, Finland]
+    remote: limited
+    java_backend_relevance: medium
+    role_keywords: [backend, java, kotlin, platform, logistics, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://careers.wolt.com/en
+    job_board_url: https://job-boards.greenhouse.io/wolt
+    notes:
+      - Public Greenhouse board (slug wolt) is reachable and returns canonical job-board URLs.
+      - Some backend roles are Go-only. Titles that are Go-only with no backend/software-engineer keyword are excluded upstream by the title prefilter; titles with a generic backend/software-engineer keyword may pass title filtering and are governed downstream by the existing generic backend-stack mismatch filter, not by any Wolt-specific code.
+      - Relocation/visa support is not confirmed company-wide; check per role.

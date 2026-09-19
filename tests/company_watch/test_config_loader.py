@@ -64,6 +64,21 @@ def test_load_real_target_companies_yaml() -> None:
     assert exness.watcher_type == "manual"
     assert exness.ats == "custom"
 
+    wolt = next(company for company in config.companies if company.name == "Wolt")
+    assert wolt.watcher_type == "greenhouse"
+    assert wolt.ats == "greenhouse"
+    assert wolt.job_board_url == "https://job-boards.greenhouse.io/wolt"
+    assert wolt.role_title_keywords == [
+        "backend",
+        "back-end",
+        "java",
+        "jvm",
+        "kotlin",
+        "server",
+        "platform engineer",
+        "software engineer",
+    ]
+
 
 def test_missing_file_raises_clear_error(tmp_path: Path) -> None:
     missing_file = tmp_path / "missing.yaml"
