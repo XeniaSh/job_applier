@@ -1,0 +1,97 @@
+# Verified Greenhouse board tokens (public Greenhouse Job Board API)
+#
+# Purpose: expand target-company discovery generically through the existing
+# GreenhouseTargetWatcher, without hand-maintaining a full TargetCompany block
+# per company in target_companies.yaml.
+#
+# Verification: each slug below was checked against the public, unauthenticated
+# Greenhouse Job Board API (https://boards-api.greenhouse.io/v1/boards/<slug>/jobs)
+# and returned HTTP 200 at verification time. No private/internal data is used
+# or implied by this file -- only publicly reachable board tokens and display
+# names. Before adding a new entry, verify its slug the same way.
+#
+# Loading: app/company_watch/config_loader.py automatically merges this catalog
+# into the target_companies.yaml config that sits in the same directory (see
+# load_target_companies_config / GREENHOUSE_BOARD_CATALOG_FILENAME). A config
+# loaded from a directory without a sibling copy of this file is unaffected.
+#
+# Defaults applied to every catalog entry: priority A, language english,
+# relocation_status mixed_check_per_role, watcher_type/ats greenhouse, and the
+# same cheap backend/JVM role_title_keywords/role_keywords already used for
+# hand-maintained Greenhouse companies below. No hiring locations, visa facts,
+# or other company-specific claims are guessed for catalog entries.
+#
+# Precedence: an explicit company already declared in target_companies.yaml
+# always wins over a catalog entry with the same normalized name or board
+# slug -- add company-specific metadata (locations, relocation notes, custom
+# keywords, etc.) there instead of editing this file.
+
+boards:
+  - name: Stripe
+    slug: stripe
+  - name: Databricks
+    slug: databricks
+  - name: Figma
+    slug: figma
+  - name: Asana
+    slug: asana
+  - name: Cloudflare
+    slug: cloudflare
+  - name: Twilio
+    slug: twilio
+  - name: MongoDB
+    slug: mongodb
+  - name: Pinterest
+    slug: pinterest
+  - name: Reddit
+    slug: reddit
+  - name: Vercel
+    slug: vercel
+  - name: Lyft
+    slug: lyft
+  - name: Duolingo
+    slug: duolingo
+  - name: Scale AI
+    slug: scaleai
+  - name: Airbnb
+    slug: airbnb
+  - name: Robinhood
+    slug: robinhood
+  - name: Coinbase
+    slug: coinbase
+  - name: Squarespace
+    slug: squarespace
+  - name: Dropbox
+    slug: dropbox
+  - name: Okta
+    slug: okta
+  - name: Datadog
+    slug: datadog
+  - name: New Relic
+    slug: newrelic
+  - name: LaunchDarkly
+    slug: launchdarkly
+  - name: Brex
+    slug: brex
+  - name: Chime
+    slug: chime
+  - name: Affirm
+    slug: affirm
+  - name: Gusto
+    slug: gusto
+  - name: Coursera
+    slug: coursera
+  - name: Udemy
+    slug: udemy
+  - name: Cockroach Labs
+    slug: cockroachlabs
+  - name: Instacart
+    slug: instacart
+  - name: Samsara
+    slug: samsara
+  - name: Discord
+    slug: discord
+  - name: Roblox
+    slug: roblox
+  - name: Epic Games
+    slug: epicgames

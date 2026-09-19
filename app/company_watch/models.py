@@ -97,3 +97,26 @@ class TargetCompaniesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     companies: list[TargetCompany]
+
+
+class GreenhouseBoardCatalogEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    slug: str
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def validate_name(cls, value: object) -> str:
+        return _require_non_empty_str(value, "name")
+
+    @field_validator("slug", mode="before")
+    @classmethod
+    def validate_slug(cls, value: object) -> str:
+        return _require_non_empty_str(value, "slug")
+
+
+class GreenhouseBoardCatalog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    boards: list[GreenhouseBoardCatalogEntry]
