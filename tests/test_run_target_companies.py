@@ -839,6 +839,93 @@ def test_cached_apply_now_and_check_manually_do_not_recall_llm(monkeypatch, tmp_
     assert {getattr(card, "external_id") for card in telegram.cards} == {"1", "2"}
 
 
+def test_prefers_uncached_candidates_over_cached_when_capped(monkeypatch, tmp_path: Path) -> None:
+    cached_first = _vacancy(external_id="1", title="Java Backend Engineer")
+    cached_second = _vacancy(external_id="2", title="Java Backend Engineer")
+    new_vacancy = _vacancy(external_id="3", title="Java Backend Engineer")
+    cache = TargetCompanyAnalysisCache(tmp_path / "analysis_cache.json")
+    cache.put(
+        cached_first,
+        evaluation=_evaluation(Decision.STRONG_MATCH),
+        feasibility=_feasibility(),
+        recommendation=ApplicationRecommendation(label="APPLY_NOW", reasons=["visa sponsorship is available"]),
+        seniority=_seniority(),
+    )
+    cache.put(
+        cached_second,
+        evaluation=_evaluation(Decision.POTENTIAL_MATCH),
+        feasibility=_feasibility(),
+        recommendation=ApplicationRecommendation(label="CHECK_MANUALLY", reasons=["unclear"]),
+        seniority=_seniority(),
+    )
+    cache.save()
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[cached_first, cached_second, new_vacancy],
+        analyzer=analyzer,
+        analyze_limit=2,
+        analyze_limit_per_company=10,
+    )
+
+    # Cap only fits 2 of the 3 candidates. The never-analyzed vacancy must
+    # win a slot over both cached ones so later cycles drain new vacancies
+    # instead of reselecting the same cached subset every time.
+    assert result.selected == 2
+    assert result.cache_hits == 1
+    assert result.cache_misses == 1
+    assert len(analyzer.calls) == 1
+
+    # A cached non-SKIP result stays eligible for its own slot (and thus for
+    # Telegram delivery retry) once a slot remains -- it is deprioritized,
+    # not excluded.
+    sent_ids = {getattr(card, "external_id") for card in telegram.cards}
+    assert sent_ids == {"1", "3"}
+
+
+def test_cached_skip_still_hard_excluded_alongside_uncached_preference(monkeypatch, tmp_path: Path) -> None:
+    skip_vacancy = _vacancy(external_id="1", title="Java Backend Engineer")
+    apply_now_vacancy = _vacancy(external_id="2", title="Java Backend Engineer")
+    new_vacancy = _vacancy(external_id="3", title="Java Backend Engineer")
+    cache = TargetCompanyAnalysisCache(tmp_path / "analysis_cache.json")
+    cache.put(
+        skip_vacancy,
+        evaluation=_evaluation(Decision.IGNORE),
+        feasibility=_feasibility(),
+        recommendation=ApplicationRecommendation(label="SKIP", reasons=["technical decision is IGNORE"]),
+        seniority=_seniority(),
+    )
+    cache.put(
+        apply_now_vacancy,
+        evaluation=_evaluation(Decision.STRONG_MATCH),
+        feasibility=_feasibility(),
+        recommendation=ApplicationRecommendation(label="APPLY_NOW", reasons=["visa sponsorship is available"]),
+        seniority=_seniority(),
+    )
+    cache.save()
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[skip_vacancy, apply_now_vacancy, new_vacancy],
+        analyzer=analyzer,
+        analyze_limit=2,
+        analyze_limit_per_company=10,
+    )
+
+    # SKIP is still dropped entirely before selection, unlike a cached
+    # non-SKIP result which is merely deprioritized behind uncached
+    # candidates -- both slots go to the two remaining candidates.
+    assert result.dropped_cached_skip == 1
+    assert result.selected == 2
+    assert result.cache_hits == 1
+    assert result.cache_misses == 1
+    assert len(analyzer.calls) == 1
+    sent_ids = {getattr(card, "external_id") for card in telegram.cards}
+    assert sent_ids == {"2", "3"}
+
+
 def test_failed_telegram_send_does_not_save_delivery_and_retries(monkeypatch, tmp_path: Path) -> None:
     vacancy = _vacancy()
     analyzer = _CountingAnalyzer()

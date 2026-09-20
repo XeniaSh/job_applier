@@ -1205,6 +1205,22 @@ def _is_unchanged_cached_skip(
     return cached.recommendation.label == RECOMMENDATION_SKIP
 
 
+def _has_unchanged_cached_analysis(
+    vacancy: NormalizedVacancy,
+    analysis_cache: TargetCompanyAnalysisCache | None,
+) -> bool:
+    """True when the description-hash-keyed cache already has a result.
+
+    Used only to deprioritize (never exclude) a candidate during selection —
+    cached SKIP entries are dropped earlier by `_is_unchanged_cached_skip`,
+    so a hit here is always a non-SKIP result that must stay selectable for
+    Telegram delivery retry.
+    """
+    if analysis_cache is None:
+        return False
+    return analysis_cache.get(vacancy) is not None
+
+
 _TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX = "target_company:greenhouse:"
 _TARGET_COMPANY_LEVER_SOURCE_PREFIX = "target_company:lever:"
 _GREENHOUSE_HOSTED_HOST_SUFFIX = ".greenhouse.io"
@@ -1421,6 +1437,7 @@ def _run_target_companies_cycle(
         analyze_limit=analyze_limit,
         analyze_limit_per_company=analyze_limit_per_company,
         selection_order=selection_order,
+        deprioritize=lambda vacancy: _has_unchanged_cached_analysis(vacancy, analysis_cache),
     )
     for vacancy in to_analyze:
         provider_funnels[_target_company_form_provider(vacancy.source)].selected += 1
@@ -1836,24 +1853,72 @@ def _select_target_company_analysis_vacancies(
     analyze_limit: int,
     analyze_limit_per_company: int | None,
     selection_order: str = "source",
+    deprioritize: Callable[[NormalizedVacancy], bool] | None = None,
 ) -> list[NormalizedVacancy]:
+    """Pick vacancies to analyze under the global and per-company caps.
+
+    `deprioritize` (used by the runtime cycle to push candidates with an
+    unchanged cached analysis behind never-analyzed ones) never excludes a
+    vacancy — it only breaks ties so fresh candidates drain first within the
+    cap; deprioritized vacancies remain selectable once slots remain.
+    """
     if analyze_limit_per_company is None:
-        return list(vacancies)[:analyze_limit]
+        if deprioritize is None:
+            return list(vacancies)[:analyze_limit]
+        ranked = sorted(
+            enumerate(vacancies),
+            key=lambda pair: (bool(deprioritize(pair[1])), pair[0]),
+        )
+        return [vacancy for _, vacancy in ranked][:analyze_limit]
     grouped: dict[str, list[tuple[int, NormalizedVacancy]]] = {}
     for index, vacancy in enumerate(vacancies):
         name = vacancy.company or "unknown"
         grouped.setdefault(name, []).append((index, vacancy))
-    selected: list[NormalizedVacancy] = []
+    ranked_by_company: list[list[NormalizedVacancy]] = []
     for items in grouped.values():
         if selection_order == "relevance":
             ranked = sorted(
                 items,
-                key=lambda pair: (-rank_title_for_analysis(pair[1].title).score, pair[0]),
+                key=lambda pair: (
+                    bool(deprioritize(pair[1])) if deprioritize else False,
+                    -rank_title_for_analysis(pair[1].title).score,
+                    pair[0],
+                ),
             )
         else:
-            ranked = items
-        selected.extend(vacancy for _, vacancy in ranked[:analyze_limit_per_company])
+            ranked = sorted(
+                items,
+                key=lambda pair: (
+                    bool(deprioritize(pair[1])) if deprioritize else False,
+                    pair[0],
+                ),
+            )
+        ranked_by_company.append([vacancy for _, vacancy in ranked][:analyze_limit_per_company])
+    selected = _interleave_by_company(ranked_by_company)
     return selected[:analyze_limit]
+
+
+def _interleave_by_company(
+    ranked_by_company: list[list[NormalizedVacancy]],
+) -> list[NormalizedVacancy]:
+    """Round-robin across companies so no single company exhausts the cap.
+
+    Each company's ranked list is already capped at the per-company limit and
+    ordered by selection_order; this only decides the pick order across
+    companies, taking one candidate per company per round in configured/
+    source order until every company's list is exhausted.
+    """
+    selected: list[NormalizedVacancy] = []
+    round_index = 0
+    while True:
+        added_this_round = False
+        for company_items in ranked_by_company:
+            if round_index < len(company_items):
+                selected.append(company_items[round_index])
+                added_this_round = True
+        if not added_this_round:
+            return selected
+        round_index += 1
 
 
 def _print_target_company_selection_ranking(vacancies: list[NormalizedVacancy]) -> None:

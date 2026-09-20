@@ -1050,6 +1050,44 @@ def test_global_analyze_limit_caps_after_per_company(tmp_path: Path, monkeypatch
     assert "Analyzing 3 vacancies (analyze-limit: 3, analyze-limit-per-company: 2, selection-order: relevance)" in result.output
 
 
+def test_per_company_limit_interleaves_companies_under_global_cap(tmp_path: Path, monkeypatch) -> None:
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(external_id="101", company="Agoda", title="Agoda One"),
+        _vacancy(external_id="102", company="Agoda", title="Agoda Two"),
+        _vacancy(external_id="103", company="Agoda", title="Agoda Three"),
+        _vacancy(external_id="201", company="Canonical", title="Canonical One"),
+        _vacancy(external_id="301", company="Elastic", title="Elastic One"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=len(vacancies)),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(
+        config_file,
+        "--analyze-limit",
+        "3",
+        "--analyze-limit-per-company",
+        "2",
+    )
+
+    assert result.exit_code == 0
+    # Agoda has 3 candidates (more than the global cap) but must not consume
+    # every slot: fair round-robin across companies leaves room for
+    # Canonical and Elastic even though Agoda is ranked/listed first.
+    assert len(captured["texts"]) == 3
+    assert "Agoda: 1" in result.output
+    assert "Canonical: 1" in result.output
+    assert "Elastic: 1" in result.output
+    assert "Agoda One" in result.output
+    assert "Agoda Two" not in result.output
+    assert "Agoda Three" not in result.output
+    assert "Canonical One" in result.output
+    assert "Elastic One" in result.output
+
+
 def test_per_company_limit_still_uses_cache(tmp_path: Path, monkeypatch) -> None:
     config_file = _write_config(tmp_path)
     cache_file = tmp_path / "analysis_cache.json"
