@@ -1275,3 +1275,209 @@ def test_provider_funnel_sent_only_counts_successful_delivery(monkeypatch, tmp_p
     assert result.send_errors == 1
     assert gh.analyzed == 1
     assert gh.sent == 0
+
+
+# --- outcome diagnostics: aggregate, provider-independent counters ----------
+
+
+def _outcome_log_line(out: str) -> str:
+    lines = [line for line in out.splitlines() if "Target companies outcomes: " in line]
+    assert len(lines) == 1
+    return lines[0]
+
+
+def _assert_no_private_values_leaked(line: str, *private_values: str) -> None:
+    for value in private_values:
+        assert value not in line
+
+
+def test_outcome_counts_llm_ignore(monkeypatch, tmp_path: Path, capsys) -> None:
+    vacancy = _vacancy(title="Very Secret Confidential Title", description="secret-description-xyz")
+    analyzer = _CountingAnalyzer(_evaluation(Decision.IGNORE))
+    result, *_ = _run_cycle(monkeypatch, tmp_path, vacancies=[vacancy], analyzer=analyzer)
+
+    assert result.outcome_counts.llm_ignore == 1
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+
+    line = _outcome_log_line(capsys.readouterr().out)
+    assert "llm_ignore=1" in line
+    assert "eligible=0" in line
+    _assert_no_private_values_leaked(line, "Very Secret Confidential Title", "secret-description-xyz", vacancy.url)
+
+
+def test_outcome_counts_excluded_seniority(monkeypatch, tmp_path: Path, capsys) -> None:
+    lead = _vacancy(title="Engineering Manager - Backend")
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+    result, *_ = _run_cycle(monkeypatch, tmp_path, vacancies=[lead], analyzer=analyzer)
+
+    assert result.outcome_counts.excluded_seniority == 1
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+
+    line = _outcome_log_line(capsys.readouterr().out)
+    assert "excluded_seniority=1" in line
+    _assert_no_private_values_leaked(line, "Engineering Manager - Backend", lead.url)
+
+
+def test_outcome_counts_missing_language(monkeypatch, tmp_path: Path, capsys) -> None:
+    vacancy = _vacancy()
+
+    def _fake_assess(**kwargs: object):
+        _ = kwargs
+        return ApplicationFeasibility(
+            label="UNCLEAR",
+            visa_sponsorship="unknown",
+            relocation_support="unknown",
+            remote_type="unknown",
+            work_authorization_requirement="unknown",
+            language_requirements=["german"],
+            location_restrictions=[],
+            warnings=[],
+        )
+
+    monkeypatch.setattr(cli_module, "assess_application_feasibility", _fake_assess)
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+    result, *_ = _run_cycle(monkeypatch, tmp_path, vacancies=[vacancy], analyzer=analyzer)
+
+    assert result.outcome_counts.missing_languages == 1
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+
+    line = _outcome_log_line(capsys.readouterr().out)
+    assert "missing_languages=1" in line
+
+
+def test_outcome_counts_work_authorization_blocker(monkeypatch, tmp_path: Path, capsys) -> None:
+    vacancy = _vacancy()
+
+    def _fake_assess(**kwargs: object):
+        _ = kwargs
+        return ApplicationFeasibility(
+            label="UNCLEAR",
+            visa_sponsorship="no",
+            relocation_support="no",
+            remote_type="unknown",
+            work_authorization_requirement="required",
+            language_requirements=[],
+            location_restrictions=[],
+            warnings=[],
+        )
+
+    monkeypatch.setattr(cli_module, "assess_application_feasibility", _fake_assess)
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+    result, *_ = _run_cycle(monkeypatch, tmp_path, vacancies=[vacancy], analyzer=analyzer)
+
+    assert result.outcome_counts.work_auth == 1
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+
+    line = _outcome_log_line(capsys.readouterr().out)
+    assert "work_auth=1" in line
+
+
+def test_outcome_counts_eligible_and_sent(monkeypatch, tmp_path: Path, capsys) -> None:
+    vacancy = _vacancy(title="Senior Java Backend Engineer")
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+    result, *_ = _run_cycle(monkeypatch, tmp_path, vacancies=[vacancy], analyzer=analyzer)
+
+    assert result.sent == 1
+    assert result.outcome_counts.eligible == 1
+    assert result.outcome_counts.sent == 1
+    assert result.outcome_counts.llm_ignore == 0
+    assert result.outcome_counts.other_skip == 0
+
+    line = _outcome_log_line(capsys.readouterr().out)
+    assert "eligible=1" in line
+    assert "sent=1" in line
+
+
+def test_outcome_counts_analysis_error(monkeypatch, tmp_path: Path, capsys) -> None:
+    class _FailingAnalyzer:
+        def analyze(self, vacancy_text: str, content_completeness: str = "FULL") -> VacancyEvaluation:
+            _ = vacancy_text, content_completeness
+            raise RuntimeError("sensitive-analyzer-failure-detail")
+
+    vacancy = _vacancy()
+    result, *_ = _run_cycle(monkeypatch, tmp_path, vacancies=[vacancy], analyzer=_FailingAnalyzer())
+
+    assert result.outcome_counts.analysis_error == 1
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+
+    line = _outcome_log_line(capsys.readouterr().out)
+    assert "analysis_error=1" in line
+    _assert_no_private_values_leaked(line, "sensitive-analyzer-failure-detail")
+
+
+def test_outcome_counts_cached_skip_drop(monkeypatch, tmp_path: Path, capsys) -> None:
+    skip_vacancy = _vacancy(external_id="1", title="Java Backend Engineer")
+    cache = TargetCompanyAnalysisCache(tmp_path / "analysis_cache.json")
+    cache.put(
+        skip_vacancy,
+        evaluation=_evaluation(Decision.IGNORE),
+        feasibility=_feasibility(),
+        recommendation=ApplicationRecommendation(label="SKIP", reasons=["technical decision is IGNORE"]),
+        seniority=_seniority(),
+    )
+    cache.save()
+    analyzer = _CountingAnalyzer()
+    result, *_ = _run_cycle(monkeypatch, tmp_path, vacancies=[skip_vacancy], analyzer=analyzer)
+
+    assert result.dropped_cached_skip == 1
+    assert result.outcome_counts.cached_skip == 1
+    # Dropped before analysis, so it must not double-count into any
+    # analyzed-item bucket.
+    assert result.outcome_counts.llm_ignore == 0
+    assert result.outcome_counts.eligible == 0
+
+    line = _outcome_log_line(capsys.readouterr().out)
+    assert "cached_skip=1" in line
+
+
+def test_outcome_counts_line_has_no_private_values(monkeypatch, tmp_path: Path, capsys) -> None:
+    sent_vacancy = _vacancy(
+        external_id="1",
+        title="Senior Java Backend Engineer",
+        description="Very secret job description body",
+    )
+    ignored_vacancy = _vacancy(
+        company="JetBrains",
+        board="jetbrains",
+        external_id="2",
+        title="Confidential Kotlin Role",
+        description="another secret description",
+    )
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+
+    call_count = {"n": 0}
+    original_analyze = analyzer.analyze
+
+    def _analyze(vacancy_text: str, content_completeness: str = "FULL") -> VacancyEvaluation:
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            return _evaluation(Decision.IGNORE)
+        return original_analyze(vacancy_text, content_completeness)
+
+    analyzer.analyze = _analyze  # type: ignore[method-assign]
+
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[sent_vacancy, ignored_vacancy],
+        analyzer=analyzer,
+    )
+
+    assert result.outcome_counts.eligible == 1
+    assert result.outcome_counts.llm_ignore == 1
+
+    line = _outcome_log_line(capsys.readouterr().out)
+    _assert_no_private_values_leaked(
+        line,
+        "Senior Java Backend Engineer",
+        "Confidential Kotlin Role",
+        "Very secret job description body",
+        "another secret description",
+        sent_vacancy.url,
+        ignored_vacancy.url,
+    )

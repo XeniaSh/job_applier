@@ -1075,6 +1075,28 @@ class _ProviderFunnelCounts:
 
 
 @dataclass
+class _TargetCompanyOutcomeCounts:
+    """Value-free aggregate outcome counters for a Target Companies cycle.
+
+    Buckets reuse existing terminal reasons from `recommend_application`/
+    `_should_send_target_company_item` — this only labels them, it does not
+    add new eligibility policy. Counts only, never titles/URLs/candidate
+    data/error text/company names.
+    """
+
+    eligible: int = 0
+    sent: int = 0
+    send_errors: int = 0
+    llm_ignore: int = 0
+    cached_skip: int = 0
+    excluded_seniority: int = 0
+    missing_languages: int = 0
+    work_auth: int = 0
+    analysis_error: int = 0
+    other_skip: int = 0
+
+
+@dataclass
 class _TargetCompaniesCycleResult:
     enabled: bool
     skip_reason: str | None = None
@@ -1090,6 +1112,7 @@ class _TargetCompaniesCycleResult:
     sent: int = 0
     send_errors: int = 0
     provider_funnels: dict[str, _ProviderFunnelCounts] = field(default_factory=dict)
+    outcome_counts: _TargetCompanyOutcomeCounts = field(default_factory=_TargetCompanyOutcomeCounts)
 
 
 def _analyze_target_company_vacancy(
@@ -1315,6 +1338,76 @@ def _target_companies_run_chat_id(settings: Settings) -> str:
     return str(settings.telegram.target_companies_chat_id or "").strip()
 
 
+_OUTCOME_IGNORE_REASON = "technical decision is IGNORE"
+_OUTCOME_LEAD_MANAGER_REASON = "lead/manager role is not target IC backend role"
+_OUTCOME_EXCLUDED_SENIORITY_REASON_RE = re.compile(r"^seniority .+ is excluded$")
+_OUTCOME_MISSING_LANGUAGE_REASON_PREFIX = "required language not in known languages:"
+_OUTCOME_WORK_AUTH_REASON = "local work authorization required without visa/relocation support"
+
+
+def _classify_target_company_skip_outcome(reasons: list[str]) -> str:
+    """Maps an existing SKIP recommendation's reasons (see
+    `_hard_blockers`/`recommend_application` in application_recommendation.py)
+    to one value-free outcome bucket. Reuses the exact reason strings already
+    produced there; adds no new eligibility policy.
+    """
+    if _OUTCOME_IGNORE_REASON in reasons:
+        return "llm_ignore"
+    if _OUTCOME_LEAD_MANAGER_REASON in reasons or any(
+        _OUTCOME_EXCLUDED_SENIORITY_REASON_RE.match(reason) for reason in reasons
+    ):
+        return "excluded_seniority"
+    if any(reason.startswith(_OUTCOME_MISSING_LANGUAGE_REASON_PREFIX) for reason in reasons):
+        return "missing_languages"
+    if _OUTCOME_WORK_AUTH_REASON in reasons:
+        return "work_auth"
+    return "other_skip"
+
+
+def _target_company_outcome_counts(
+    analyzed_items: list[_TargetCompanyAnalysisItem],
+    *,
+    dropped_cached_skip: int,
+    sent: int,
+    send_errors: int,
+) -> _TargetCompanyOutcomeCounts:
+    counts = _TargetCompanyOutcomeCounts(
+        cached_skip=dropped_cached_skip,
+        sent=sent,
+        send_errors=send_errors,
+    )
+    for item in analyzed_items:
+        if item.evaluation is None or item.recommendation is None:
+            counts.analysis_error += 1
+            continue
+        if _should_send_target_company_item(item):
+            counts.eligible += 1
+            continue
+        bucket = _classify_target_company_skip_outcome(item.recommendation.reasons)
+        setattr(counts, bucket, getattr(counts, bucket) + 1)
+    return counts
+
+
+def _log_target_company_outcomes(counts: _TargetCompanyOutcomeCounts) -> None:
+    """One value-free diagnostic line: aggregate outcome counts only, never
+    titles/URLs/candidate data/error text/company names.
+    """
+    _run_log(
+        "Target companies outcomes: "
+        f"eligible={counts.eligible} "
+        f"sent={counts.sent} "
+        f"llm_ignore={counts.llm_ignore} "
+        f"cached_skip={counts.cached_skip} "
+        f"excluded_seniority={counts.excluded_seniority} "
+        f"missing_languages={counts.missing_languages} "
+        f"work_auth={counts.work_auth} "
+        f"analysis_error={counts.analysis_error} "
+        f"other_skip={counts.other_skip} "
+        f"send_errors={counts.send_errors}",
+        component="main",
+    )
+
+
 def _log_provider_funnel(provider: str, counts: _ProviderFunnelCounts) -> None:
     """One value-free diagnostic line per provider (TASK-089): counts only,
     never titles/URLs/candidate data/error text/company names.
@@ -1470,6 +1563,12 @@ def _run_target_companies_cycle(
         else:
             send_errors += 1
 
+    outcome_counts = _target_company_outcome_counts(
+        analyzed_items,
+        dropped_cached_skip=dropped_cached_skip,
+        sent=sent,
+        send_errors=send_errors,
+    )
     result = _TargetCompaniesCycleResult(
         enabled=True,
         chat_id=target_chat_id,
@@ -1484,6 +1583,7 @@ def _run_target_companies_cycle(
         sent=sent,
         send_errors=send_errors,
         provider_funnels=provider_funnels,
+        outcome_counts=outcome_counts,
     )
     _run_log(
         "Target companies: "
@@ -1501,6 +1601,7 @@ def _run_target_companies_cycle(
     )
     for provider_name in ("greenhouse", "lever"):
         _log_provider_funnel(provider_name, provider_funnels[provider_name])
+    _log_target_company_outcomes(outcome_counts)
     if verbose:
         for error in watch_errors:
             _run_log(f"Target companies watcher error: {error.company_name}: {error.message}", component="main")
