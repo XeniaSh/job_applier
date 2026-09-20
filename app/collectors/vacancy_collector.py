@@ -23,6 +23,11 @@ class NormalizedVacancy:
     snippet_source: str | None = None
     raw_text_preview: str | None = None
     content_completeness: str | None = None
+    # Non-canonical URL the vacancy was originally discovered at, kept for
+    # traceability when `url` was rewritten to a deterministic canonical form
+    # (e.g. Greenhouse custom-domain absolute_url -> job-boards.greenhouse.io).
+    # Not used by to_analysis_text(), dedupe_key(), or vacancy_identity().
+    original_url: str | None = None
 
     def to_analysis_text(self) -> str:
         lines = [f"Title: {self.title}"]

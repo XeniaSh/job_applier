@@ -3,6 +3,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 import app.cli as cli_module
+from app.collectors.greenhouse_collector import greenhouse_job_to_normalized
 from app.collectors.vacancy_collector import NormalizedVacancy
 from app.company_watch.analysis_cache import TargetCompanyAnalysisCache
 from app.company_watch.application_recommendation import ApplicationRecommendation
@@ -565,6 +566,49 @@ def test_supported_canonical_urls_do_not_emit_unsupported_form_diagnostic(
     )
 
     assert result.dropped_unsupported_form == 0
+    out = capsys.readouterr().out
+    assert "Target companies: unsupported_form " not in out
+
+
+def test_custom_domain_greenhouse_vacancy_from_verified_board_passes_supported_form_gate(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    # Regression: a Target Company Greenhouse vacancy whose API absolute_url
+    # points to the company's own custom careers domain (Stripe/Databricks/
+    # Roblox-style) must not be dropped -- the watcher/collector rewrite it to
+    # the canonical job-boards.greenhouse.io URL before it reaches this gate.
+    cases = [
+        ("stripe", 555001, "https://stripe.com/jobs/listing/staff-backend-engineer/555001"),
+        ("databricks", 555002, "https://www.databricks.com/company/careers/open-positions?gh_jid=555002"),
+        ("roblox", 555003, "https://careers.roblox.com/jobs/555003-senior-software-engineer"),
+    ]
+    vacancies = [
+        greenhouse_job_to_normalized(
+            {
+                "id": job_id,
+                "title": "Senior Backend Engineer",
+                "absolute_url": custom_url,
+                "content": "<p>Java backend services</p>",
+                "updated_at": "2026-09-05T10:00:00Z",
+            },
+            source=f"target_company:greenhouse:{board}",
+            company=board.title(),
+        )
+        for board, job_id, custom_url in cases
+    ]
+    assert all(vacancy is not None for vacancy in vacancies)
+
+    result, _, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=vacancies,
+        analyze_limit=len(cases),
+        analyze_limit_per_company=1,
+    )
+
+    assert result.dropped_unsupported_form == 0
+    assert result.selected == len(cases)
+    assert {getattr(card, "source") for card in telegram.cards} == {vacancy.source for vacancy in vacancies}
     out = capsys.readouterr().out
     assert "Target companies: unsupported_form " not in out
 

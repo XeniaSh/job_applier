@@ -451,6 +451,40 @@ def test_wolt_routes_to_greenhouse_watcher_from_real_config() -> None:
     assert resolve_greenhouse_board_slug(wolt) == "wolt"
 
 
+@respx.mock
+def test_custom_domain_absolute_url_is_rewritten_to_canonical_job_boards_url() -> None:
+    cases = [
+        ("stripe", 555001, "https://stripe.com/jobs/listing/staff-backend-engineer/555001"),
+        ("databricks", 555002, "https://www.databricks.com/company/careers/open-positions?gh_jid=555002"),
+        ("roblox", 555003, "https://careers.roblox.com/jobs/555003-senior-software-engineer"),
+    ]
+    for board, job_id, custom_url in cases:
+        respx.get(greenhouse_jobs_endpoint(board)).mock(
+            return_value=httpx.Response(
+                status_code=200,
+                json={
+                    "jobs": [
+                        _job(job_id=job_id, title="Senior Backend Engineer", url=custom_url)
+                    ]
+                },
+            )
+        )
+        company = _company(
+            name=board.title(),
+            job_board_url=f"https://boards.greenhouse.io/{board}",
+            role_keywords=[],
+        )
+
+        result = _watcher().watch(company)
+
+        assert len(result.vacancies) == 1
+        vacancy = result.vacancies[0]
+        assert vacancy.source == f"target_company:greenhouse:{board}"
+        assert vacancy.external_id == str(job_id)
+        assert vacancy.url == f"https://job-boards.greenhouse.io/{board}/jobs/{job_id}"
+        assert vacancy.original_url == custom_url
+
+
 def test_wolt_title_prefilter_from_real_config_accepts_backend_kotlin_rejects_unrelated_and_keywordless_go_title() -> None:
     wolt = _wolt_company_from_real_config()
 

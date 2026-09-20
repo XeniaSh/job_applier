@@ -7,6 +7,7 @@ from app.collectors.greenhouse_collector import (
     GreenhouseCollectionError,
     GreenhouseCollector,
     clean_html_to_text,
+    greenhouse_job_to_normalized,
     normalize_greenhouse_board,
 )
 
@@ -122,3 +123,65 @@ def test_board_failure_raises_collection_error(monkeypatch) -> None:
     collector = GreenhouseCollector(boards=["stripe"])
     with pytest.raises(GreenhouseCollectionError):
         collector.collect()
+
+
+@pytest.mark.parametrize(
+    ("board", "job_id", "custom_absolute_url"),
+    [
+        ("stripe", 555001, "https://stripe.com/jobs/listing/staff-backend-engineer/555001"),
+        ("databricks", 555002, "https://www.databricks.com/company/careers/open-positions?gh_jid=555002"),
+        ("roblox", 555003, "https://careers.roblox.com/jobs/555003-senior-software-engineer"),
+    ],
+)
+def test_target_company_source_rewrites_custom_domain_to_canonical_url(
+    board: str, job_id: int, custom_absolute_url: str
+) -> None:
+    item = {
+        "id": job_id,
+        "title": "Senior Backend Engineer",
+        "absolute_url": custom_absolute_url,
+        "location": {"name": "Remote"},
+        "content": "<p>Build things</p>",
+    }
+
+    normalized = greenhouse_job_to_normalized(
+        item,
+        source=f"target_company:greenhouse:{board}",
+        company=board.title(),
+    )
+
+    assert normalized is not None
+    assert normalized.external_id == str(job_id)
+    assert normalized.url == f"https://job-boards.greenhouse.io/{board}/jobs/{job_id}"
+    assert normalized.original_url == custom_absolute_url
+
+
+def test_target_company_source_leaves_already_canonical_url_untouched() -> None:
+    item = {
+        "id": 909,
+        "title": "Backend Engineer",
+        "absolute_url": "https://job-boards.greenhouse.io/wolt/jobs/909",
+        "content": "<p>Build things</p>",
+    }
+
+    normalized = greenhouse_job_to_normalized(item, source="target_company:greenhouse:wolt")
+
+    assert normalized is not None
+    assert normalized.url == "https://job-boards.greenhouse.io/wolt/jobs/909"
+    assert normalized.original_url is None
+
+
+def test_generic_greenhouse_source_does_not_rewrite_custom_domain_url() -> None:
+    item = {
+        "id": 555001,
+        "title": "Staff Backend Engineer",
+        "absolute_url": "https://stripe.com/jobs/listing/staff-backend-engineer/555001",
+        "content": "<p>Build things</p>",
+    }
+
+    normalized = greenhouse_job_to_normalized(item)
+
+    assert normalized is not None
+    assert normalized.source == "greenhouse"
+    assert normalized.url == "https://stripe.com/jobs/listing/staff-backend-engineer/555001"
+    assert normalized.original_url is None

@@ -140,6 +140,29 @@ def _response_snippet(response: httpx.Response | None) -> str | None:
     return snippet
 
 
+_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX = "target_company:greenhouse:"
+
+
+def _verified_target_company_greenhouse_board(source: str) -> str | None:
+    """Board token from a Target Company Greenhouse source, if verified.
+
+    Only sources produced by the Target Companies Greenhouse watcher/resolver
+    (`target_company:greenhouse:<board>`) carry a board token we trust as
+    provenance for the board -- not user- or API-supplied data. Generic
+    Greenhouse collection (`source="greenhouse"`) has no such provenance and
+    must not be affected.
+    """
+    cleaned = source.strip()
+    if not cleaned.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX):
+        return None
+    board = cleaned[len(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX) :].strip()
+    return board or None
+
+
+def canonical_greenhouse_hosted_job_url(board: str, external_id: str) -> str:
+    return f"https://job-boards.greenhouse.io/{board}/jobs/{external_id}"
+
+
 def normalize_greenhouse_board(value: str) -> str:
     cleaned = value.strip().rstrip("/")
     if not cleaned:
@@ -230,6 +253,14 @@ def greenhouse_job_to_normalized(
                     resolved_company = text
                     break
 
+    url = absolute_url
+    original_url = None
+    board = _verified_target_company_greenhouse_board(source)
+    if board:
+        url = canonical_greenhouse_hosted_job_url(board, external_id)
+        if url != absolute_url:
+            original_url = absolute_url
+
     return NormalizedVacancy(
         source=source,
         external_id=external_id,
@@ -238,8 +269,9 @@ def greenhouse_job_to_normalized(
         location=str(location).strip() if isinstance(location, str) and location.strip() else None,
         employment=employment,
         description=cleaned_description,
-        url=absolute_url,
+        url=url,
         published_at=str(item.get("updated_at") or item.get("first_published") or "") or None,
+        original_url=original_url,
     )
 
 

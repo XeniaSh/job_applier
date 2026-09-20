@@ -96,6 +96,36 @@ def test_default_resolver_uses_source_and_external_id_only() -> None:
     assert resolved.application_url.endswith("/6886113")
 
 
+@respx.mock
+@pytest.mark.parametrize(
+    ("board", "job_id", "custom_absolute_url"),
+    [
+        ("stripe", 555001, "https://stripe.com/jobs/listing/staff-backend-engineer/555001"),
+        ("databricks", 555002, "https://www.databricks.com/company/careers/open-positions?gh_jid=555002"),
+        ("roblox", 555003, "https://careers.roblox.com/jobs/555003-senior-software-engineer"),
+    ],
+)
+def test_resolve_returns_canonical_url_for_custom_domain_api_item(
+    board: str, job_id: int, custom_absolute_url: str
+) -> None:
+    respx.get(greenhouse_jobs_endpoint(board)).mock(
+        return_value=httpx.Response(
+            status_code=200,
+            json={"jobs": [_job(job_id=job_id, title="Staff Backend Engineer", url=custom_absolute_url)]},
+        )
+    )
+
+    resolved = GreenhouseTargetVacancyResolver().resolve(
+        f"target_company:greenhouse:{board}",
+        str(job_id),
+    )
+
+    assert resolved.application_url == f"https://job-boards.greenhouse.io/{board}/jobs/{job_id}"
+    assert resolved.url == resolved.application_url
+    assert resolved.vacancy is not None
+    assert resolved.vacancy.original_url == custom_absolute_url
+
+
 def test_does_not_use_generic_greenhouse_boards_setting() -> None:
     import inspect
 
