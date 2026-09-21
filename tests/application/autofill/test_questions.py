@@ -1730,7 +1730,14 @@ def test_stripe_current_or_previous_employment_fields_use_explicit_facts() -> No
 def test_stripe_degree_uses_awarded_academic_level_but_school_stays_unresolved() -> None:
     profile = _profile(employment={"highest_academic_level": "Master's"})
     degree = map_question(
-        DiscoveredField(label="Degree *", field_type="select", required=True, options=["Bachelor's Degree", "Master's Degree"]),
+        DiscoveredField(
+            label="Degree *",
+            name="degree--0",
+            element_id="degree--0",
+            field_type="combobox",
+            required=True,
+            options=[],
+        ),
         profile,
     )
     school = map_question(DiscoveredField(label="School *", field_type="text", required=True), profile)

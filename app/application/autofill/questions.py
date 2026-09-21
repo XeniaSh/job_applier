@@ -1043,7 +1043,7 @@ def _is_academic_level(text: str) -> bool:
             "highest level of education",
             "degree obtained",
         )
-    ) or text.strip().rstrip("*").strip() == "degree"
+    ) or text.strip().rstrip("*").strip() == "degree" or bool(re.search(r"\bdegree\b", text))
 
 
 def _is_school(field: DiscoveredField) -> bool:

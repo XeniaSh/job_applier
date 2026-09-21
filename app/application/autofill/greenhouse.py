@@ -477,10 +477,18 @@ class GreenhouseAdapter:
                 return _fill_radio(page, field, classified.value)
             if classified.kind is QuestionKind.COUNTRY:
                 resolved: dict[str, str] = {}
-                if _fill_choice(page, locator, field, classified.value, kind=classified.kind, resolved=resolved):
+                choice_ok = _fill_choice(page, locator, field, classified.value, kind=classified.kind, resolved=resolved)
+                self.last_choice_trace = _describe_choice_interaction(
+                    locator, field, classified.kind, choice_ok
+                )
+                if choice_ok:
                     self.last_choice_selected = resolved.get("label")
                     return True
-                return _fill_combobox(page, locator, str(classified.value))
+                combo_ok = _fill_combobox(page, locator, str(classified.value))
+                self.last_choice_trace = _describe_choice_interaction(
+                    locator, field, classified.kind, combo_ok
+                )
+                return combo_ok
             if classified.kind in _MENU_CHOICE_KINDS or isinstance(classified.value, bool):
                 resolved = {}
                 ok = _fill_choice(
@@ -1061,7 +1069,15 @@ def _field_locator(page: Page, field: DiscoveredField) -> Locator:
         if field.field_type == "radio":
             return page.locator(f'input[type="radio"][name="{field.name}"]')
         return page.locator(f'[name="{field.name}"]')
-    return page.get_by_label(field.label)
+    locator = page.get_by_label(field.label)
+    if locator.count() > 0:
+        return locator
+    if field.field_type == "combobox":
+        accessible_label = field.label.rstrip("*").strip()
+        locator = page.get_by_role("combobox", name=accessible_label)
+        if locator.count() > 0:
+            return locator.first
+    return locator
 
 
 def _set_resume_files(page: Page, field: DiscoveredField, path: str) -> None:
