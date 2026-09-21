@@ -116,7 +116,7 @@ class AutofillService:
             resume_path = resolve_default_resume_path(profile)
             session = self._browser_factory()
             session.keep_open = keep_open
-            session.open(vacancy.application_url)
+            session.open(vacancy.application_url, is_usable=adapter.recognize)
             result = self._fill_open_page(vacancy, profile, resume_path, session, adapter)
             if self._auto_submit_enabled and result.status is AutofillStatus.READY_FOR_REVIEW:
                 submit_adapter = self._explicit_submit_adapter or self._submit_adapter_for_source(

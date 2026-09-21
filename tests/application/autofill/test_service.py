@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from app.application.autofill.browser import BrowserSetupError
+from app.application.autofill.browser import BrowserNavigationError, BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.classifier import classify_field
 from app.application.autofill.greenhouse import GreenhouseAdapter
@@ -96,9 +96,11 @@ class _FakeSession:
     closed: bool = False
     opened_url: str | None = None
     page: object = object()
+    is_usable: object = None
 
-    def open(self, url: str) -> object:
+    def open(self, url: str, *, is_usable: object = None) -> object:
         self.opened_url = url
+        self.is_usable = is_usable
         return self.page
 
     def close(self) -> None:
@@ -284,6 +286,49 @@ def test_service_browser_setup_failure_sets_failure_reason() -> None:
     result = service.run("target_company:greenhouse:agoda", "1", keep_open=True)
     assert result.status is AutofillStatus.FAILED
     assert result.failure_reason is AutofillFailureReason.BROWSER_SETUP_FAILED
+
+
+def test_service_opens_with_adapter_recognize_as_usability_check() -> None:
+    """The service must give BrowserSession.open() a generic readiness
+    check so a recovered navigation timeout can still be judged usable --
+    without BrowserSession itself knowing anything about adapters.
+    """
+    session = _FakeSession()
+    adapter = _FakeAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert session.is_usable == adapter.recognize
+
+
+class _NavigationFailingSession(_FakeSession):
+    def open(self, url: str, *, is_usable: object = None) -> object:
+        _ = is_usable
+        raise BrowserNavigationError(f"Navigation to {url} timed out and the page is not usable")
+
+
+def test_service_fails_closed_when_navigation_recovery_fails() -> None:
+    """A timeout that BrowserSession could not recover from must still fail
+    the run the same way an unhandled navigation error always has, rather
+    than silently continuing with an unusable page.
+    """
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_FakeAdapter(),
+        browser_factory=_NavigationFailingSession,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=True)
+    assert result.status is AutofillStatus.FAILED
+    assert result.failure_reason is AutofillFailureReason.UNEXPECTED_ERROR
+    assert any("timed out" in warning for warning in result.warnings)
 
 
 class _ChallengeAdapter(_FakeAdapter):

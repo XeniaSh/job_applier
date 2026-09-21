@@ -5,6 +5,7 @@ from pathlib import Path
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 _INSTALL_HINT = (
@@ -15,6 +16,10 @@ _INSTALL_HINT = (
 
 class BrowserSetupError(Exception):
     """Raised when the headed/headless browser cannot be started."""
+
+
+class BrowserNavigationError(Exception):
+    """Raised when navigation fails and the resulting page is not usable."""
 
 
 class BrowserSession:
@@ -40,14 +45,25 @@ class BrowserSession:
             self.close()
             raise BrowserSetupError(_setup_message(exc)) from exc
 
-    def open(self, url: str) -> Page:
+    def open(self, url: str, *, is_usable: Callable[[Page], bool] | None = None) -> Page:
+        """Navigate to `url`. On a navigation timeout, the timeout is
+        swallowed only if `is_usable` says the already-loaded page is good
+        enough to continue with -- e.g. the adapter's own recognize() check.
+        Any other navigation error, or a timeout with no usable page, raises.
+        """
         self.start()
-        self.page.goto(url, wait_until="domcontentloaded")
+        try:
+            self.page.goto(url, wait_until="domcontentloaded")
+        except PlaywrightTimeoutError as exc:
+            if is_usable is None or not is_usable(self.page):
+                raise BrowserNavigationError(
+                    f"Navigation to {url} timed out and the page is not usable: {exc}"
+                ) from exc
         return self.page
 
-    def open_html_file(self, path: str | Path) -> Page:
+    def open_html_file(self, path: str | Path, *, is_usable: Callable[[Page], bool] | None = None) -> Page:
         file_url = Path(path).resolve().as_uri()
-        return self.open(file_url)
+        return self.open(file_url, is_usable=is_usable)
 
     @property
     def page(self) -> Page:
