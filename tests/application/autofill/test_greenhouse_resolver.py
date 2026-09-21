@@ -120,7 +120,9 @@ def test_resolve_returns_canonical_url_for_custom_domain_api_item(
         str(job_id),
     )
 
-    assert resolved.application_url == f"https://job-boards.greenhouse.io/{board}/jobs/{job_id}"
+    assert resolved.application_url == (
+        f"https://job-boards.greenhouse.io/embed/job_app?for={board}&token={job_id}"
+    )
     assert resolved.url == resolved.application_url
     assert resolved.vacancy is not None
     assert resolved.vacancy.original_url == custom_absolute_url

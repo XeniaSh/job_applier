@@ -8,6 +8,7 @@ import httpx
 from app.collectors.greenhouse_collector import (
     GreenhouseCollectionError,
     build_greenhouse_http_client,
+    canonical_greenhouse_embed_application_url,
     fetch_greenhouse_board_jobs,
     greenhouse_job_to_normalized,
 )
@@ -90,6 +91,8 @@ class GreenhouseTargetVacancyResolver:
                 raise VacancyResolveError(
                     f"Vacancy {source} {wanted_id} has an empty application URL."
                 )
+            if normalized.original_url:
+                application_url = canonical_greenhouse_embed_application_url(board, wanted_id)
             return ResolvedVacancy(
                 source=normalized.source,
                 external_id=normalized.external_id,

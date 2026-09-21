@@ -163,6 +163,11 @@ def canonical_greenhouse_hosted_job_url(board: str, external_id: str) -> str:
     return f"https://job-boards.greenhouse.io/{board}/jobs/{external_id}"
 
 
+def canonical_greenhouse_embed_application_url(board: str, external_id: str) -> str:
+    """Build Greenhouse's public embedded application endpoint."""
+    return f"https://job-boards.greenhouse.io/embed/job_app?for={board}&token={external_id}"
+
+
 def normalize_greenhouse_board(value: str) -> str:
     cleaned = value.strip().rstrip("/")
     if not cleaned:
