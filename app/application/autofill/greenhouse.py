@@ -120,7 +120,16 @@ def _is_greenhouse_apply_href(href: str) -> bool:
     path = parsed.path.lower()
     if any(marker in path for marker in _APPLY_HREF_PATH_MARKERS):
         return True
-    return _APPLY_HREF_QUERY_MARKER in parsed.query.lower()
+    query = parsed.query.lower()
+    if _APPLY_HREF_QUERY_MARKER in query:
+        return True
+    host = (parsed.hostname or "").lower()
+    return (
+        host.endswith(".greenhouse.io")
+        and "/embed/job_app" in path
+        and "for=" in query
+        and "token=" in query
+    )
 
 
 def _custom_domain_apply_matches(page: Page) -> list[Locator]:
@@ -320,17 +329,19 @@ class GreenhouseAdapter:
         caller's normal `recognize()` check.
         """
         pre_url = page.url
-        matches = _custom_domain_apply_matches(page)
-        apply_locator_count = len(matches)
-        logger.warning(
-            "greenhouse_prepare stage=apply_action apply_locator_count=%s",
-            apply_locator_count,
-        )
-        action = matches[0] if apply_locator_count == 1 else None
         click_attempted = False
         click_raised: str | None = None
         form_ready_selector_found = False
-        if action is not None:
+        for _ in range(2):
+            matches = _custom_domain_apply_matches(page)
+            apply_locator_count = len(matches)
+            logger.warning(
+                "greenhouse_prepare stage=apply_action apply_locator_count=%s",
+                apply_locator_count,
+            )
+            action = matches[0] if apply_locator_count == 1 else None
+            if action is None:
+                break
             click_attempted = True
             try:
                 action.click(timeout=5_000)
@@ -346,8 +357,11 @@ class GreenhouseAdapter:
                 try:
                     page.wait_for_selector(_FORM_READY_SELECTOR, timeout=timeout)
                     form_ready_selector_found = True
+                    break
                 except PlaywrightTimeoutError:
                     form_ready_selector_found = False
+            if click_raised is not None:
+                break
         post_url = page.url
         logger.warning(
             "greenhouse_prepare stage=navigation pre=%s post=%s url_changed=%s "

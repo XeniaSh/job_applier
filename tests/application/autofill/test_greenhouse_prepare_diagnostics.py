@@ -16,7 +16,11 @@ import logging
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from app.application.autofill.greenhouse import _FORM_READY_SELECTOR, GreenhouseAdapter
+from app.application.autofill.greenhouse import (
+    _FORM_READY_SELECTOR,
+    _is_greenhouse_apply_href,
+    GreenhouseAdapter,
+)
 
 LOGGER_NAME = "app.application.autofill.greenhouse"
 
@@ -229,6 +233,15 @@ def test_prepare_page_deduplicates_duplicate_apply_destinations(caplog) -> None:
     assert "apply_locator_count=1" in apply_count_log
     assert page._locators["a[href]"]._anchors[0].click_calls == 1
     assert page._locators["a[href]"]._anchors[1].click_calls == 0
+
+
+def test_greenhouse_embed_application_url_is_structural_apply_evidence() -> None:
+    assert _is_greenhouse_apply_href(
+        "https://job-boards.greenhouse.io/embed/job_app?for=stripe&token=7895287"
+    ) is True
+    assert _is_greenhouse_apply_href(
+        "https://job-boards.greenhouse.io/stripe/jobs/7895287"
+    ) is False
 
 
 def test_prepare_page_logs_click_exception_and_fails_closed_on_overlay(caplog) -> None:
