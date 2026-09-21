@@ -404,6 +404,46 @@ def test_primary_language_oss_gitlab_username_and_current_location_visa() -> Non
         session.close()
 
 
+def test_twilio_work_authorization_custom_react_select_fills_no() -> None:
+    """The exact Twilio wording, rendered as a real custom React select whose
+    options don't exist in the DOM until the menu is opened -- so, like the
+    other combobox fields on this fixture, `field.options` is empty at
+    discovery. Must select the visible "not authorized" option from the
+    explicit `work_authorization_for("United States")` fact, never from
+    citizenship/residence/sponsorship/visa facts.
+    """
+    session = _open(REACT_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        profile = _profile(
+            work_eligibility={
+                "citizenship": ["Uzbekistan"],
+                "work_authorizations": [{"country": "United States", "authorized": False}],
+            }
+        )
+        fields = adapter.discover_fields(session.page)
+
+        work_auth = _field(fields, "legally authorized to work in the United States")
+        assert work_auth.field_type == "combobox"
+        assert work_auth.options == []
+
+        classified = classify_field(work_auth, profile)
+        assert classified.kind is QuestionKind.WORK_AUTHORIZATION
+        assert classified.fill is True
+        assert classified.value is False
+
+        assert adapter.fill_field(session.page, classified) is True
+        label = session.page.locator("#work-authorization-field .select__single-value").inner_text()
+        assert label.strip() == "I am not legally authorized to work in the United States"
+        assert adapter.read_back(session.page, classified.field) == (
+            "I am not legally authorized to work in the United States"
+        )
+        assert session.page.evaluate("window.__submitClicked") is False
+        assert session.page.evaluate("window.__formSubmitted") is False
+    finally:
+        session.close()
+
+
 def test_primary_language_textarea_java_survives_react_readback() -> None:
     session = _open(REACT_FIXTURE)
     try:

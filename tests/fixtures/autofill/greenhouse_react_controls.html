@@ -261,6 +261,28 @@
       <div id="current-location-visa-list" role="listbox" hidden></div>
     </div>
 
+    <div class="field" id="work-authorization-us-field">
+      <label id="work-authorization-us-label">Are you legally authorized to work in the United States?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="work_authorization_us" aria-labelledby="work-authorization-us-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="work-authorization-us-list" role="listbox" hidden></div>
+    </div>
+
+    <div class="field" id="work-authorization-field">
+      <label id="work-authorization-label">Are you legally authorized to work in the United States?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="work_authorization" aria-labelledby="work-authorization-label" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+      <div id="work-authorization-list" role="listbox" hidden></div>
+    </div>
+
     <p>Resume/CV</p>
     <section id="resume-section">
       <h2>Resume/CV</h2>
@@ -447,6 +469,14 @@
     setupReactSingle("current-location-visa-field", "current_location_visa", "current-location-visa-list", [
       "Yes, Netherlands Highly Skilled Migrant Visa",
       "No"
+    ]);
+    setupReactSingle("work-authorization-us-field", "work_authorization_us", "work-authorization-us-list", [
+      "I am legally authorized to work in the United States",
+      "I am not legally authorized to work in the United States"
+    ]);
+    setupReactSingle("work-authorization-field", "work_authorization", "work-authorization-list", [
+      "I am legally authorized to work in the United States",
+      "I am not legally authorized to work in the United States"
     ]);
 
     document.getElementById("resume_manual").addEventListener("click", function () {
