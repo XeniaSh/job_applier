@@ -42,6 +42,14 @@ _WORK_IN_RE = re.compile(
     r"(?:authorized|authorised|eligible|right)\s+to\s+work\s+in(?:\s+the)?\s+(.+?)\??$",
     re.IGNORECASE,
 )
+_GENERIC_COUNTRY_RELATIVE_WORK_AUTH_RE = re.compile(
+    r"^(?:the\s+)?countr(?:y|ies)\s+(?:"
+    r"for which you (?:have\s+)?applied"
+    r"|in which you (?:are applying|have applied)"
+    r"|(?:for|in) which (?:this|the) (?:role|position|job) is located"
+    r")\s*$",
+    re.IGNORECASE,
+)
 
 QuestionValue = str | bool | list[str] | None
 
@@ -187,7 +195,8 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         )
 
     if _is_sensitive(text):
-        return MappedQuestion(kind=QuestionKind.SENSITIVE, fillable=False)
+        value = _sensitive_decline_value(field)
+        return MappedQuestion(kind=QuestionKind.SENSITIVE, value=value, fillable=bool(value))
 
     if _is_cover_letter(text, field):
         return MappedQuestion(kind=QuestionKind.COVER_LETTER, fillable=False)
@@ -343,6 +352,19 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         country = _country_from_work_auth_label(field.label)
         if country is None:
             return MappedQuestion(kind=QuestionKind.WORK_AUTHORIZATION, fillable=False)
+        if _is_generic_country_relative_work_auth_phrase(country):
+            # No named country in the label itself (e.g. "...in the country
+            # for which you applied"); only the service layer, which has
+            # `ResolvedVacancy`, can resolve this -- see
+            # `_single_vacancy_work_country` / `_enrich_work_authorization`.
+            return MappedQuestion(
+                kind=QuestionKind.WORK_AUTHORIZATION,
+                fillable=False,
+                unresolved_reason=(
+                    "work authorization relative to the role's country requires "
+                    "vacancy-aware enrichment"
+                ),
+            )
         answer = profile.work_authorization_for(country)
         return MappedQuestion(
             kind=QuestionKind.WORK_AUTHORIZATION,
@@ -706,6 +728,33 @@ def _age_decline_value(field: DiscoveredField) -> str | None:
     return match_decline_to_answer_option(field.options)
 
 
+SENSITIVE_DECLINE_INTENT = "decline_to_answer"
+
+
+def _sensitive_decline_value(field: DiscoveredField) -> str | None:
+    """Required voluntary demographic self-identification (race/ethnicity,
+    veteran/military status, sexual orientation, disability, etc.) only ever
+    selects an explicit decline-to-answer option. Never infers or guesses a
+    demographic value -- optional fields of this kind stay unfillable
+    (`fillable=False` here) so the classifier keeps them sensitive/untouched.
+
+    Mirrors `_age_decline_value`, but only for an actual custom React-select
+    (`field_type == "combobox"`): that control has no readable
+    `field.options` at discovery time, so the semantic decline intent is
+    carried through as `SENSITIVE_DECLINE_INTENT` for live-choice matching
+    (`greenhouse._live_choice_match`) to resolve against the opened menu. A
+    plain "select" with no discovered options is not that live widget --
+    guessing a decline intent there would silently attempt to fill a control
+    that has no matching option, so it must stay unresolved/fail-closed
+    instead.
+    """
+    if not field.required:
+        return None
+    if not field.options:
+        return SENSITIVE_DECLINE_INTENT if field.field_type == "combobox" else None
+    return match_decline_to_answer_option(field.options)
+
+
 _NATIONALITY_OF_WORK_COUNTRY_RE = re.compile(
     r"national(?:ity)? of the country (?:where|in which) you (?:are|would be) applying",
     re.IGNORECASE,
@@ -901,6 +950,18 @@ def _country_from_work_auth_label(label: str) -> str | None:
         return None
     country = match.group(1).strip().rstrip("?.")
     return country or None
+
+
+def _is_generic_country_relative_work_auth_phrase(phrase: str) -> bool:
+    """True for a work-authorization label naming the vacancy's country only
+    relatively (e.g. "...in the country for which you applied", "...in the
+    country in which this role is located"), never an actual country name.
+
+    Distinct from the named-country form (e.g. "...in Germany"), which is
+    used as-is against `CandidateProfile.work_authorization_for` below.
+    """
+    cleaned = " ".join(phrase.strip().lower().split())
+    return bool(_GENERIC_COUNTRY_RELATIVE_WORK_AUTH_RE.match(cleaned))
 
 
 def _is_salary(text: str) -> bool:

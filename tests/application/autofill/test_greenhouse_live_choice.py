@@ -27,6 +27,24 @@ def test_live_application_source_still_prefers_company_website() -> None:
     )
 
 
+def test_live_sensitive_match_uses_decline_semantics_regardless_of_wanted() -> None:
+    """SENSITIVE (race/ethnicity, veteran/military, disability, sexual
+    orientation, ...) only ever carries a decline intent, never real option
+    text (see `_sensitive_decline_value`), so the live menu is always
+    searched for the explicit decline option, exactly like AGE.
+    """
+    live = ["Hispanic or Latino", "Not Hispanic or Latino", "I don't wish to answer"]
+    assert (
+        _live_choice_match("decline_to_answer", live, QuestionKind.SENSITIVE)
+        == "I don't wish to answer"
+    )
+
+
+def test_live_sensitive_match_returns_none_when_no_decline_option_exists() -> None:
+    live = ["Hispanic or Latino", "Not Hispanic or Latino"]
+    assert _live_choice_match("decline_to_answer", live, QuestionKind.SENSITIVE) is None
+
+
 def test_live_sponsorship_does_not_select_unrelated_netherlands_hsm() -> None:
     live = ["Yes, Netherlands Highly Skilled Migrant Visa", "No"]
     assert _live_choice_match("Yes", live, QuestionKind.VISA_SPONSORSHIP, "uzbekistan") is None

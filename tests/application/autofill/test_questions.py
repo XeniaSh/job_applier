@@ -4,7 +4,12 @@ import pytest
 
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE
-from app.application.autofill.questions import AGE_DECLINE_INTENT, QuestionKind, map_question
+from app.application.autofill.questions import (
+    AGE_DECLINE_INTENT,
+    SENSITIVE_DECLINE_INTENT,
+    QuestionKind,
+    map_question,
+)
 from app.application.candidate_profile import CandidateProfile
 
 
@@ -106,6 +111,41 @@ def test_work_authorization_in_other_country_is_not_guessed() -> None:
     assert mapped.kind is QuestionKind.WORK_AUTHORIZATION
     assert mapped.fillable is False
     assert mapped.value is None
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Are you legally authorized to work in the country for which you applied?",
+        "Are you legally authorized to work in the country in which this role is located?",
+        "Are you authorised to work in the country in which the role is located?",
+    ],
+)
+def test_generic_country_relative_work_authorization_needs_vacancy_enrichment(label: str) -> None:
+    """No named country in the label itself -- `map_question` alone has no
+    `ResolvedVacancy` context, so this must stay unresolved with a reason
+    the service layer can act on (see `_enrich_work_authorization` /
+    test_service.py). Never guesses citizenship, residence, or sponsorship
+    in its place.
+    """
+    mapped = map_question(
+        DiscoveredField(label=label, field_type="select", required=True, options=["Yes", "No"]),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.WORK_AUTHORIZATION
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason is not None
+
+
+def test_named_country_work_authorization_is_unaffected_by_generic_phrase_handling() -> None:
+    mapped = map_question(
+        DiscoveredField(label="Are you legally authorized to work in Germany?", field_type="select"),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.WORK_AUTHORIZATION
+    assert mapped.fillable is True
+    assert mapped.value is True
 
 
 def test_salary_and_why_company_stay_unknown() -> None:
@@ -2190,6 +2230,114 @@ def test_optional_age_custom_react_select_stays_unresolved_without_options() -> 
     assert mapped.kind is QuestionKind.AGE
     assert mapped.fillable is False
     assert mapped.value is None
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Race/Ethnicity", "Veteran Status", "Sexual Orientation", "Disability Status"],
+)
+def test_required_demographic_question_selects_explicit_decline_option(label: str) -> None:
+    """Required voluntary self-identification (race/ethnicity, veteran,
+    sexual orientation, disability) selects an explicit decline option when
+    the discovered options contain exactly one unambiguous match. Never
+    infers a demographic value.
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label=label,
+            field_type="select",
+            required=True,
+            options=["Option A", "Option B", "I don't wish to answer"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.SENSITIVE
+    assert mapped.fillable is True
+    assert mapped.value == "I don't wish to answer"
+
+
+def test_required_demographic_question_without_decline_option_is_unresolved() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Race/Ethnicity",
+            field_type="select",
+            required=True,
+            options=["Option A", "Option B"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.SENSITIVE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_optional_demographic_question_is_never_filled() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Race/Ethnicity",
+            field_type="select",
+            required=False,
+            options=["Option A", "Option B", "I don't wish to answer"],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.SENSITIVE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_required_demographic_custom_react_select_carries_decline_intent_without_options() -> None:
+    """Mirrors `test_required_age_custom_react_select_carries_decline_intent_without_options`:
+    a custom React-select has no readable `field.options` at discovery time,
+    so the semantic decline intent is carried through for
+    `greenhouse._live_choice_match` to resolve against the live menu --
+    never a guessed literal label.
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label="Veteran Status",
+            field_type="combobox",
+            required=True,
+            options=[],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.SENSITIVE
+    assert mapped.fillable is True
+    assert mapped.value == SENSITIVE_DECLINE_INTENT
+
+
+def test_required_demographic_plain_select_with_no_options_is_not_treated_as_live_combobox() -> None:
+    """A plain "select" with no discovered options is not the same as a
+    custom React-select (`field_type == "combobox"`) that only reveals its
+    real options once opened. Only the latter may carry the semantic decline
+    intent through for live-choice resolution; the former must stay
+    unresolved/fail-closed rather than guessing a decline value it can never
+    actually find on the page.
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label="Race/Ethnicity",
+            field_type="select",
+            required=True,
+            options=[],
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.SENSITIVE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_gender_and_pronoun_are_not_reclassified_as_demographic_decline() -> None:
+    """Gender keeps its own dedicated policy (`_gender_value`); this change
+    must not broaden `_is_sensitive`'s existing term set.
+    """
+    gender = map_question(
+        DiscoveredField(label="Gender", field_type="select", required=True, options=["Prefer not to disclose"]),
+        _profile(),
+    )
+    assert gender.kind is QuestionKind.GENDER
 
 
 # --- "Are you a national of the country where you are applying to work?"

@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.application.autofill.browser import BrowserSetupError
@@ -972,6 +973,145 @@ def test_service_nationality_stays_unresolved_when_residence_and_work_authorizat
     assert result.status is AutofillStatus.READY_FOR_REVIEW
     assert any(item.label == _NATIONALITY_LABEL for item in result.unresolved_required_fields)
     assert not any(item.label == _NATIONALITY_LABEL for item in result.filled_fields)
+
+
+_WORK_AUTH_GENERIC_LABEL = "Are you legally authorized to work in the country for which you applied?"
+_WORK_AUTH_GENERIC_ROLE_LOCATED_LABEL = (
+    "Are you legally authorized to work in the country in which this role is located?"
+)
+
+
+class _WorkAuthFakeAdapter:
+    """Records whatever value AutofillService fills and echoes it back on
+    read-back, like a real select control's post-fill visible text would.
+    """
+
+    def __init__(self, label: str = _WORK_AUTH_GENERIC_LABEL) -> None:
+        self.label = label
+        self.filled: dict[str | None, object] = {}
+
+    def detect_challenge(self, page: object) -> str | None:
+        _ = page
+        return None
+
+    def recognize(self, page: object) -> bool:
+        _ = page
+        return True
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(
+                label=self.label,
+                name="work_authorization",
+                field_type="select",
+                options=["Yes", "No"],
+                required=True,
+            )
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        if not getattr(classified, "fill", False):
+            return False
+        self.filled[classified.field.name] = classified.value
+        return True
+
+    def upload_resume(self, page: object, resume_path: object, field: object) -> bool:
+        _ = page, resume_path, field
+        return False
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        value = self.filled.get(field.name)
+        return None if value is None else str(value)
+
+
+def _profile_with_work_authorization(country: str | None, authorized: bool | None) -> CandidateProfile:
+    work_eligibility: dict[str, object] = {}
+    if country is not None and authorized is not None:
+        work_eligibility["work_authorizations"] = [{"country": country, "authorized": authorized}]
+    return CandidateProfile.model_validate(
+        {
+            "identity": {
+                "first_name": "Ada",
+                "last_name": "Example",
+                "email": "ada.example@example.test",
+                "phone": "+15555550100",
+            },
+            "work_eligibility": work_eligibility,
+            "application_files": {"default_resume": "tests/fixtures/autofill/resume.txt"},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "label",
+    [_WORK_AUTH_GENERIC_LABEL, _WORK_AUTH_GENERIC_ROLE_LOCATED_LABEL],
+)
+def test_service_generic_work_authorization_answers_yes_for_single_vacancy_country(label: str) -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_NationalityResolver("Berlin, Germany"),
+        profile_loader=lambda: _profile_with_work_authorization("Germany", True),
+        adapter=_WorkAuthFakeAdapter(label),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == label for item in result.filled_fields)
+    assert not any(item.label == label for item in result.unresolved_required_fields)
+    filled_item = next(item for item in result.filled_fields if item.label == label)
+    # Vacancy-aware deterministic enrichment must report as such, not as the
+    # pre-enrichment UNKNOWN_REQUIRED classification it started from.
+    assert filled_item.classification is FieldClassification.SUPPORTED_DETERMINISTIC
+
+
+def test_service_generic_work_authorization_answers_no_when_explicit_false() -> None:
+    session = _FakeSession()
+    adapter = _WorkAuthFakeAdapter()
+    service = AutofillService(
+        resolver=_NationalityResolver("Berlin, Germany"),
+        profile_loader=lambda: _profile_with_work_authorization("Germany", False),
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == _WORK_AUTH_GENERIC_LABEL for item in result.filled_fields)
+    assert adapter.filled["work_authorization"] == "No"
+
+
+def test_service_generic_work_authorization_stays_unresolved_when_vacancy_country_is_ambiguous() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_NationalityResolver("Berlin, Germany or Amsterdam, Netherlands"),
+        profile_loader=lambda: _profile_with_work_authorization("Germany", True),
+        adapter=_WorkAuthFakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == _WORK_AUTH_GENERIC_LABEL for item in result.unresolved_required_fields)
+    assert not any(item.label == _WORK_AUTH_GENERIC_LABEL for item in result.filled_fields)
+
+
+def test_service_generic_work_authorization_stays_unresolved_when_profile_fact_is_missing() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_NationalityResolver("Berlin, Germany"),
+        profile_loader=lambda: _profile_with_work_authorization(None, None),
+        adapter=_WorkAuthFakeAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:wolt", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == _WORK_AUTH_GENERIC_LABEL for item in result.unresolved_required_fields)
+    assert not any(item.label == _WORK_AUTH_GENERIC_LABEL for item in result.filled_fields)
 
 
 _ADYEN_VISA_RELOCATION_LABEL = (

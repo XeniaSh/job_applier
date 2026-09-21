@@ -406,6 +406,11 @@ def _enrich_unresolved(
         if enriched is not None:
             return enriched
         return item
+    if item.kind is QuestionKind.WORK_AUTHORIZATION:
+        enriched = _enrich_work_authorization(item, profile=profile, vacancy=vacancy)
+        if enriched is not None:
+            return enriched
+        return item
     if answer_generator is None:
         return item
     answer = answer_generator.generate(item.field, profile, vacancy)
@@ -461,6 +466,36 @@ def _enrich_nationality(
     if value is None:
         return None
     return replace(item, fill=True, value=value, classification=FieldClassification.SUPPORTED_DETERMINISTIC)
+
+
+def _enrich_work_authorization(
+    item: ClassifiedField,
+    *,
+    profile: CandidateProfile,
+    vacancy: ResolvedVacancy,
+) -> ClassifiedField | None:
+    """Answers a generic country-relative work-authorization question (e.g.
+    "...in the country for which you applied") only when the vacancy names
+    exactly one deterministic work country and the candidate has an explicit
+    `work_authorization_for` fact for it. Never substitutes citizenship,
+    residence, sponsorship, or inference for authorization.
+    """
+    country = _single_vacancy_work_country(vacancy)
+    if country is None:
+        return None
+    answer = profile.work_authorization_for(country)
+    if answer is None:
+        return None
+    value = match_yes_no(answer, item.field.options) if item.field.options else answer
+    if value is None:
+        return None
+    return replace(
+        item,
+        fill=True,
+        value=value,
+        country=country,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+    )
 
 
 def _safe_host(url: object) -> str:

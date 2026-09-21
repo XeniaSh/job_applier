@@ -58,10 +58,26 @@ def classify_field(field: DiscoveredField, profile: CandidateProfile) -> Classif
             fill=False,
             kind=mapped.kind,
             country=mapped.country,
+            inactive_conditional=mapped.inactive_conditional,
             unresolved_reason=mapped.unresolved_reason,
         )
 
     if mapped.kind is QuestionKind.SENSITIVE:
+        if mapped.fillable:
+            return ClassifiedField(
+                field=field,
+                classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                value=mapped.value,
+                fill=True,
+                kind=mapped.kind,
+                country=mapped.country,
+                unresolved_reason=mapped.unresolved_reason,
+            )
+        # Fail-closed regardless of `required`: an unresolved sensitive
+        # question always stays SENSITIVE_OPTIONAL (never auto-classified as
+        # UNKNOWN_REQUIRED) so it always lands in `sensitive_fields`; the
+        # service layer additionally surfaces it in
+        # `unresolved_required_fields` when the field is required.
         return ClassifiedField(
             field=field,
             classification=FieldClassification.SENSITIVE_OPTIONAL,

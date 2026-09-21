@@ -57,6 +57,7 @@ _MENU_CHOICE_KINDS = _BOOLEAN_CHOICE_KINDS | frozenset(
         QuestionKind.FIELD_OF_INTEREST,
         QuestionKind.AGE,
         QuestionKind.NATIONALITY,
+        QuestionKind.SENSITIVE,
     }
 )
 
@@ -1233,13 +1234,14 @@ def _fill_choice(
             react_controls.dismiss_menu(page)
             return False
         if matched is None and (
-            kind is QuestionKind.AGE
+            kind in (QuestionKind.AGE, QuestionKind.SENSITIVE)
             or (kind is QuestionKind.RELOCATION and wanted in {ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE})
         ):
             # `wanted` is a semantic intent/sentinel here (never real option
-            # text -- see `_age_decline_value` / the located-or-relocate
-            # branch of `map_question`), so it must never be clicked as a
-            # literal label when the live menu has no matching option.
+            # text -- see `_age_decline_value` / `_sensitive_decline_value` /
+            # the located-or-relocate branch of `map_question`), so it must
+            # never be clicked as a literal label when the live menu has no
+            # matching option.
             react_controls.dismiss_menu(page)
             return False
         match = matched or wanted
@@ -1296,10 +1298,11 @@ def _live_choice_match(
         return match_prefer_not_to_disclose_gender(live) or match_gender_option(wanted, live)
     if kind is QuestionKind.ACADEMIC_LEVEL:
         return match_academic_option(wanted, live)
-    if kind is QuestionKind.AGE:
-        # AGE never carries any wanted text other than a decline intent (see
-        # `_age_decline_value`), so the live menu is always searched for the
-        # explicit decline option regardless of what `wanted` holds.
+    if kind in (QuestionKind.AGE, QuestionKind.SENSITIVE):
+        # AGE/SENSITIVE never carry any wanted text other than a decline
+        # intent (see `_age_decline_value` / `_sensitive_decline_value`), so
+        # the live menu is always searched for the explicit decline option
+        # regardless of what `wanted` holds.
         return match_decline_to_answer_option(live)
     if kind is QuestionKind.RELOCATION and wanted in {ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE}:
         return match_located_or_relocate_option(wanted, live)
