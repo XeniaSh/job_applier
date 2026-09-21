@@ -44,10 +44,13 @@ _WORK_IN_RE = re.compile(
     re.IGNORECASE,
 )
 _GENERIC_COUNTRY_RELATIVE_WORK_AUTH_RE = re.compile(
-    r"^(?:the\s+)?countr(?:y|ies)\s+(?:"
+    r"^(?:"
+    r"(?:the\s+)?countr(?:y|ies)\s+(?:"
     r"for which you (?:have\s+)?applied"
     r"|in which you (?:are applying|have applied)"
     r"|(?:for|in) which (?:this|the) (?:role|position|job) is located"
+    r")"
+    r"|(?:the\s+)?location\(s\) you selected in your previous response"
     r")\s*$",
     re.IGNORECASE,
 )
@@ -63,6 +66,7 @@ class QuestionKind(StrEnum):
     PHONE = "phone"
     LOCATION = "location"
     COUNTRY = "country"
+    ANTICIPATED_WORK_COUNTRY = "anticipated_work_country"
     LINKEDIN = "linkedin"
     GITHUB = "github"
     GITLAB_USERNAME = "gitlab_username"
@@ -82,6 +86,7 @@ class QuestionKind(StrEnum):
     OFFICE_WORK = "office_work"
     REMOTE_WORK_ARRANGEMENT = "remote_work_arrangement"
     CURRENT_EMPLOYER = "current_employer"
+    CURRENT_TITLE = "current_title"
     SKILL_SET_CHOICE = "skill_set_choice"
     EMPLOYEE_RELATIONSHIP = "employee_relationship"
     EMPLOYEE_RELATIONSHIP_DETAILS = "employee_relationship_details"
@@ -128,6 +133,7 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.PHONE,
         QuestionKind.LOCATION,
         QuestionKind.COUNTRY,
+        QuestionKind.ANTICIPATED_WORK_COUNTRY,
         QuestionKind.LINKEDIN,
         QuestionKind.GITHUB,
         QuestionKind.GITLAB_USERNAME,
@@ -144,6 +150,7 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.OFFICE_WORK,
         QuestionKind.REMOTE_WORK_ARRANGEMENT,
         QuestionKind.CURRENT_EMPLOYER,
+        QuestionKind.CURRENT_TITLE,
         QuestionKind.SKILL_SET_CHOICE,
     }
 )
@@ -479,6 +486,13 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             return MappedQuestion(kind=QuestionKind.ACADEMIC_LEVEL, fillable=False)
         return MappedQuestion(kind=QuestionKind.ACADEMIC_LEVEL, value=level, fillable=True)
 
+    if _is_anticipated_work_country(text):
+        return MappedQuestion(
+            kind=QuestionKind.ANTICIPATED_WORK_COUNTRY,
+            fillable=False,
+            unresolved_reason="anticipated work country requires one unambiguous vacancy work country",
+        )
+
     if _is_primary_language(text):
         language = profile.primary_programming_language()
         if not language:
@@ -568,6 +582,14 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             value=value,
             fillable=bool(value),
         )
+
+    if _is_current_or_previous_employer(text):
+        value = profile.employment.current_employer if field.required else None
+        return MappedQuestion(kind=QuestionKind.CURRENT_EMPLOYER, value=value, fillable=bool(value))
+
+    if _is_current_or_previous_title(text):
+        value = profile.employment.current_title if field.required else None
+        return MappedQuestion(kind=QuestionKind.CURRENT_TITLE, value=value, fillable=bool(value))
 
     if _is_current_employer(text):
         value = profile.current_employer_for_autofill()
@@ -1014,7 +1036,11 @@ def _is_academic_level(text: str) -> bool:
             "highest level of education",
             "degree obtained",
         )
-    )
+    ) or text.strip().rstrip("*").strip() == "degree"
+
+
+def _is_anticipated_work_country(text: str) -> bool:
+    return "anticipate" in text and "work" in text and "countr" in text
 
 
 def _is_named_skill_set(text: str) -> bool:
@@ -1136,6 +1162,18 @@ def _is_current_employer(text: str) -> bool:
             "current organization",
             "current organisation",
         )
+    )
+
+
+def _is_current_or_previous_employer(text: str) -> bool:
+    return "current or previous employer" in text or "current/previous employer" in text
+
+
+def _is_current_or_previous_title(text: str) -> bool:
+    return (
+        "current or previous job title" in text
+        or "current/previous job title" in text
+        or "current or previous title" in text
     )
 
 

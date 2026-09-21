@@ -1709,6 +1709,53 @@ def test_current_employer_stays_blank_even_with_explicit_current_employer() -> N
     assert mapped.value is None
 
 
+def test_stripe_current_or_previous_employment_fields_use_explicit_facts() -> None:
+    profile = _profile(employment={"current_employer": "Acme Corp", "current_title": "Staff Engineer"})
+    employer = map_question(
+        DiscoveredField(label="Who is your current or previous employer?", field_type="text", required=True),
+        profile,
+    )
+    title = map_question(
+        DiscoveredField(label="What is your current or previous job title?", field_type="text", required=True),
+        profile,
+    )
+    assert employer.kind is QuestionKind.CURRENT_EMPLOYER
+    assert employer.value == "Acme Corp"
+    assert employer.fillable is True
+    assert title.kind is QuestionKind.CURRENT_TITLE
+    assert title.value == "Staff Engineer"
+    assert title.fillable is True
+
+
+def test_stripe_degree_uses_awarded_academic_level_but_school_stays_unresolved() -> None:
+    profile = _profile(employment={"highest_academic_level": "Master's"})
+    degree = map_question(
+        DiscoveredField(label="Degree *", field_type="select", required=True, options=["Bachelor's Degree", "Master's Degree"]),
+        profile,
+    )
+    school = map_question(DiscoveredField(label="School *", field_type="text", required=True), profile)
+    assert degree.kind is QuestionKind.ACADEMIC_LEVEL
+    assert degree.value == "MASTERS"
+    assert degree.fillable is True
+    assert school.fillable is False
+    assert school.kind is QuestionKind.UNKNOWN
+
+
+def test_stripe_location_relative_authorization_accepts_explicit_negative_fact() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you authorized to work in the location(s) you selected in your previous response?",
+            field_type="select",
+            required=True,
+            options=["Yes", "No"],
+        ),
+        _profile(work_eligibility={"work_authorizations": [{"country": "United States", "authorized": False}]}),
+    )
+    assert mapped.kind is QuestionKind.WORK_AUTHORIZATION
+    assert mapped.value == "No"
+    assert mapped.fillable is True
+
+
 def test_current_employer_does_not_shadow_employment_restrictions() -> None:
     """"...restrictions with your current employer or a past employer?" must
     still classify as an employment-restriction question, not current-employer.

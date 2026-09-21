@@ -9,13 +9,53 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.application.autofill.browser import BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
+from app.application.autofill.classifier import classify_field
 from app.application.autofill.greenhouse import GreenhouseAdapter
 from app.application.autofill.lever import LeverAdapter
 from app.application.autofill.models import AutofillFailureReason, AutofillStatus, FieldClassification
 from app.application.autofill.resolver import ResolvedVacancy, VacancyResolveError
-from app.application.autofill.service import AutofillService, default_adapter_for_source
+from app.application.autofill.service import AutofillService, _enrich_unresolved, default_adapter_for_source
 from app.application.candidate_profile import CandidateProfile
 from app.collectors.vacancy_collector import NormalizedVacancy
+
+
+def test_anticipated_work_country_checkbox_uses_one_vacancy_country() -> None:
+    field = DiscoveredField(
+        label="United States",
+        context="Please select the country or countries you anticipate working in for the role in which you are applying.",
+        field_type="checkbox",
+        required=True,
+    )
+    item = classify_field(field, _profile())
+    vacancy = ResolvedVacancy(
+        source="target_company:greenhouse:stripe",
+        external_id="8035723",
+        title="Backend Engineer",
+        company="Stripe",
+        url="https://job-boards.greenhouse.io/stripe/jobs/8035723",
+        application_url="https://job-boards.greenhouse.io/stripe/jobs/8035723",
+        vacancy=NormalizedVacancy(
+            source="target_company:greenhouse:stripe",
+            external_id="8035723",
+            title="Backend Engineer",
+            company="Stripe",
+            location="New York, United States",
+            employment=None,
+            description="Backend engineering",
+            url="https://job-boards.greenhouse.io/stripe/jobs/8035723",
+            published_at=None,
+        ),
+    )
+    enriched = _enrich_unresolved(
+        item,
+        profile=_profile(),
+        vacancy=vacancy,
+        cover_letter_text=None,
+        answer_generator=None,
+    )
+    assert enriched.kind.value == "anticipated_work_country"
+    assert enriched.fill is True
+    assert enriched.value is True
 
 
 def _profile() -> CandidateProfile:

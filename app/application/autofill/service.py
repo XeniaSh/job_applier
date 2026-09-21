@@ -27,7 +27,7 @@ from app.application.autofill.models import (
     FieldClassification,
     stage1_autofill_result,
 )
-from app.application.autofill.options import match_yes_no
+from app.application.autofill.options import match_option, match_yes_no
 from app.application.autofill.questions import QuestionKind
 from app.application.autofill.resolver import (
     TARGET_COMPANY_LEVER_PREFIX,
@@ -41,7 +41,7 @@ from app.application.autofill.submit import (
     attempt_auto_submit,
     default_submit_adapter_for_source,
 )
-from app.application.candidate_profile import CandidateProfile, countries_mentioned
+from app.application.candidate_profile import CandidateProfile, countries_mentioned, normalize_country_name
 from app.application.candidate_profile_loader import CandidateProfileLoadError, load_structured_candidate_profile
 
 logger = logging.getLogger(__name__)
@@ -411,6 +411,11 @@ def _enrich_unresolved(
         if enriched is not None:
             return enriched
         return item
+    if item.kind is QuestionKind.ANTICIPATED_WORK_COUNTRY:
+        enriched = _enrich_anticipated_work_country(item, vacancy=vacancy)
+        if enriched is not None:
+            return enriched
+        return item
     if answer_generator is None:
         return item
     answer = answer_generator.generate(item.field, profile, vacancy)
@@ -466,6 +471,35 @@ def _enrich_nationality(
     if value is None:
         return None
     return replace(item, fill=True, value=value, classification=FieldClassification.SUPPORTED_DETERMINISTIC)
+
+
+def _enrich_anticipated_work_country(
+    item: ClassifiedField,
+    *,
+    vacancy: ResolvedVacancy,
+) -> ClassifiedField | None:
+    """Select one exact option only when the vacancy has one work country."""
+    country = _single_vacancy_work_country(vacancy)
+    if country is None:
+        return None
+    options = list(item.field.options) or [item.field.label]
+    matched = match_option(country, options)
+    if matched is None:
+        wanted = normalize_country_name(country)
+        for option in options:
+            if normalize_country_name(option) == wanted:
+                matched = option
+                break
+    if matched is None:
+        return None
+    value: object = True if item.field.field_type == "checkbox" else matched
+    return replace(
+        item,
+        fill=True,
+        value=value,
+        country=country,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+    )
 
 
 def _enrich_work_authorization(
@@ -745,6 +779,7 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
             QuestionKind.OFFICE_WORK,
             QuestionKind.REMOTE_WORK_ARRANGEMENT,
             QuestionKind.CURRENT_EMPLOYER,
+            QuestionKind.CURRENT_TITLE,
             QuestionKind.SKILL_SET_CHOICE,
             QuestionKind.EMPLOYEE_RELATIONSHIP,
             QuestionKind.PRIOR_AFFILIATION,
@@ -837,4 +872,3 @@ def _privacy_trace_should_warn(trace: dict[str, object]) -> bool:
     if classified in {"required_privacy", "privacy_optional"}:
         return trace.get("readback_checked") is False
     return False
-
