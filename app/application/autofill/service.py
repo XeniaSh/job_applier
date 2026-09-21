@@ -320,7 +320,7 @@ class AutofillService:
             # UNKNOWN_REQUIRED/UNKNOWN_OPTIONAL exactly.
             if item.field.required:
                 unresolved_required.append(record)
-                if item.unresolved_reason:
+                if item.unresolved_reason and item.unresolved_reason not in warnings:
                     warnings.append(item.unresolved_reason)
             elif item.kind is not QuestionKind.GITLAB_USERNAME:
                 unresolved_optional.append(record)
@@ -588,7 +588,15 @@ def _fill_and_confirm(adapter: AutofillAdapter, page: object, item: ClassifiedFi
 
 
 _SELECT_CHOICE_DIAGNOSTIC_KINDS = frozenset(
-    {QuestionKind.AGE, QuestionKind.RELOCATION, QuestionKind.PRIVACY_CONSENT, QuestionKind.GENDER}
+    {
+        QuestionKind.AGE,
+        QuestionKind.RELOCATION,
+        QuestionKind.PRIVACY_CONSENT,
+        QuestionKind.GENDER,
+        QuestionKind.COUNTRY,
+        QuestionKind.ACADEMIC_LEVEL,
+        QuestionKind.SCHOOL,
+    }
 )
 
 

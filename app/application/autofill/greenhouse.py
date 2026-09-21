@@ -417,7 +417,17 @@ class GreenhouseAdapter:
         unexpected Greenhouse control shape or profile data is absent.
         """
         label = " ".join((item.field.label or "").lower().split())
-        if not any(term in label for term in ("school", "degree", "reside", "anticipate", "employer", "job title")):
+        targeted_kinds = {
+            QuestionKind.ACADEMIC_LEVEL,
+            QuestionKind.SCHOOL,
+            QuestionKind.COUNTRY,
+            QuestionKind.ANTICIPATED_WORK_COUNTRY,
+            QuestionKind.CURRENT_EMPLOYER,
+            QuestionKind.CURRENT_TITLE,
+        }
+        if item.kind not in targeted_kinds and not any(
+            term in label for term in ("school", "degree", "reside", "anticipate", "employer", "job title")
+        ):
             return
         logger.warning(
             "greenhouse_final_fill label=%s required=%s kind=%s value_present=%s action=%s field_type=%s",
