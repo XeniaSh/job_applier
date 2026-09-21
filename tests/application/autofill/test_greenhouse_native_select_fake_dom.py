@@ -180,6 +180,87 @@ def test_wolt_privacy_select_fills_and_reads_back_via_fake_native_select() -> No
     assert "personal data" in readback.lower()
 
 
+def test_twilio_named_country_work_authorization_select_fills_no_and_reads_back() -> None:
+    options = [
+        "Please select",
+        "I am legally authorized to work in the United States",
+        "I am not legally authorized to work in the United States",
+    ]
+    field = DiscoveredField(
+        label="Are you legally authorized to work in the United States?",
+        name="job_application_answers_attributes_0_text_value",
+        field_type="select",
+        options=options,
+        required=True,
+        element_id="twilio_work_authorization",
+    )
+    profile = _profile()
+    profile = CandidateProfile.model_validate(
+        {
+            **profile.model_dump(),
+            "work_eligibility": {
+                "work_authorizations": [{"country": "United States", "authorized": False}]
+            },
+        }
+    )
+    classified = classify_field(field, profile)
+    assert classified.kind is QuestionKind.WORK_AUTHORIZATION
+    assert classified.fill is True
+    assert classified.value is False
+
+    locator = _FakeSelectLocator(options)
+    page = _FakePage({"twilio_work_authorization": locator})
+    adapter = GreenhouseAdapter()
+
+    assert adapter.fill_field(page, classified) is True
+    assert locator.selected_index == options.index(options[2])
+    assert adapter.read_back(page, field) == options[2]
+
+
+def test_twilio_work_authorization_select_fills_when_options_unavailable_at_discovery() -> None:
+    """Reproduces the live Twilio symptom: the required "Are you legally
+    authorized to work in the United States?" control is a real native
+    <select>, but its <option> elements are populated by JS after the
+    discovery pass runs, so `field.options` is empty at classification time.
+    The adapter must re-read the live DOM options at fill time instead of
+    leaving the field blank.
+    """
+    options = [
+        "Please select",
+        "I am legally authorized to work in the United States",
+        "I am not legally authorized to work in the United States",
+    ]
+    field = DiscoveredField(
+        label="Are you legally authorized to work in the United States?",
+        name="job_application_answers_attributes_0_text_value",
+        field_type="select",
+        options=[],
+        required=True,
+        element_id="twilio_work_authorization",
+    )
+    profile = _profile()
+    profile = CandidateProfile.model_validate(
+        {
+            **profile.model_dump(),
+            "work_eligibility": {
+                "work_authorizations": [{"country": "United States", "authorized": False}]
+            },
+        }
+    )
+    classified = classify_field(field, profile)
+    assert classified.kind is QuestionKind.WORK_AUTHORIZATION
+    assert classified.fill is True
+    assert classified.value is False
+
+    locator = _FakeSelectLocator(options)
+    page = _FakePage({"twilio_work_authorization": locator})
+    adapter = GreenhouseAdapter()
+
+    assert adapter.fill_field(page, classified) is True
+    assert locator.selected_index == options.index(options[2])
+    assert adapter.read_back(page, field) == options[2]
+
+
 def test_wolt_relocation_select_already_located_via_fake_native_select() -> None:
     options = [
         "Please select",

@@ -22,6 +22,7 @@ from app.application.autofill.options import (
     match_option,
     match_prefer_not_to_disclose_gender,
     match_sponsorship_option,
+    match_work_authorization_option,
     match_years_option,
     select_listed_options,
 )
@@ -132,6 +133,7 @@ def _custom_domain_apply_matches(page: Page) -> list[Locator]:
     """
     anchors = page.locator("a[href]")
     matches: list[Locator] = []
+    destinations: set[str] = set()
     for index in range(anchors.count()):
         anchor = anchors.nth(index)
         try:
@@ -141,10 +143,18 @@ def _custom_domain_apply_matches(page: Page) -> list[Locator]:
         if not isinstance(href, str) or not _is_greenhouse_apply_href(href):
             continue
         try:
+            parsed = urlparse(href)
+            destination = parsed._replace(fragment="").geturl()
+        except ValueError:
+            continue
+        if destination in destinations:
+            continue
+        try:
             visible = anchor.is_visible()
         except PlaywrightError:
             visible = False
         if visible:
+            destinations.add(destination)
             matches.append(anchor)
     return matches
 
@@ -1363,11 +1373,16 @@ def _fill_choice(
     resolved: dict[str, str] | None = None,
 ) -> bool:
     if isinstance(value, bool):
+        if kind is QuestionKind.WORK_AUTHORIZATION:
+            live = list(field.options or []) or _live_choice_options(page, locator)
+            matched = match_work_authorization_option(value, live)
+            if matched is None:
+                return False
+            if field.field_type == "radio":
+                return _fill_radio(page, field, matched)
+            return react_controls.select_single_option(page, locator, matched)
         if kind is QuestionKind.VISA_SPONSORSHIP:
-            live = list(field.options or [])
-            if not live and not _is_native_select(locator):
-                live = react_controls.open_menu(page, locator)
-                react_controls.dismiss_menu(page)
+            live = list(field.options or []) or _live_choice_options(page, locator)
             matched = match_sponsorship_option(value, live, referenced_country)
             if matched is None:
                 return False
@@ -1381,6 +1396,14 @@ def _fill_choice(
     if field.field_type == "radio":
         return _fill_radio(page, field, wanted)
     if field.field_type == "select" or _is_native_select(locator):
+        if kind is QuestionKind.WORK_AUTHORIZATION:
+            matched = match_work_authorization_option(
+                _semantic_bool(wanted) if _semantic_bool(wanted) is not None else False,
+                field.options,
+            )
+            if matched is None:
+                return False
+            return react_controls.select_single_option(page, locator, matched)
         return _fill_select(page, locator, wanted, field.options)
     live = react_controls.open_menu(page, locator)
     match = wanted
@@ -1467,6 +1490,11 @@ def _live_choice_match(
         if semantic is None:
             return match_option(wanted, live)
         return match_sponsorship_option(semantic, live, referenced_country)
+    if kind is QuestionKind.WORK_AUTHORIZATION:
+        semantic = _semantic_bool(wanted)
+        if semantic is None:
+            return None
+        return match_work_authorization_option(semantic, live)
     semantic = _semantic_bool(wanted)
     if semantic is not None:
         from app.application.autofill.options import match_yes_no
@@ -1491,6 +1519,26 @@ def _is_native_select(locator: Locator) -> bool:
         return locator.evaluate("el => el.tagName.toLowerCase() === 'select'")
     except PlaywrightError:
         return False
+
+
+def _live_choice_options(page: Page, locator: Locator) -> list[str]:
+    """Read real options directly from the control when discovery captured
+    none -- e.g. a native `<select>` whose `<option>` elements are populated
+    by JS after the initial discovery pass, or a custom React select whose
+    options only exist once its menu is opened.
+    """
+    if _is_native_select(locator):
+        try:
+            options = locator.evaluate(
+                "el => Array.from(el.options || []).map(opt => (opt.textContent || '').trim())"
+                ".filter(Boolean)"
+            )
+        except PlaywrightError:
+            return []
+        return [str(item) for item in options] if isinstance(options, list) else []
+    live = react_controls.open_menu(page, locator)
+    react_controls.dismiss_menu(page)
+    return live
 
 
 def _fill_select(page: Page, locator: Locator, value: str | bool, options: list[str]) -> bool:

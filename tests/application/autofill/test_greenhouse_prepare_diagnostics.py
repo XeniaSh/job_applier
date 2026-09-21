@@ -214,6 +214,23 @@ def test_prepare_page_no_unique_action_fails_closed_when_ambiguous(caplog) -> No
     assert "result=False" in recognition_log
 
 
+def test_prepare_page_deduplicates_duplicate_apply_destinations(caplog) -> None:
+    page = _custom_domain_detail_page(
+        apply_hrefs=[
+            "https://boards.greenhouse.io/acme/jobs/12345/apply",
+            "https://boards.greenhouse.io/acme/jobs/12345/apply",
+        ]
+    )
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        GreenhouseAdapter().prepare_page(page)
+
+    messages = [r.getMessage() for r in caplog.records]
+    apply_count_log = next(m for m in messages if "apply_locator_count" in m)
+    assert "apply_locator_count=1" in apply_count_log
+    assert page._locators["a[href]"]._anchors[0].click_calls == 1
+    assert page._locators["a[href]"]._anchors[1].click_calls == 0
+
+
 def test_prepare_page_logs_click_exception_and_fails_closed_on_overlay(caplog) -> None:
     page = _custom_domain_detail_page(
         click_error=PlaywrightError("element intercepts pointer events"),

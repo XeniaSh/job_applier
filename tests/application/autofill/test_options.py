@@ -17,6 +17,7 @@ from app.application.autofill.options import (
     parse_sponsorship_scope,
     parse_years_experience_technology,
     match_sponsorship_option,
+    match_work_authorization_option,
     select_listed_options,
 )
 
@@ -158,6 +159,15 @@ def test_match_yes_no_uses_visible_labels_not_true_false() -> None:
     ]
     assert match_yes_no(False, long_no).startswith("No")
     assert match_yes_no(True, long_no).startswith("Yes")
+
+
+def test_match_work_authorization_accepts_descriptive_negative_label() -> None:
+    options = [
+        "I am legally authorized to work in the United States",
+        "I am not legally authorized to work in the United States",
+    ]
+    assert match_work_authorization_option(False, options) == options[1]
+    assert match_work_authorization_option(True, options) == options[0]
 
 
 def test_match_affirmative_option_accepts_acknowledge_confirm() -> None:

@@ -497,6 +497,44 @@ def match_yes_no(value: bool, options: list[str]) -> str | None:
     return None
 
 
+def match_work_authorization_option(value: bool, options: list[str]) -> str | None:
+    """Match a visible work-authorization answer without guessing other facts.
+
+    Greenhouse boards sometimes label these choices with the meaning of the
+    answer rather than a literal ``Yes``/``No`` prefix (for example, ``I am
+    not authorized to work in this country``).  Keep this narrower than the
+    general boolean matcher so unrelated attestations are not reinterpreted.
+    """
+    matched = match_yes_no(value, options)
+    if matched is not None:
+        return matched
+    labels = [item.strip() for item in options if item and item.strip()]
+    patterns = (
+        (r"\bnot\s+(?:legally\s+)?authorized\b", False),
+        (r"\bnot\s+(?:legally\s+)?authorised\b", False),
+        (r"\bnot\s+eligible\s+to\s+work\b", False),
+        (r"\b(?:legally\s+)?authorized\s+to\s+work\b", True),
+        (r"\b(?:legally\s+)?authorised\s+to\s+work\b", True),
+        (r"\beligible\s+to\s+work\b", True),
+    )
+    # A negative label also contains the positive phrase, so remove it from
+    # the positive result set before requiring a unique match.
+    if not value:
+        candidates = [
+            label
+            for label in labels
+            if any(re.search(pattern, label, re.IGNORECASE) for pattern, expected in patterns if not expected)
+        ]
+    else:
+        candidates = [
+            label
+            for label in labels
+            if any(re.search(pattern, label, re.IGNORECASE) for pattern, expected in patterns if expected)
+            and not any(re.search(pattern, label, re.IGNORECASE) for pattern, expected in patterns if not expected)
+        ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
 PRIVACY_DATA_CUES = (
     "privacy",
     "personal data",

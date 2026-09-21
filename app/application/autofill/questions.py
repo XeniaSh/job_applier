@@ -15,6 +15,7 @@ from app.application.autofill.options import (
     WOULD_RELOCATE_CHOICE,
     find_known_technologies_in_text,
     is_located_or_relocate_choice,
+    label_matches,
     match_application_source,
     match_decline_to_answer_option,
     match_interest_option,
@@ -221,6 +222,32 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             fillable=bool(value),
         )
 
+    # A checkbox option such as "Careers Website" carries the source-group
+    # wording, so classify the group before treating the option as a profile
+    # website field.
+    if _is_application_source(text):
+        source_options = field.options
+        if field.field_type == "checkbox" and not source_options:
+            source_options = _source_checkbox_options(field)
+            preferred = match_application_source(
+                source_options,
+                profile.application_source_preference(),
+            )
+            value = field.label if preferred and label_matches(preferred, field.label) else None
+        else:
+            value = match_application_source(source_options, profile.application_source_preference())
+        if not value and not field.options and field.field_type != "checkbox":
+            value = (
+                profile.application_source_preference()[0]
+                if profile.application_source_preference()
+                else None
+            )
+        return MappedQuestion(
+            kind=QuestionKind.APPLICATION_SOURCE,
+            value=value,
+            fillable=bool(value),
+        )
+
     if _is_website(text):
         value = profile.website_for_autofill()
         return MappedQuestion(kind=QuestionKind.WEBSITE, value=value, fillable=bool(value))
@@ -275,16 +302,6 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             kind=QuestionKind.SMS_UPDATES,
             value=_mapped_choice(answer, field.options),
             fillable=True,
-        )
-
-    if _is_application_source(text):
-        value = match_application_source(field.options, profile.application_source_preference())
-        if not value and not field.options:
-            value = profile.application_source_preference()[0] if profile.application_source_preference() else None
-        return MappedQuestion(
-            kind=QuestionKind.APPLICATION_SOURCE,
-            value=value,
-            fillable=bool(value),
         )
 
     if _is_employee_relationship_details(text):
@@ -1233,6 +1250,25 @@ def _is_application_source(text: str) -> bool:
             "how did you come to apply",
         )
     )
+
+
+def _source_checkbox_options(field: DiscoveredField) -> list[str]:
+    """Recover known source choices from a checkbox group's bounded context.
+
+    Greenhouse checkbox groups expose each option as its own control rather
+    than as a field option list. Only explicit, known source labels are
+    considered; an unknown option stays manual.
+    """
+    known = (
+        "Company Website",
+        "Careers Website",
+        "Careers Page",
+        "Direct Application",
+        "LinkedIn",
+        "Other",
+    )
+    text = f"{field.label} {field.context}".lower()
+    return [label for label in known if label.lower() in text]
 
 
 def _is_privacy_consent(text: str) -> bool:

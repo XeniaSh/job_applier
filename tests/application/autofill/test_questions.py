@@ -832,6 +832,34 @@ def test_how_did_you_hear_never_selects_referral() -> None:
     assert mapped.value is None
 
 
+def test_checkbox_source_group_selects_only_careers_website_from_direct_context() -> None:
+    context = "How did you hear about Twilio? Careers Website LinkedIn Twitter Glassdoor Indeed"
+    careers = map_question(
+        DiscoveredField(
+            label="Careers Website",
+            field_type="checkbox",
+            context=context,
+            required=True,
+        ),
+        _profile(),
+    )
+    linkedin = map_question(
+        DiscoveredField(
+            label="LinkedIn",
+            field_type="checkbox",
+            context=context,
+            required=True,
+        ),
+        _profile(),
+    )
+    assert careers.kind is QuestionKind.APPLICATION_SOURCE
+    assert careers.fillable is True
+    assert careers.value == "Careers Website"
+    assert linkedin.kind is QuestionKind.APPLICATION_SOURCE
+    assert linkedin.fillable is False
+    assert linkedin.value is None
+
+
 def test_privacy_consent_optional_fills_only_when_explicitly_true() -> None:
     unset = map_question(
         DiscoveredField(label="I consent to the processing of my personal data for recruiting"),
