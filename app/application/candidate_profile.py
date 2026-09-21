@@ -282,6 +282,9 @@ class Employment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     current_title: str | None = None
+    # Explicit school/university name for application forms. Unset stays
+    # unresolved; it is never inferred from a resume or employment history.
+    school: str | None = None
     # Explicit current-employer name. Unset stays unresolved; never guessed
     # from employment history, resume text, or LLM answer generation.
     current_employer: str | None = None
@@ -300,7 +303,7 @@ class Employment(BaseModel):
     salary_expectations: SalaryExpectations | None = None
 
     @field_validator(
-        "current_title", "current_employer", "notice_period", "highest_academic_level", "primary_programming_language"
+        "current_title", "school", "current_employer", "notice_period", "highest_academic_level", "primary_programming_language"
     )
     @classmethod
     def optional_stripped_text(cls, value: str | None) -> str | None:
@@ -1055,4 +1058,3 @@ class CandidateProfile(BaseModel):
 
     def question_override_answer(self, question_text: str) -> bool | str | None:
         return self.application_policy.override_answer_for(question_text)
-

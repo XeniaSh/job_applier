@@ -409,6 +409,26 @@ class GreenhouseAdapter:
             )
         return fields
 
+    def observe_final_fill_plan(self, item: ClassifiedField) -> None:
+        """Emit bounded diagnostics for Stripe-shaped profile fields.
+
+        This is intentionally before the DOM write and excludes all semantic
+        values, keeping live runs useful when a field is discovered under an
+        unexpected Greenhouse control shape or profile data is absent.
+        """
+        label = " ".join((item.field.label or "").lower().split())
+        if not any(term in label for term in ("school", "degree", "reside", "anticipate", "employer", "job title")):
+            return
+        logger.warning(
+            "greenhouse_final_fill label=%s required=%s kind=%s value_present=%s action=%s field_type=%s",
+            label[:160],
+            item.field.required,
+            item.kind.value,
+            item.value is not None,
+            "fill" if item.fill else "skip",
+            item.field.field_type,
+        )
+
     def fill_field(self, page: Page, classified: ClassifiedField) -> bool:
         self.last_multiselect_selected = None
         self.last_choice_selected = None

@@ -21,6 +21,9 @@ professional_links:
 
 employment:
   current_title: Backend Engineer
+  # Set this only when the candidate explicitly wants School/University
+  # application fields filled; leave null if the fact is unavailable.
+  school: null
   # Optional "Current company" fields stay blank unless this is set. Never
   # guessed from employment history, resume text, or LLM answer generation.
   current_employer: null

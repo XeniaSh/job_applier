@@ -1738,7 +1738,17 @@ def test_stripe_degree_uses_awarded_academic_level_but_school_stays_unresolved()
     assert degree.value == "MASTERS"
     assert degree.fillable is True
     assert school.fillable is False
-    assert school.kind is QuestionKind.UNKNOWN
+    assert school.kind is QuestionKind.SCHOOL
+
+
+def test_stripe_school_uses_explicit_profile_fact_and_matches_live_option() -> None:
+    mapped = map_question(
+        DiscoveredField(label="School *", field_type="combobox", required=True, options=["Example University"]),
+        _profile(employment={"school": "Example University"}),
+    )
+    assert mapped.kind is QuestionKind.SCHOOL
+    assert mapped.value == "Example University"
+    assert mapped.fillable is True
 
 
 def test_stripe_location_relative_authorization_accepts_explicit_negative_fact() -> None:

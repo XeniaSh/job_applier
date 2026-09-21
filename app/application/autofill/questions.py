@@ -67,6 +67,7 @@ class QuestionKind(StrEnum):
     LOCATION = "location"
     COUNTRY = "country"
     ANTICIPATED_WORK_COUNTRY = "anticipated_work_country"
+    SCHOOL = "school"
     LINKEDIN = "linkedin"
     GITHUB = "github"
     GITLAB_USERNAME = "gitlab_username"
@@ -134,6 +135,7 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.LOCATION,
         QuestionKind.COUNTRY,
         QuestionKind.ANTICIPATED_WORK_COUNTRY,
+        QuestionKind.SCHOOL,
         QuestionKind.LINKEDIN,
         QuestionKind.GITHUB,
         QuestionKind.GITLAB_USERNAME,
@@ -485,6 +487,11 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         if not level:
             return MappedQuestion(kind=QuestionKind.ACADEMIC_LEVEL, fillable=False)
         return MappedQuestion(kind=QuestionKind.ACADEMIC_LEVEL, value=level, fillable=True)
+
+    if _is_school(field):
+        school = profile.employment.school
+        value = match_option(school, field.options) if school and field.options else school
+        return MappedQuestion(kind=QuestionKind.SCHOOL, value=value, fillable=bool(value))
 
     if _is_anticipated_work_country(text):
         return MappedQuestion(
@@ -1037,6 +1044,11 @@ def _is_academic_level(text: str) -> bool:
             "degree obtained",
         )
     ) or text.strip().rstrip("*").strip() == "degree"
+
+
+def _is_school(field: DiscoveredField) -> bool:
+    label = " ".join(field.label.lower().rstrip("*").split())
+    return label in {"school", "school name", "university", "university name"}
 
 
 def _is_anticipated_work_country(text: str) -> bool:
