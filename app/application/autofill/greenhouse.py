@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
@@ -68,7 +69,84 @@ _FORM_READY_SELECTOR = (
 )
 _COMBOBOX_IDS = frozenset({"country", "candidate-location", "candidate_location"})
 
+# Structural evidence that an anchor is Greenhouse's own apply action on a
+# target company's custom careers domain (see `GreenhouseTargetVacancyResolver`
+# / `original_url`: the canonical job-boards.greenhouse.io URL can redirect
+# there). An `/apply` path segment is the job-boards application-form URL
+# shape; `gh_jid` is the query marker Greenhouse's own embed snippet attaches
+# to job links it controls. A bare `greenhouse.io` host is not enough on its
+# own -- a generic job-board link without either marker could be unrelated
+# navigation. Never a generic "Apply" text/class match -- an unrelated custom
+# career page could reuse that wording for something else entirely.
+_APPLY_HREF_PATH_MARKERS = ("/apply",)
+_APPLY_HREF_QUERY_MARKER = "gh_jid="
+
 logger = logging.getLogger(__name__)
+
+
+def _safe_host(url: object) -> str:
+    """Netloc only -- never the path, query, or fragment, which could carry PII or raw content."""
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        return urlparse(url).netloc.lower()
+    except ValueError:
+        return ""
+
+
+def _safe_host_path(url: object) -> str:
+    """Hostname + path only -- never userinfo, query, or fragment."""
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        return f"{parsed.hostname or ''}{parsed.path}"
+    except ValueError:
+        return ""
+
+
+def _is_greenhouse_apply_href(href: str) -> bool:
+    """True when `href` carries one of the Greenhouse-specific apply markers
+    above. Only inspects the resolved URL's path/query/host -- never logged
+    or matched against visible text -- so it stays a structural check.
+    """
+    if not href:
+        return False
+    try:
+        parsed = urlparse(href)
+    except ValueError:
+        return False
+    path = parsed.path.lower()
+    if any(marker in path for marker in _APPLY_HREF_PATH_MARKERS):
+        return True
+    return _APPLY_HREF_QUERY_MARKER in parsed.query.lower()
+
+
+def _custom_domain_apply_matches(page: Page) -> list[Locator]:
+    """Every visible anchor on `page` whose resolved href carries a
+    Greenhouse apply marker. Matching is done on the anchor's
+    browser-resolved absolute URL (`el.href`), never on text/class/styling,
+    so it cannot match an unrelated button. Callers only act on this when
+    exactly one match exists -- more than one means the target action cannot
+    be disambiguated and must fail closed rather than guess.
+    """
+    anchors = page.locator("a[href]")
+    matches: list[Locator] = []
+    for index in range(anchors.count()):
+        anchor = anchors.nth(index)
+        try:
+            href = anchor.evaluate("el => el.href")
+        except PlaywrightError:
+            continue
+        if not isinstance(href, str) or not _is_greenhouse_apply_href(href):
+            continue
+        try:
+            visible = anchor.is_visible()
+        except PlaywrightError:
+            visible = False
+        if visible:
+            matches.append(anchor)
+    return matches
 
 _CHECKBOX_QUESTION_META_JS = """el => {
     const option = ((el.closest('label') && el.closest('label').innerText)
@@ -187,19 +265,97 @@ class GreenhouseAdapter:
         return detect_security_challenge(page)
 
     def prepare_page(self, page: Page) -> None:
-        """Wait until the application form is usable. Local fixtures skip the extra settle."""
+        """Wait until the application form is usable.
+
+        If the page is not already a recognized Greenhouse form -- e.g. the
+        canonical job-boards.greenhouse.io URL redirected to a target
+        company's own custom careers domain -- attempt one bounded,
+        structurally-validated navigation via Greenhouse's own apply action
+        first. If that does not land on a recognized form, fail closed:
+        recognize() will then be False and the caller reports
+        UNSUPPORTED_FORM rather than guessing at an unfamiliar page.
+        Local fixtures skip the extra settle.
+        """
+        already_form = self.recognize(page)
+        logger.warning(
+            "greenhouse_prepare stage=detail_detection already_form=%s page_host=%s",
+            already_form,
+            _safe_host(page.url),
+        )
+        if not already_form:
+            self._navigate_from_custom_domain(page)
         timeout = 2_000 if page.url.startswith("file:") else 30_000
         try:
             page.wait_for_selector(_FORM_READY_SELECTOR, timeout=timeout)
         except PlaywrightTimeoutError:
+            self._log_final_recognition(page)
             return
         if page.url.startswith("file:"):
+            self._log_final_recognition(page)
             return
         try:
             page.wait_for_selector("#first_name:visible, #application-form:visible", timeout=10_000)
         except PlaywrightTimeoutError:
             pass
         page.wait_for_timeout(800)
+        self._log_final_recognition(page)
+
+    def _navigate_from_custom_domain(self, page: Page) -> None:
+        """Attempt the custom-domain detail -> Greenhouse-form transition and
+        always log a navigation-stage record at the end, even when no
+        uniquely identifiable apply action exists or the click raises, so a
+        single run identifies every failure stage. Never dismisses cookie
+        overlays or other page chrome -- if one blocks the click, the click
+        raises, the stage is logged, and the page fails closed via the
+        caller's normal `recognize()` check.
+        """
+        pre_url = page.url
+        matches = _custom_domain_apply_matches(page)
+        apply_locator_count = len(matches)
+        logger.warning(
+            "greenhouse_prepare stage=apply_action apply_locator_count=%s",
+            apply_locator_count,
+        )
+        action = matches[0] if apply_locator_count == 1 else None
+        click_attempted = False
+        click_raised: str | None = None
+        form_ready_selector_found = False
+        if action is not None:
+            click_attempted = True
+            try:
+                action.click(timeout=5_000)
+            except PlaywrightError as exc:
+                click_raised = type(exc).__name__
+            logger.warning(
+                "greenhouse_prepare stage=apply_action click_attempted=%s click_raised=%s",
+                click_attempted,
+                click_raised,
+            )
+            if click_raised is None:
+                timeout = 2_000 if page.url.startswith("file:") else 15_000
+                try:
+                    page.wait_for_selector(_FORM_READY_SELECTOR, timeout=timeout)
+                    form_ready_selector_found = True
+                except PlaywrightTimeoutError:
+                    form_ready_selector_found = False
+        post_url = page.url
+        logger.warning(
+            "greenhouse_prepare stage=navigation pre=%s post=%s url_changed=%s "
+            "click_attempted=%s click_raised=%s form_ready_selector_found=%s",
+            _safe_host_path(pre_url),
+            _safe_host_path(post_url),
+            pre_url != post_url,
+            click_attempted,
+            click_raised,
+            form_ready_selector_found,
+        )
+
+    def _log_final_recognition(self, page: Page) -> None:
+        logger.warning(
+            "greenhouse_prepare stage=form_recognition result=%s page_host=%s",
+            self.recognize(page),
+            _safe_host(page.url),
+        )
 
     def discover_fields(self, page: Page) -> list[DiscoveredField]:
         if not self.recognize(page):
