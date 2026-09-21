@@ -413,7 +413,10 @@ class GreenhouseAdapter:
                 return bool(selected)
             if field.field_type == "checkbox":
                 trace = react_controls.set_checkbox_with_trace(
-                    page, locator, _checkbox_should_check(classified.value)
+                    page,
+                    locator,
+                    classified.kind is QuestionKind.APPLICATION_SOURCE
+                    or _checkbox_should_check(classified.value),
                 )
                 self._record_privacy_trace(classified, trace)
                 logger.info(

@@ -370,6 +370,19 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
         if country is None:
             return MappedQuestion(kind=QuestionKind.WORK_AUTHORIZATION, fillable=False)
         if _is_generic_country_relative_work_auth_phrase(country):
+            explicit = profile.work_eligibility.work_authorizations
+            if len(explicit) == 1 and explicit[0].authorized is False:
+                # The profile's sole explicit current-work-authorization fact
+                # is a deterministic negative answer.  This preserves the
+                # candidate's confirmed No for generic country-relative
+                # controls when the ATS omits its vacancy country from the
+                # discovered field and resolver metadata.
+                return MappedQuestion(
+                    kind=QuestionKind.WORK_AUTHORIZATION,
+                    value=match_yes_no(False, field.options) if field.options else False,
+                    country=explicit[0].country,
+                    fillable=True,
+                )
             # No named country in the label itself (e.g. "...in the country
             # for which you applied"); only the service layer, which has
             # `ResolvedVacancy`, can resolve this -- see

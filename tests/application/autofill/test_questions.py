@@ -113,6 +113,30 @@ def test_work_authorization_in_other_country_is_not_guessed() -> None:
     assert mapped.value is None
 
 
+def test_named_country_work_authorization_explicit_false_selects_no() -> None:
+    """An explicit `work_authorization_for("United States")` fact of False --
+    the real Twilio Greenhouse field's exact label -- must map to a truthful
+    False answer, not stay unresolved just because it is a negative fact.
+    """
+    profile = _profile(
+        work_eligibility={
+            "work_authorizations": [{"country": "United States", "authorized": False}],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you legally authorized to work in the United States?",
+            field_type="combobox",
+            required=True,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.WORK_AUTHORIZATION
+    assert mapped.country == "United States"
+    assert mapped.value is False
+    assert mapped.fillable is True
+
+
 @pytest.mark.parametrize(
     "label",
     [
@@ -136,6 +160,25 @@ def test_generic_country_relative_work_authorization_needs_vacancy_enrichment(la
     assert mapped.fillable is False
     assert mapped.value is None
     assert mapped.unresolved_reason is not None
+
+
+def test_exact_twilio_generic_work_authorization_uses_explicit_negative_fact() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="Are you legally authorized to work in the country in which this role is located?",
+            field_type="combobox",
+            required=True,
+        ),
+        _profile(
+            work_eligibility={
+                "work_authorizations": [{"country": "United States", "authorized": False}],
+            }
+        ),
+    )
+    assert mapped.kind is QuestionKind.WORK_AUTHORIZATION
+    assert mapped.value is False
+    assert mapped.country == "United States"
+    assert mapped.fillable is True
 
 
 def test_named_country_work_authorization_is_unaffected_by_generic_phrase_handling() -> None:
