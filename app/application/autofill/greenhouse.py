@@ -1374,27 +1374,43 @@ def _dismiss_overlays(page: Page) -> None:
         pass
 
 
+_COMBOBOX_COMMIT_ATTEMPTS = 2
+
+
 def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
     try:
         locator.click(timeout=3_000)
     except PlaywrightError:
         locator.click(force=True, timeout=3_000)
-    try:
-        locator.fill("", timeout=5_000)
-        locator.press_sequentially(value, delay=20, timeout=10_000)
-    except PlaywrightError:
+    for _attempt in range(_COMBOBOX_COMMIT_ATTEMPTS):
         try:
-            locator.fill(value, timeout=5_000)
+            locator.fill("", timeout=5_000)
+            locator.press_sequentially(value, delay=20, timeout=10_000)
         except PlaywrightError:
+            try:
+                locator.fill(value, timeout=5_000)
+            except PlaywrightError:
+                _dismiss_overlays(page)
+                return False
+        option = _matching_option(page, value)
+        if option is None:
+            continue
+        try:
+            option.click(timeout=3_000)
+        except PlaywrightError:
+            try:
+                option.click(force=True, timeout=3_000)
+            except PlaywrightError:
+                continue
+        # A searchable combobox can filter its live options down to a match
+        # while typing without that typing itself committing a selection --
+        # the click above must actually persist before this counts as a
+        # success, or the field can silently revert to its placeholder.
+        if react_controls.wait_for_selected_label(page, locator, value):
             _dismiss_overlays(page)
-            return False
-    option = _matching_option(page, value)
-    if option is None:
-        _dismiss_overlays(page)
-        return False
-    option.click()
+            return True
     _dismiss_overlays(page)
-    return True
+    return False
 
 
 def _matching_option(page: Page, value: str) -> Locator | None:

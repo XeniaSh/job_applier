@@ -155,9 +155,14 @@ def read_selected_label(page: Page, locator: Locator) -> str | None:
     root = _value_root(locator)
     selected = root.locator(_SINGLE_VALUE_SELECTOR)
     if selected.count() > 0:
+        # A dedicated selected-value node exists in this control's markup, so
+        # its content is authoritative: an empty node means nothing is
+        # selected yet, even if the input still holds text the user typed
+        # (e.g. a searchable select that filters options without committing
+        # one). Falling through to that leftover typed text would report a
+        # selection that was never actually made.
         text = " ".join((selected.first.inner_text() or "").split())
-        if text:
-            return text
+        return text or None
     chips = read_selected_chips(page, locator)
     if chips:
         return ", ".join(chips)

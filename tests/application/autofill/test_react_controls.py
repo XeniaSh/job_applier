@@ -223,6 +223,32 @@ def test_academic_react_select_persists_awarded_doctorate() -> None:
         session.close()
 
 
+def test_country_search_select_requires_verified_option_click_not_just_typing() -> None:
+    """Regression for a live Greenhouse bug: a searchable country combobox
+    filters its option list while typing but never commits from typing
+    alone, and its first option click is swallowed (a real async-search
+    quirk) -- only a verified, persisted click may report success. The old
+    `_fill_combobox` returned True right after clicking, with no readback
+    check, so a swallowed click silently left the field blank/placeholder.
+    """
+    session = _open(REACT_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        profile = _profile()
+        country = classify_field(
+            _field(adapter.discover_fields(session.page), "type to search"),
+            profile,
+        )
+        assert country.kind is QuestionKind.COUNTRY
+        assert country.value == "Uzbekistan"
+        assert adapter.fill_field(session.page, country) is True
+        visible = session.page.locator("#country-search-field .select__single-value").inner_text().strip()
+        assert visible == "Uzbekistan"
+        assert adapter.read_back(session.page, country.field) == "Uzbekistan"
+    finally:
+        session.close()
+
+
 def test_gender_country_sms_newsletter_overrides_and_booking() -> None:
     session = _open(REACT_FIXTURE)
     try:

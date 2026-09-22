@@ -89,6 +89,53 @@ def test_academic_option_maps_semantic_levels_without_diploma_fallback() -> None
     assert match_academic_option("MASTERS", options) != "Diploma"
 
 
+def test_academic_option_prefers_generic_masters_over_specialized_mba() -> None:
+    """A generic "Master's Degree" option must win over a specialized named
+    credential such as an MBA that merely happens to be master's-level --
+    picking the longest/most-specific-looking label was wrong here since it
+    let an unrelated specialization silently stand in for the plain answer.
+    """
+    options = [
+        "High School",
+        "Diploma",
+        "Bachelor's Degree",
+        "Master's Degree",
+        "Master of Business Administration (M.B.A.)",
+        "Doctorate Degree",
+    ]
+    assert match_academic_option("MASTERS", options) == "Master's Degree"
+    assert match_academic_option("Master's", options) == "Master's Degree"
+
+
+def test_academic_option_prefers_generic_bachelor_over_specialized_major():
+    options = [
+        "Bachelor's Degree",
+        "Bachelor of Science in Computer Science",
+        "Master's Degree",
+    ]
+    assert match_academic_option("bachelor", options) == "Bachelor's Degree"
+
+
+def test_academic_option_prefers_generic_doctorate_over_specialized_field():
+    options = [
+        "Master's Degree",
+        "Doctorate Degree",
+        "Doctor of Philosophy in Physics",
+    ]
+    assert match_academic_option("DOCTORATE", options) == "Doctorate Degree"
+
+
+def test_academic_option_stays_unresolved_when_only_specialized_options_share_a_level():
+    """No generic label exists to disambiguate between two specialized
+    master's-level credentials, so guessing either one would be unsafe.
+    """
+    options = [
+        "Master of Business Administration (M.B.A.)",
+        "Master of Science in Computer Science",
+    ]
+    assert match_academic_option("MASTERS", options) is None
+
+
 def test_select_listed_options_respects_max_and_form_options() -> None:
     selected = select_listed_options(
         ["Java", "Kotlin", "Spring Boot", "PostgreSQL"],

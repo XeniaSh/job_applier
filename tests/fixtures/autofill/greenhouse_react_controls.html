@@ -261,15 +261,15 @@
       <div id="current-location-visa-list" role="listbox" hidden></div>
     </div>
 
-    <div class="field" id="work-authorization-us-field">
-      <label id="work-authorization-us-label">Are you legally authorized to work in the United States?</label>
+    <div class="field" id="country-search-field">
+      <label id="country-search-label">Which country do you currently reside in? (type to search)</label>
       <div class="select__control">
         <div class="select__value-container">
           <div class="select__single-value"></div>
-          <input id="work_authorization_us" aria-labelledby="work-authorization-us-label" role="combobox" aria-autocomplete="list" aria-required="true">
+          <input id="country_search" aria-labelledby="country-search-label" role="combobox" aria-autocomplete="list" aria-required="true">
         </div>
       </div>
-      <div id="work-authorization-us-list" role="listbox" hidden></div>
+      <div id="country-search-list" role="listbox" hidden></div>
     </div>
 
     <div class="field" id="work-authorization-field">
@@ -373,6 +373,49 @@
       });
     }
 
+    function setupReactSearchSelect(fieldId, inputId, listId, options) {
+      // Models a real Greenhouse searchable country picker: no options are
+      // shown until the user types, typing only filters the live list (it
+      // never commits a value by itself), and -- to exercise a bounded
+      // retry -- the first click on a freshly filtered option is swallowed
+      // (a known async-search quirk); only a second click actually commits.
+      var field = document.getElementById(fieldId);
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      var valueNode = field.querySelector(".select__single-value");
+      var commitAttempts = 0;
+      function render() {
+        var needle = input.value.trim().toLowerCase();
+        list.innerHTML = "";
+        if (!needle) {
+          list.hidden = true;
+          return;
+        }
+        var matches = options.filter(function (text) {
+          return text.toLowerCase().indexOf(needle) !== -1;
+        });
+        list.hidden = matches.length === 0;
+        matches.forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            commitAttempts += 1;
+            if (commitAttempts < 2) {
+              return;
+            }
+            valueNode.textContent = text;
+            input.value = "";
+            list.hidden = true;
+          });
+          list.appendChild(option);
+        });
+      }
+      input.addEventListener("focus", render);
+      input.addEventListener("input", render);
+    }
+
     function setupReactMulti(fieldId, inputId, listId, options) {
       var field = document.getElementById(fieldId);
       var input = document.getElementById(inputId);
@@ -470,9 +513,13 @@
       "Yes, Netherlands Highly Skilled Migrant Visa",
       "No"
     ]);
-    setupReactSingle("work-authorization-us-field", "work_authorization_us", "work-authorization-us-list", [
-      "I am legally authorized to work in the United States",
-      "I am not legally authorized to work in the United States"
+    setupReactSearchSelect("country-search-field", "country_search", "country-search-list", [
+      "Germany",
+      "Thailand",
+      "Uzbekistan",
+      "United States",
+      "United Kingdom",
+      "Poland"
     ]);
     setupReactSingle("work-authorization-field", "work_authorization", "work-authorization-list", [
       "I am legally authorized to work in the United States",

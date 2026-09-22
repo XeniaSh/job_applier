@@ -695,11 +695,27 @@ def match_years_option(years: float, options: list[str]) -> str | None:
     return match_option(as_int, options)
 
 
+_ACADEMIC_SPECIALIZATION_MARKER_RE = re.compile(r"[()]|\bof\b|\bin\b", re.IGNORECASE)
+
+
+def _is_generic_academic_label(option: str) -> bool:
+    """True for a plain degree-level label (e.g. "Master's Degree") with no
+    named field/specialization or awarded-credential qualifier (e.g. "Master
+    of Business Administration (M.B.A.)") that merely shares the same level.
+    """
+    return not _ACADEMIC_SPECIALIZATION_MARKER_RE.search(option)
+
+
 def match_academic_option(level: str, options: list[str]) -> str | None:
     """Map an ATS-independent academic token onto a visible form option.
 
     Does not fall back to a random first option. Diploma is never treated as
-    master's because short aliases such as "ma" are whole-word only.
+    master's because short aliases such as "ma" are whole-word only. When
+    several options share the same awarded-degree level (e.g. a generic
+    "Master's Degree" alongside a specialized "Master of Business
+    Administration (M.B.A.)"), the plain generic label is preferred over a
+    specialized/named credential; if that still leaves more than one
+    candidate, the match stays unresolved rather than guessing.
     """
     wanted = canonical_academic_level(level)
     labels = [item.strip() for item in options if item and str(item).strip()]
@@ -712,8 +728,10 @@ def match_academic_option(level: str, options: list[str]) -> str | None:
         return None
     if len(matches) == 1:
         return matches[0]
-    matches.sort(key=len, reverse=True)
-    return matches[0]
+    generic_matches = [option for option in matches if _is_generic_academic_label(option)]
+    if len(generic_matches) == 1:
+        return generic_matches[0]
+    return None
 
 
 def select_listed_options(
