@@ -13,7 +13,6 @@ from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import (
     ALREADY_LOCATED_CHOICE,
     WOULD_RELOCATE_CHOICE,
-    label_matches,
     match_academic_option,
     match_application_source,
     match_decline_to_answer_option,
@@ -1374,71 +1373,72 @@ def _dismiss_overlays(page: Page) -> None:
         pass
 
 
-_COMBOBOX_COMMIT_ATTEMPTS = 2
-
-
 def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
+    """Type into a custom searchable combobox and commit the exact live
+    option, not merely the typed text.
+
+    Option discovery/matching/click go through the shared
+    `react_controls` helpers (`click_option` / `matching_option`), which
+    query `[role='option']` at page scope -- never rooted under the input
+    or its immediate control container -- and filter to currently visible
+    elements. That is required here: Greenhouse's custom React-selects can
+    render their live option menu in a portal appended elsewhere in the
+    DOM (not a descendant of the combobox markup), and stale/off-screen
+    option nodes left over from a previous open must not be matched.
+
+    A single typed value is matched against a single rendered menu
+    (never re-typed to force a retry): if the exact value has no live
+    match, the comma-separated head (e.g. "Tashkent, Uzbekistan" ->
+    "Tashkent") is tried once against that same menu, since some
+    combobox options are only worded as the leading component. No blind
+    Enter is ever pressed and no other option is ever substituted -- once
+    resolved, only that exact live option locator is clicked (up to twice,
+    to tolerate a real async-search quirk where a freshly filtered
+    option's first click is swallowed), and the fill fails closed with no
+    visible match or no persisted selection.
+    """
     try:
         locator.click(timeout=3_000)
     except PlaywrightError:
         locator.click(force=True, timeout=3_000)
-    for _attempt in range(_COMBOBOX_COMMIT_ATTEMPTS):
+    try:
+        locator.fill("", timeout=5_000)
+        locator.press_sequentially(value, delay=20, timeout=10_000)
+    except PlaywrightError:
         try:
-            locator.fill("", timeout=5_000)
-            locator.press_sequentially(value, delay=20, timeout=10_000)
+            locator.fill(value, timeout=5_000)
         except PlaywrightError:
-            try:
-                locator.fill(value, timeout=5_000)
-            except PlaywrightError:
-                _dismiss_overlays(page)
-                return False
-        option = _matching_option(page, value)
-        if option is None:
-            continue
+            _dismiss_overlays(page)
+            return False
+    react_controls.wait_visible_options(page)
+    option = react_controls.matching_option(page, value)
+    matched_value = value
+    if option is None:
+        head = value.strip().split(",")[0].strip()
+        if head and head.lower() != value.strip().lower():
+            option = react_controls.matching_option(page, head)
+            matched_value = head
+    if option is None:
+        _dismiss_overlays(page)
+        return False
+    for _click_attempt in range(2):
         try:
             option.click(timeout=3_000)
         except PlaywrightError:
             try:
                 option.click(force=True, timeout=3_000)
             except PlaywrightError:
-                continue
+                break
         # A searchable combobox can filter its live options down to a match
-        # while typing without that typing itself committing a selection --
+        # while typing without that typing itself committing a selection,
+        # and a freshly filtered option's first click can be swallowed --
         # the click above must actually persist before this counts as a
         # success, or the field can silently revert to its placeholder.
-        if react_controls.wait_for_selected_label(page, locator, value):
+        if react_controls.wait_for_selected_label(page, locator, matched_value):
             _dismiss_overlays(page)
             return True
     _dismiss_overlays(page)
     return False
-
-
-def _matching_option(page: Page, value: str) -> Locator | None:
-    try:
-        page.wait_for_selector("[role='option'], [role='listbox'] [role='option']", timeout=2_500)
-    except PlaywrightTimeoutError:
-        pass
-    options = page.get_by_role("option")
-    if options.count() == 0:
-        options = page.locator("[role='option']")
-    if options.count() == 0:
-        return None
-    needle = value.strip().lower()
-    head = needle.split(",")[0].strip()
-    exact: Locator | None = None
-    partial: Locator | None = None
-    for index in range(options.count()):
-        option = options.nth(index)
-        text = " ".join((option.inner_text() or "").split()).lower()
-        if not text:
-            continue
-        if text == needle:
-            return option
-        if label_matches(value, text):
-            exact = exact or option
-        elif head and label_matches(head, text):
-            partial = partial or option
-    return exact or partial
 
 
 def _fill_choice(

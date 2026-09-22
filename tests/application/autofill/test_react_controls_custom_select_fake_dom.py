@@ -41,7 +41,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from app.application.autofill import service
 from app.application.autofill.classifier import ClassifiedField
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.greenhouse import GreenhouseAdapter
+from app.application.autofill.greenhouse import GreenhouseAdapter, _fill_combobox
 from app.application.autofill.models import FieldClassification
 from app.application.autofill.options import ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE
 from app.application.autofill.questions import AGE_DECLINE_INTENT, QuestionKind
@@ -117,8 +117,11 @@ def _select_descendants(roots: list[_FakeElement], selector: str) -> list[_FakeE
 
 
 class _FakeKeyboard:
+    def __init__(self) -> None:
+        self.presses: list[str] = []
+
     def press(self, key: str) -> None:
-        _ = key
+        self.presses.append(key)
 
 
 class _FakeLocator:
@@ -175,6 +178,17 @@ class _FakeLocator:
             on_click = getattr(el, "_on_click", None)
             if on_click is not None:
                 on_click()
+
+    def fill(self, value: str, timeout: int | None = None) -> None:
+        _ = timeout
+        for el in self._elements:
+            on_fill = getattr(el, "_on_fill", None)
+            if on_fill is not None:
+                on_fill(value)
+
+    def press_sequentially(self, value: str, delay: int | None = None, timeout: int | None = None) -> None:
+        _ = delay, timeout
+        self.fill(value)
 
     def wait_for(self, state: str | None = None, timeout: int | None = None) -> None:
         _ = state, timeout
@@ -533,3 +547,140 @@ def test_relocation_custom_react_select_never_selects_remote_only_option() -> No
 
     assert confirmed is False
     assert page.single_value.text == ""
+
+
+# --- `greenhouse._fill_combobox` against a portal-rendered option menu --
+# the reported live-retest failure shape for the required "Country*"
+# control and the current-residence country combobox: typing into the
+# search input filters a live `[role="option"]` menu that is NOT a
+# descendant of the combobox's own `.select__control` markup (mirrors a
+# react-select `menuPortalTarget` rendering into `document.body`).
+# `_fill_combobox` must discover/match/click that menu at page scope
+# (never rooted under the input), never commit merely by typing, and
+# fail closed rather than press Enter when no exact live option exists.
+
+
+class _PortalComboboxPage:
+    def __init__(self, live_options: list[str], *, include_decoy: bool = False) -> None:
+        self.keyboard = _FakeKeyboard()
+        self.decoy_clicked = False
+
+        # The combobox's own wrapper: input + single-value read-back node.
+        # No option elements live under here at all.
+        self.control_wrapper = _FakeElement("div", classes="select__control")
+        value_container = self.control_wrapper.add_child(
+            _FakeElement("div", classes="select__value-container")
+        )
+        self.single_value = value_container.add_child(
+            _FakeElement("div", classes="select__single-value")
+        )
+        self.input = value_container.add_child(_FakeElement("input", elem_id="candidate-location"))
+
+        # The portal: a sibling subtree of the control, never its
+        # descendant -- this is the shape option discovery must not
+        # assume away by rooting its lookup under the input/control.
+        self.portal_root = _FakeElement("div", classes="select__menu-portal")
+        self.menu = self.portal_root.add_child(_FakeElement("div", role="listbox"))
+        self.options: list[_FakeElement] = []
+        for text in live_options:
+            option = self.menu.add_child(_FakeElement("div", role="option", text=text))
+            option.visible = False
+            self.options.append(option)
+
+        self.root = _FakeElement("div")
+        self.root.add_child(self.control_wrapper)
+        self.root.add_child(self.portal_root)
+
+        if include_decoy:
+            # A stale/off-screen option node with matching text, parked
+            # entirely outside the live menu and permanently invisible --
+            # e.g. a leftover portal instance from a previous field.
+            # Matching must never click this even though its text is
+            # identical to the real, currently visible option.
+            self.decoy = self.root.add_child(_FakeElement("div", role="option", text=live_options[0]))
+            self.decoy.visible = False
+
+            def _decoy_click() -> None:
+                self.decoy_clicked = True
+
+            self.decoy._on_click = _decoy_click  # type: ignore[attr-defined]
+
+        def _open(_el: _FakeElement = self.input) -> None:
+            for opt in self.options:
+                opt.visible = True
+
+        def _filter(value: str) -> None:
+            needle = value.strip().lower()
+            for opt in self.options:
+                opt.visible = not needle or needle in opt.text.lower()
+
+        def _make_select(option: _FakeElement):
+            def _select() -> None:
+                self.single_value.text = option.text
+                for opt in self.options:
+                    opt.visible = False
+
+            return _select
+
+        self.input._on_click = _open  # type: ignore[attr-defined]
+        self.input._on_fill = _filter  # type: ignore[attr-defined]
+        for option in self.options:
+            option._on_click = _make_select(option)  # type: ignore[attr-defined]
+
+    def locator(self, selector: str) -> _FakeLocator:
+        match = re.fullmatch(r'\[id="([^"]+)"\]', selector)
+        if match:
+            target_id = match.group(1)
+            for el in self.root.subtree():
+                if el.elem_id == target_id:
+                    return _FakeLocator([el])
+            return _FakeLocator([])
+        return _FakeLocator(_select_descendants([self.root], selector))
+
+    def get_by_role(self, role: str) -> _FakeLocator:
+        return _FakeLocator([el for el in self.root.subtree() if el.role == role])
+
+    def wait_for_function(self, script: object, arg: object = None, timeout: int | None = None) -> None:
+        _ = script, arg, timeout
+        # Same rationale as `_CustomReactSelectPage`: force the fallback
+        # path through `read_selected_label` instead of faking real JS
+        # evaluation.
+        raise PlaywrightTimeoutError("fake page cannot evaluate page.wait_for_function")
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        _ = timeout
+
+
+def test_typing_in_portal_combobox_filters_options_without_committing_selection() -> None:
+    page = _PortalComboboxPage(["Ukraine", "United Kingdom", "Uzbekistan"])
+    control = _FakeLocator([page.input])
+
+    control.click()
+    control.press_sequentially("Uzbekistan")
+
+    assert page.single_value.text == ""
+    assert [opt.text for opt in page.options if opt.visible] == ["Uzbekistan"]
+
+
+def test_fill_combobox_commits_only_via_exact_portal_option_click_and_persists() -> None:
+    page = _PortalComboboxPage(["Ukraine", "United Kingdom", "Uzbekistan"], include_decoy=True)
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "Uzbekistan")
+
+    assert ok is True
+    assert page.single_value.text == "Uzbekistan"
+    # The stale/invisible decoy option (identical text, outside the live
+    # menu) must never be the one clicked.
+    assert page.decoy_clicked is False
+
+
+def test_fill_combobox_fails_closed_without_pressing_enter_when_no_exact_option() -> None:
+    page = _PortalComboboxPage(["Ukraine", "United Kingdom"])
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "Uzbekistan")
+
+    assert ok is False
+    assert page.single_value.text == ""
+    assert "Enter" not in page.keyboard.presses
