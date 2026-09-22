@@ -23,6 +23,13 @@ _SINGLE_VALUE_SELECTOR = (
 _CONTROL_XPATH = (
     "xpath=ancestor::*[contains(@class,'select__control') or contains(@class,'iti')][1]"
 )
+# A selected-display fragment that is *only* a dialing code (e.g. "+998"),
+# with no other visible text alongside it -- the shape a phone-styled
+# selected-value node renders when its semantic label (e.g. a country name)
+# is present in the DOM but not part of the currently visible text.
+_DIAL_CODE_ONLY_RE = re.compile(r"^\+\s*\d[\d\s()-]*$")
+_DIAL_CODE_TOKEN_RE = re.compile(r"\+\s*\d[\d\s()-]*\d|\+\s*\d+")
+_LISTBOX_ID_SUFFIX = "-listbox"
 
 
 def open_menu(page: Page, locator: Locator) -> list[str]:
@@ -31,21 +38,36 @@ def open_menu(page: Page, locator: Locator) -> list[str]:
         control.click(timeout=3_000)
     except PlaywrightError:
         control.click(force=True, timeout=3_000)
-    return wait_visible_options(page)
+    return wait_visible_options(page, control=locator)
 
 
-def wait_visible_options(page: Page, timeout: int = 2_500) -> list[str]:
+def wait_visible_options(page: Page, timeout: int = 2_500, control: Locator | None = None) -> list[str]:
+    if control is not None:
+        # Scope the wait itself to this control's own associated listbox
+        # ids -- never the page-wide "[role='option']" wait below, which
+        # would resolve as soon as *any* unrelated widget's options are
+        # visible (e.g. a phone country-code picker already showing 200+
+        # options while the actual target combobox's own menu is still
+        # opening).
+        ids = _combobox_listbox_ids(control)
+        if ids:
+            selector = ", ".join(f'[id="{listbox_id}"] [role="option"]' for listbox_id in ids)
+            try:
+                page.locator(selector).first.wait_for(state="visible", timeout=timeout)
+            except PlaywrightTimeoutError:
+                pass
+        return visible_option_texts(page, control=control)
     try:
         page.locator("[role='option']").first.wait_for(state="visible", timeout=timeout)
     except PlaywrightTimeoutError:
         pass
-    return visible_option_texts(page)
+    return visible_option_texts(page, control=control)
 
 
-def visible_option_texts(page: Page) -> list[str]:
-    options = page.get_by_role("option")
-    if options.count() == 0:
-        options = page.locator("[role='option']")
+def visible_option_texts(page: Page, control: Locator | None = None) -> list[str]:
+    options = _scoped_options(page, control)
+    if options is None:
+        return []
     texts: list[str] = []
     for index in range(options.count()):
         option = options.nth(index)
@@ -60,13 +82,13 @@ def visible_option_texts(page: Page) -> list[str]:
     return texts
 
 
-def matching_option(page: Page, wanted: str) -> Locator | None:
+def matching_option(page: Page, wanted: str, control: Locator | None = None) -> Locator | None:
     needle = wanted.strip()
     if not needle:
         return None
-    options = page.get_by_role("option")
-    if options.count() == 0:
-        options = page.locator("[role='option']")
+    options = _scoped_options(page, control)
+    if options is None:
+        return None
     lowered = needle.lower()
     prefix: Locator | None = None
     for index in range(options.count()):
@@ -87,8 +109,8 @@ def matching_option(page: Page, wanted: str) -> Locator | None:
     return prefix
 
 
-def click_option(page: Page, wanted: str) -> bool:
-    option = matching_option(page, wanted)
+def click_option(page: Page, wanted: str, control: Locator | None = None) -> bool:
+    option = matching_option(page, wanted, control=control)
     if option is None:
         return False
     try:
@@ -152,16 +174,24 @@ def read_selected_label(page: Page, locator: Locator) -> str | None:
                 return " ".join(label.split())
     except PlaywrightError:
         pass
-    root = _value_root(locator)
-    selected = root.locator(_SINGLE_VALUE_SELECTOR)
-    if selected.count() > 0:
+    node = _single_value_node(locator)
+    if node is not None:
         # A dedicated selected-value node exists in this control's markup, so
         # its content is authoritative: an empty node means nothing is
         # selected yet, even if the input still holds text the user typed
         # (e.g. a searchable select that filters options without committing
         # one). Falling through to that leftover typed text would report a
         # selection that was never actually made.
-        text = " ".join((selected.first.inner_text() or "").split())
+        text = " ".join((node.inner_text() or "").split())
+        if text and _DIAL_CODE_ONLY_RE.match(text):
+            # The only currently-visible text on the selected-value node is a
+            # bare dialing code (e.g. a phone-styled country selector that
+            # collapses its label at this width) -- that alone is never a
+            # committed semantic selection. Recover the real label from the
+            # node's full content (which, unlike visible text, also includes
+            # any collapsed/hidden label fragment) with the dial-code token
+            # stripped back out; fail closed if nothing semantic remains.
+            return _semantic_label_ignoring_dial_code(node, text)
         return text or None
     chips = read_selected_chips(page, locator)
     if chips:
@@ -204,6 +234,45 @@ def wait_for_selected_label(page: Page, locator: Locator, wanted: str, timeout: 
         return _label_matches(wanted, visible)
 
 
+def confirm_option_selected(
+    page: Page,
+    locator: Locator,
+    option: Locator,
+    matched_value: str,
+    timeout: int = 2_500,
+) -> bool:
+    """Confirm a just-clicked exact option is genuinely this control's
+    committed selection.
+
+    The control's own visible display text is the primary signal
+    (`wait_for_selected_label`, including its hidden-descendant recovery
+    for a display collapsed to a dialing-code fragment). When that display
+    is inconclusive -- a bare dialing code (e.g. "+998") with no
+    resolvable semantic label anywhere in that node -- text can never
+    prove which option actually committed, so fall back to the control's
+    own committed React-select state instead of accepting the fragment:
+    the clicked option's id retained as this control's active/selected id,
+    that option still marked aria-selected="true" wherever it lives in the
+    DOM (a real react-select menu can stay mounted, just hidden, after
+    close), or an explicit selected semantic attribute on the control's
+    own root elements. No bare dialing code, and no other non-empty text,
+    is ever accepted on its own.
+    """
+    if wait_for_selected_label(page, locator, matched_value, timeout=timeout):
+        return True
+    if not selection_display_is_dial_code_fragment(locator):
+        return False
+    return _committed_option_label(page, locator, option) is not None
+
+
+def selection_display_is_dial_code_fragment(locator: Locator) -> bool:
+    node = _single_value_node(locator)
+    if node is None:
+        return False
+    text = " ".join((node.inner_text() or "").split())
+    return bool(text and _DIAL_CODE_ONLY_RE.match(text))
+
+
 def select_single_option(page: Page, locator: Locator, wanted: str) -> bool:
     if _is_native_select(locator):
         try:
@@ -216,9 +285,9 @@ def select_single_option(page: Page, locator: Locator, wanted: str) -> bool:
             except PlaywrightError:
                 return False
     open_menu(page, locator)
-    live = visible_option_texts(page)
+    live = visible_option_texts(page, control=locator)
     match = match_option(wanted, live) or wanted
-    if not click_option(page, match):
+    if not click_option(page, match, control=locator):
         dismiss_menu(page)
         return False
     persisted = wait_for_selected_label(page, locator, match)
@@ -239,12 +308,12 @@ def select_yes_no(page: Page, locator: Locator, value: bool, options: list[str] 
             return False
         return select_single_option(page, locator, matched)
     open_menu(page, locator)
-    live = visible_option_texts(page) or list(options or [])
+    live = visible_option_texts(page, control=locator) or list(options or [])
     matched = match_affirmative_option(value, live)
     if matched is None:
         dismiss_menu(page)
         return False
-    if not click_option(page, matched):
+    if not click_option(page, matched, control=locator):
         dismiss_menu(page)
         return False
     persisted = wait_for_selected_label(page, locator, matched)
@@ -442,7 +511,7 @@ def _select_one_multi_value(
         if match is None:
             dismiss_menu(page)
             return None
-        if not click_option(page, match):
+        if not click_option(page, match, control=locator):
             dismiss_menu(page)
             continue
         _wait_for_chip(page, match)
@@ -458,7 +527,7 @@ def _select_one_multi_value(
             if item.lower() == match.lower():
                 continue
             open_menu(page, locator)
-            if click_option(page, item):
+            if click_option(page, item, control=locator):
                 _wait_for_chip(page, item)
         chips = read_selected_chips(page, locator)
         if _chips_contain(chips, needed):
@@ -639,3 +708,146 @@ def _value_root(locator: Locator) -> Locator:
     if parent.count() > 0:
         return parent.first
     return locator
+
+
+def _semantic_label_ignoring_dial_code(node: Locator, visible_text: str) -> str | None:
+    try:
+        full = " ".join((node.text_content() or "").split())
+    except PlaywrightError:
+        return None
+    stripped = " ".join(_DIAL_CODE_TOKEN_RE.sub(" ", full).split())
+    if stripped and stripped.lower() != visible_text.strip().lower():
+        return stripped
+    return None
+
+
+def _single_value_node(locator: Locator) -> Locator | None:
+    root = _value_root(locator)
+    selected = root.locator(_SINGLE_VALUE_SELECTOR)
+    if selected.count() == 0:
+        return None
+    return selected.first
+
+
+def _committed_option_label(page: Page, locator: Locator, option: Locator) -> str | None:
+    """Read a semantic selection label from the control's own committed
+    React-select state -- never from display text. Used only once display
+    text has already proven inconclusive (a bare dialing-code fragment);
+    requires the exact clicked option's own id to show up in one of the
+    control's own persisted selection signals, never a bare non-empty
+    attribute value.
+    """
+    try:
+        option_id = (option.get_attribute("id") or "").strip()
+    except PlaywrightError:
+        option_id = ""
+    try:
+        option_label = " ".join((option.inner_text() or "").split())
+    except PlaywrightError:
+        option_label = ""
+    if not option_id or not option_label:
+        return None
+    control = _control_root(locator)
+    for attr_owner in (locator, control):
+        for attr in ("aria-activedescendant", "aria-selected-id", "data-selected-id"):
+            try:
+                active = (attr_owner.get_attribute(attr) or "").strip()
+            except PlaywrightError:
+                active = ""
+            if active and active == option_id:
+                return option_label
+    try:
+        retained = page.locator(f'[id="{option_id}"]')
+        if retained.count() > 0:
+            aria_selected = (retained.first.get_attribute("aria-selected") or "").strip().lower()
+            if aria_selected == "true":
+                return option_label
+    except PlaywrightError:
+        pass
+    for root in (control, _value_root(locator)):
+        for attr in ("aria-label", "data-value", "data-selected-value", "title"):
+            try:
+                raw_attr = (root.get_attribute(attr) or "").strip()
+            except PlaywrightError:
+                raw_attr = ""
+            if raw_attr and label_matches(option_label, raw_attr):
+                return option_label
+    return None
+
+
+def _combobox_listbox_ids(control: Locator) -> list[str]:
+    """Candidate listbox element ids this control's live menu could be
+    rendered under -- via the standard ARIA association first, falling back
+    to react-select's own id convention (never a hardcoded field id)."""
+    ids: list[str] = []
+    for attr in ("aria-controls", "aria-owns"):
+        try:
+            raw = (control.get_attribute(attr) or "").strip()
+        except PlaywrightError:
+            raw = ""
+        if raw:
+            ids.extend(raw.split())
+    try:
+        control_id = (control.get_attribute("id") or "").strip()
+    except PlaywrightError:
+        control_id = ""
+    if control_id:
+        if control_id.endswith("-input"):
+            ids.append(f"{control_id[: -len('-input')]}{_LISTBOX_ID_SUFFIX}")
+        ids.append(f"{control_id}{_LISTBOX_ID_SUFFIX}")
+        ids.append(f"react-select-{control_id}{_LISTBOX_ID_SUFFIX}")
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in ids:
+        if item and item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
+
+
+def _visible_listboxes(page: Page) -> list[Locator]:
+    boxes = page.locator("[role='listbox']")
+    try:
+        count = boxes.count()
+    except PlaywrightError:
+        return []
+    result: list[Locator] = []
+    for index in range(count):
+        node = boxes.nth(index)
+        try:
+            if node.is_visible():
+                result.append(node)
+        except PlaywrightError:
+            continue
+    return result
+
+
+def _resolve_active_listbox(page: Page, control: Locator | None) -> Locator | None:
+    """Resolve the live options menu actually associated with `control`.
+
+    Prefers an explicit id association (ARIA or the react-select id
+    convention). Only falls back to "the sole visible listbox on the page"
+    when no association can be resolved -- a safe inference exactly because
+    it is unambiguous; with more than one visible listbox and no resolvable
+    association, callers must fail closed instead of guessing which one is
+    active (e.g. never cross-match an unrelated phone-widget listbox).
+    """
+    if control is not None:
+        for listbox_id in _combobox_listbox_ids(control):
+            found = page.locator(f'[id="{listbox_id}"]')
+            try:
+                if found.count() > 0 and found.first.is_visible():
+                    return found.first
+            except PlaywrightError:
+                continue
+    visible = _visible_listboxes(page)
+    if len(visible) == 1:
+        return visible[0]
+    return None
+
+
+def _scoped_options(page: Page, control: Locator | None) -> Locator | None:
+    scope = _resolve_active_listbox(page, control)
+    if scope is None:
+        return None
+    return scope.locator("[role='option']")

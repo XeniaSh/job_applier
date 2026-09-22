@@ -38,7 +38,7 @@ import re
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from app.application.autofill import service
+from app.application.autofill import react_controls, service
 from app.application.autofill.classifier import ClassifiedField
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.greenhouse import GreenhouseAdapter, _fill_combobox
@@ -63,12 +63,14 @@ class _FakeElement:
         role: str | None = None,
         text: str = "",
         elem_id: str | None = None,
+        attrs: dict[str, str] | None = None,
     ) -> None:
         self.tag = tag
         self.classes = classes
         self.role = role
         self.text = text
         self.elem_id = elem_id
+        self.attrs = dict(attrs or {})
         self.parent: _FakeElement | None = None
         self.children: list[_FakeElement] = []
         self.visible = True
@@ -146,6 +148,27 @@ class _FakeLocator:
         _ = timeout
         return self._elements[0].text if self._elements else ""
 
+    def text_content(self, timeout: int | None = None) -> str:
+        # Unlike `inner_text()` above (which this fixture deliberately keeps
+        # naive -- just the node's own directly-assigned text, mirroring a
+        # visible-text read), this aggregates the node's own text plus every
+        # descendant's text regardless of visibility, exactly like the real
+        # DOM's `textContent` includes CSS-hidden/collapsed fragments that
+        # `innerText`/`inner_text()` would omit.
+        _ = timeout
+        if not self._elements:
+            return ""
+        parts: list[str] = []
+
+        def _walk(node: _FakeElement) -> None:
+            if node.text:
+                parts.append(node.text)
+            for child in node.children:
+                _walk(child)
+
+        _walk(self._elements[0])
+        return " ".join(parts)
+
     def get_attribute(self, name: str) -> str | None:
         if not self._elements:
             return None
@@ -154,7 +177,7 @@ class _FakeLocator:
             return el.elem_id
         if name == "role":
             return el.role
-        return None
+        return el.attrs.get(name)
 
     def input_value(self, timeout: int | None = None) -> str:
         _ = timeout
@@ -758,32 +781,283 @@ def _country_field(element_id: str = "country") -> DiscoveredField:
     return DiscoveredField(label="Country*", field_type="combobox", required=True, element_id=element_id)
 
 
-_GREENHOUSE_LOGGER_NAME = "app.application.autofill.greenhouse"
+# --- Selected-value readback must resolve the semantic label, not a child
+# dialing-code fragment. Regression for the observed live bug: a country
+# combobox's selected-value node visibly reads only "+998" after a
+# successful "Uzbekistan" click (its full label collapses to just the
+# dialing code in the control's own rendered text), while the DOM still
+# carries the country name elsewhere within that same node. Confirmation
+# must recover "Uzbekistan" from that node's full content and must never
+# accept the bare dial code as a committed selection.
 
 
-def test_fill_combobox_country_trace_emits_at_warning_level(caplog) -> None:
-    """The temporary `greenhouse_country_combo_trace` diagnostics must be
-    visible in the same warning-level supervised runtime output as
-    `select_choice_unconfirmed`, or their absence cannot be used as
-    evidence that `_fill_combobox` was skipped. Regression for the trace
-    being emitted at INFO (silently dropped by the warning-level runtime
-    logger) instead of WARNING.
-    """
-    page = _PortalComboboxPage(["Ukraine", "United Kingdom", "Uzbekistan"])
+def _country_dial_code_single_value() -> tuple[_FakeElement, _FakeLocator]:
+    control = _FakeElement("div", classes="select__control")
+    value_container = control.add_child(_FakeElement("div", classes="select__value-container"))
+    single_value = value_container.add_child(_FakeElement("div", classes="select__single-value"))
+    input_el = value_container.add_child(_FakeElement("input", elem_id="country"))
+    return single_value, _FakeLocator([input_el])
+
+
+def test_read_selected_label_ignores_dial_code_child_and_resolves_country_label() -> None:
+    single_value, control_locator = _country_dial_code_single_value()
+    # The visible text of the node is only the dial code (mirrors a real
+    # DOM where the country name fragment is present but not part of the
+    # currently-rendered visible text); a sibling fragment still carries the
+    # semantic country name.
+    single_value.text = "+998"
+    name_fragment = single_value.add_child(_FakeElement("span", classes="country-name"))
+    name_fragment.text = "Uzbekistan"
+
+    label = react_controls.read_selected_label(None, control_locator)
+
+    assert label == "Uzbekistan"
+
+
+def test_read_selected_label_fails_closed_when_only_dial_code_exists_anywhere() -> None:
+    single_value, control_locator = _country_dial_code_single_value()
+    single_value.text = "+998"
+
+    assert react_controls.read_selected_label(None, control_locator) is None
+
+
+# --- `_fill_combobox` post-click confirmation must fall back to the
+# control's own committed React-select state when display text is
+# inconclusive -- never accept a bare dialing-code fragment (or any other
+# non-empty text) as proof of a semantic selection. Regression for the
+# observed live trace: a country combobox click on the exact option
+# "Uzbekistan +998" (option id "react-select-country-option-234")
+# committed, but the selected-value node's own text (unlike the fixture
+# above) carries *no* hidden country-name fragment at all -- only "+998" --
+# so `read_selected_label`'s hidden-descendant recovery cannot prove
+# anything either way, and confirmation must instead look at the control's
+# retained React-select state (a persisted `aria-selected` option, or
+# `aria-activedescendant`).
+
+
+class _DialCodeCollapsedCountryPage:
+    def __init__(self, *, control_id: str = "country", commit_via: str | None = "aria_selected") -> None:
+        self.keyboard = _FakeKeyboard()
+        self.option_click_count = 0
+
+        self.control_wrapper = _FakeElement("div", classes="select__control")
+        value_container = self.control_wrapper.add_child(_FakeElement("div", classes="select__value-container"))
+        self.single_value = value_container.add_child(_FakeElement("div", classes="select__single-value"))
+        self.input = value_container.add_child(_FakeElement("input", elem_id=control_id))
+
+        self.menu = _FakeElement("div", role="listbox", elem_id=f"react-select-{control_id}-listbox")
+        self.menu.visible = False
+        self.option = self.menu.add_child(
+            _FakeElement(
+                "div",
+                role="option",
+                text="Uzbekistan +998",
+                elem_id="react-select-country-option-234",
+            )
+        )
+        self.option.visible = False
+
+        self.root = _FakeElement("div")
+        self.root.add_child(self.control_wrapper)
+        self.root.add_child(self.menu)
+
+        def _open() -> None:
+            self.menu.visible = True
+            self.option.visible = True
+
+        def _select() -> None:
+            self.option_click_count += 1
+            # Collapse the display to *only* the dialing code -- unlike
+            # the hidden-fragment fixture above, no descendant anywhere in
+            # this node carries the country name, so text-based recovery
+            # can never resolve it.
+            self.single_value.text = "+998"
+            self.menu.visible = False
+            self.option.visible = False
+            if commit_via == "aria_selected":
+                self.option.attrs["aria-selected"] = "true"
+            elif commit_via == "activedescendant":
+                self.input.attrs["aria-activedescendant"] = self.option.elem_id
+
+        self.input._on_click = _open  # type: ignore[attr-defined]
+        self.option._on_click = _select  # type: ignore[attr-defined]
+
+    def locator(self, selector: str) -> _FakeLocator:
+        match = re.fullmatch(r'\[id="([^"]+)"\]', selector)
+        if match:
+            target_id = match.group(1)
+            for el in self.root.subtree():
+                if el.elem_id == target_id:
+                    return _FakeLocator([el])
+            return _FakeLocator([])
+        return _FakeLocator(_select_descendants([self.root], selector))
+
+    def get_by_role(self, role: str) -> _FakeLocator:
+        return _FakeLocator([el for el in self.root.subtree() if el.role == role])
+
+    def wait_for_function(self, script: object, arg: object = None, timeout: int | None = None) -> None:
+        _ = script, arg, timeout
+        raise PlaywrightTimeoutError("fake page cannot evaluate page.wait_for_function")
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        _ = timeout
+
+
+def test_fill_combobox_confirms_via_retained_aria_selected_option_when_display_is_bare_dial_code() -> None:
+    page = _DialCodeCollapsedCountryPage(commit_via="aria_selected")
     control = _FakeLocator([page.input])
 
-    with caplog.at_level(logging.WARNING, logger=_GREENHOUSE_LOGGER_NAME):
-        ok = _fill_combobox(page, control, "Uzbekistan", trace_field=_country_field())
+    ok = _fill_combobox(page, control, "Uzbekistan")
 
     assert ok is True
-    trace_records = [
-        record.getMessage()
-        for record in caplog.records
-        if record.getMessage().startswith("greenhouse_country_combo_trace")
-    ]
-    assert any("stage=start" in message for message in trace_records)
-    assert any("stage=final" in message and "committed=True" in message for message in trace_records)
-    assert all(record.levelno == logging.WARNING for record in caplog.records if record.getMessage().startswith("greenhouse_country_combo_trace"))
+    assert page.single_value.text == "+998"
+    # Confirmed on the very first click -- a dialing-code-fragment display
+    # must never trigger a same-option re-click.
+    assert page.option_click_count == 1
+
+
+def test_fill_combobox_confirms_via_aria_activedescendant_when_display_is_bare_dial_code() -> None:
+    page = _DialCodeCollapsedCountryPage(commit_via="activedescendant")
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "Uzbekistan")
+
+    assert ok is True
+    assert page.option_click_count == 1
+
+
+def test_fill_combobox_fails_closed_on_bare_dial_code_with_no_committed_semantic_state() -> None:
+    """No hidden country-name fragment, no retained aria-selected option,
+    no aria-activedescendant -- a bare "+998" must never be accepted as a
+    committed selection, and the same option must not be re-clicked."""
+    page = _DialCodeCollapsedCountryPage(commit_via=None)
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "Uzbekistan")
+
+    assert ok is False
+    assert page.option_click_count == 1
+
+
+# --- Generic active-combobox/listbox scoping: option discovery/matching
+# must resolve the live menu genuinely associated with the control being
+# filled (via id association, or the react-select id convention), never a
+# page-wide `[role='option']` scan -- otherwise an unrelated, simultaneously
+# visible widget's options (e.g. a phone country-code picker that itself
+# lists "Uzbekistan +998" among its 200+ entries) can be cross-matched.
+
+
+class _MultiListboxCountryPage:
+    def __init__(self, *, control_id: str = "question_67916011", set_listbox_id: bool = True) -> None:
+        self.keyboard = _FakeKeyboard()
+
+        self.control_wrapper = _FakeElement("div", classes="select__control")
+        value_container = self.control_wrapper.add_child(_FakeElement("div", classes="select__value-container"))
+        self.single_value = value_container.add_child(_FakeElement("div", classes="select__single-value"))
+        self.input = value_container.add_child(_FakeElement("input", elem_id=control_id))
+
+        listbox_id = f"react-select-{control_id}-listbox" if set_listbox_id else None
+        self.menu = _FakeElement("div", role="listbox", elem_id=listbox_id)
+        self.menu.visible = False
+        self.options: list[_FakeElement] = []
+        for text in ["Ukraine", "United Kingdom", "Uzbekistan"]:
+            option = self.menu.add_child(_FakeElement("div", role="option", text=text))
+            option.visible = False
+            self.options.append(option)
+
+        # An unrelated, permanently-visible phone-widget listbox -- present
+        # on the page the whole time, not just while the residence combobox
+        # menu is open -- that even lists "Uzbekistan +998" among its own
+        # options, exactly the cross-match hazard a page-wide option scan
+        # would fall into.
+        self.phone_widget = _FakeElement("div", role="listbox", elem_id="iti-0__country-listbox")
+        self.phone_widget.visible = True
+        self.phone_options: list[_FakeElement] = []
+        self.phone_widget_clicked = False
+        for text in ["Ukraine +380", "United Kingdom +44", "Uzbekistan +998"]:
+            option = self.phone_widget.add_child(_FakeElement("div", role="option", text=text))
+            option.visible = True
+            self.phone_options.append(option)
+
+        def _decoy_click() -> None:
+            self.phone_widget_clicked = True
+
+        for option in self.phone_options:
+            option._on_click = _decoy_click  # type: ignore[attr-defined]
+
+        self.root = _FakeElement("div")
+        self.root.add_child(self.phone_widget)
+        self.root.add_child(self.control_wrapper)
+        self.root.add_child(self.menu)
+
+        def _open(_el: _FakeElement = self.input) -> None:
+            self.menu.visible = True
+            for opt in self.options:
+                opt.visible = True
+
+        def _filter(value: str) -> None:
+            needle = value.strip().lower()
+            for opt in self.options:
+                opt.visible = not needle or needle in opt.text.lower()
+
+        def _make_select(option: _FakeElement):
+            def _select() -> None:
+                self.single_value.text = option.text
+                self.menu.visible = False
+                for opt in self.options:
+                    opt.visible = False
+
+            return _select
+
+        self.input._on_click = _open  # type: ignore[attr-defined]
+        self.input._on_fill = _filter  # type: ignore[attr-defined]
+        for option in self.options:
+            option._on_click = _make_select(option)  # type: ignore[attr-defined]
+
+    def locator(self, selector: str) -> _FakeLocator:
+        match = re.fullmatch(r'\[id="([^"]+)"\]', selector)
+        if match:
+            target_id = match.group(1)
+            for el in self.root.subtree():
+                if el.elem_id == target_id:
+                    return _FakeLocator([el])
+            return _FakeLocator([])
+        return _FakeLocator(_select_descendants([self.root], selector))
+
+    def get_by_role(self, role: str) -> _FakeLocator:
+        return _FakeLocator([el for el in self.root.subtree() if el.role == role])
+
+    def wait_for_function(self, script: object, arg: object = None, timeout: int | None = None) -> None:
+        _ = script, arg, timeout
+        raise PlaywrightTimeoutError("fake page cannot evaluate page.wait_for_function")
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        _ = timeout
+
+
+def test_fill_combobox_scopes_to_associated_listbox_ignoring_unrelated_phone_widget() -> None:
+    page = _MultiListboxCountryPage()
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "Uzbekistan")
+
+    assert ok is True
+    assert page.single_value.text == "Uzbekistan"
+    assert page.phone_widget_clicked is False
+
+
+def test_fill_combobox_fails_closed_when_no_listbox_association_resolves_among_several() -> None:
+    """With two simultaneously visible listboxes and no id/ARIA association
+    to the control being filled, the fill must fail closed instead of
+    guessing (page-wide search) which listbox is actually the active one."""
+    page = _MultiListboxCountryPage(set_listbox_id=False)
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "Uzbekistan")
+
+    assert ok is False
+    assert page.single_value.text == ""
+    assert page.phone_widget_clicked is False
 
 
 def test_fill_combobox_failure_clears_typed_text_so_read_back_never_returns_it() -> None:
