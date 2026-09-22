@@ -1551,7 +1551,7 @@ def _fill_combobox(
     """
     trace = trace_field is not None
     if trace:
-        logger.info("%s stage=start %s", _COUNTRY_TRACE_PREFIX, _trace_field_meta(trace_field))
+        logger.warning("%s stage=start %s", _COUNTRY_TRACE_PREFIX, _trace_field_meta(trace_field))
     click_exception: str | None = None
     try:
         locator.click(timeout=3_000)
@@ -1561,7 +1561,7 @@ def _fill_combobox(
             locator.click(force=True, timeout=3_000)
         except PlaywrightError as exc2:
             if trace:
-                logger.info(
+                logger.warning(
                     "%s stage=focus %s ok=False exception=%s,force:%s",
                     _COUNTRY_TRACE_PREFIX,
                     _trace_field_meta(trace_field),
@@ -1570,7 +1570,7 @@ def _fill_combobox(
                 )
             raise
     if trace:
-        logger.info(
+        logger.warning(
             "%s stage=focus %s ok=True exception=%s",
             _COUNTRY_TRACE_PREFIX,
             _trace_field_meta(trace_field),
@@ -1586,7 +1586,7 @@ def _fill_combobox(
             _dismiss_overlays(page)
             _clear_combobox_input(locator)
             if trace:
-                logger.info(
+                logger.warning(
                     "%s stage=final %s committed=False readback=None reason=type_failed",
                     _COUNTRY_TRACE_PREFIX,
                     _trace_field_meta(trace_field),
@@ -1597,7 +1597,7 @@ def _fill_combobox(
             typed_value = _input_value(locator)
         except PlaywrightError:
             typed_value = ""
-        logger.info(
+        logger.warning(
             "%s stage=typed %s input_value=%r",
             _COUNTRY_TRACE_PREFIX,
             _trace_field_meta(trace_field),
@@ -1611,7 +1611,7 @@ def _fill_combobox(
         exact_match = any(
             _trace_normalize(str(item["text"])) == _trace_normalize(value) for item in live_options
         )
-        logger.info(
+        logger.warning(
             "%s stage=menu %s option_count=%d live=%s listbox_visible=%d listbox=%s exact_match=%s "
             "locator_strategy=%s",
             _COUNTRY_TRACE_PREFIX,
@@ -1631,7 +1631,7 @@ def _fill_combobox(
             option = react_controls.matching_option(page, head)
             matched_value = head
     if trace:
-        logger.info(
+        logger.warning(
             "%s stage=match %s found=%s matched_value=%r",
             _COUNTRY_TRACE_PREFIX,
             _trace_field_meta(trace_field),
@@ -1646,7 +1646,7 @@ def _fill_combobox(
                 no_match_readback = react_controls.read_selected_label(page, locator)
             except PlaywrightError:
                 no_match_readback = None
-            logger.info(
+            logger.warning(
                 "%s stage=final %s committed=False readback=%r",
                 _COUNTRY_TRACE_PREFIX,
                 _trace_field_meta(trace_field),
@@ -1667,7 +1667,7 @@ def _fill_combobox(
             else:
                 click_exc_name = f"{type(exc1).__name__},force_recovered"
         if trace:
-            logger.info(
+            logger.warning(
                 "%s stage=click attempt=%d %s ok=%s exception=%s",
                 _COUNTRY_TRACE_PREFIX,
                 _click_attempt,
@@ -1679,7 +1679,7 @@ def _fill_combobox(
             break
         if trace:
             state = _trace_control_state(page, locator)
-            logger.info(
+            logger.warning(
                 "%s stage=post_click attempt=%d %s state=%s",
                 _COUNTRY_TRACE_PREFIX,
                 _click_attempt,
@@ -1697,7 +1697,7 @@ def _fill_combobox(
                     success_readback = react_controls.read_selected_label(page, locator)
                 except PlaywrightError:
                     success_readback = None
-                logger.info(
+                logger.warning(
                     "%s stage=final %s committed=True readback=%r",
                     _COUNTRY_TRACE_PREFIX,
                     _trace_field_meta(trace_field),
@@ -1712,7 +1712,7 @@ def _fill_combobox(
             final_readback = react_controls.read_selected_label(page, locator)
         except PlaywrightError:
             final_readback = None
-        logger.info(
+        logger.warning(
             "%s stage=final %s committed=False readback=%r",
             _COUNTRY_TRACE_PREFIX,
             _trace_field_meta(trace_field),

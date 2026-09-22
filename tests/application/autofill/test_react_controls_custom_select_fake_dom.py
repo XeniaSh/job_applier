@@ -758,6 +758,34 @@ def _country_field(element_id: str = "country") -> DiscoveredField:
     return DiscoveredField(label="Country*", field_type="combobox", required=True, element_id=element_id)
 
 
+_GREENHOUSE_LOGGER_NAME = "app.application.autofill.greenhouse"
+
+
+def test_fill_combobox_country_trace_emits_at_warning_level(caplog) -> None:
+    """The temporary `greenhouse_country_combo_trace` diagnostics must be
+    visible in the same warning-level supervised runtime output as
+    `select_choice_unconfirmed`, or their absence cannot be used as
+    evidence that `_fill_combobox` was skipped. Regression for the trace
+    being emitted at INFO (silently dropped by the warning-level runtime
+    logger) instead of WARNING.
+    """
+    page = _PortalComboboxPage(["Ukraine", "United Kingdom", "Uzbekistan"])
+    control = _FakeLocator([page.input])
+
+    with caplog.at_level(logging.WARNING, logger=_GREENHOUSE_LOGGER_NAME):
+        ok = _fill_combobox(page, control, "Uzbekistan", trace_field=_country_field())
+
+    assert ok is True
+    trace_records = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("greenhouse_country_combo_trace")
+    ]
+    assert any("stage=start" in message for message in trace_records)
+    assert any("stage=final" in message and "committed=True" in message for message in trace_records)
+    assert all(record.levelno == logging.WARNING for record in caplog.records if record.getMessage().startswith("greenhouse_country_combo_trace"))
+
+
 def test_fill_combobox_failure_clears_typed_text_so_read_back_never_returns_it() -> None:
     """Regression for the read-back masquerade bug: when no live option
     matches, `_fill_combobox` must fail closed *and* leave no typed search
