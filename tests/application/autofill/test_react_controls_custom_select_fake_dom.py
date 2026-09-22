@@ -169,7 +169,8 @@ class _FakeLocator:
         _walk(self._elements[0])
         return " ".join(parts)
 
-    def get_attribute(self, name: str) -> str | None:
+    def get_attribute(self, name: str, timeout: int | None = None) -> str | None:
+        _ = timeout
         if not self._elements:
             return None
         el = self._elements[0]
@@ -821,22 +822,28 @@ def test_read_selected_label_fails_closed_when_only_dial_code_exists_anywhere() 
     assert react_controls.read_selected_label(None, control_locator) is None
 
 
-# --- `_fill_combobox` post-click confirmation must fall back to the
-# control's own committed React-select state when display text is
-# inconclusive -- never accept a bare dialing-code fragment (or any other
-# non-empty text) as proof of a semantic selection. Regression for the
-# observed live trace: a country combobox click on the exact option
-# "Uzbekistan +998" (option id "react-select-country-option-234")
+# --- `_fill_combobox` post-click confirmation must fall back to the same
+# durable, control-committed signal `read_committed_selected_value` itself
+# uses -- never accept a bare dialing-code fragment (or any other
+# non-empty text) as proof of a semantic selection, and never accept a
+# signal a later, independent `read_back` pass could not itself re-derive.
+# Regression for the observed live trace: a country combobox click on the
+# exact option "Uzbekistan +998" (option id "react-select-country-option-234")
 # committed, but the selected-value node's own text (unlike the fixture
 # above) carries *no* hidden country-name fragment at all -- only "+998" --
 # so `read_selected_label`'s hidden-descendant recovery cannot prove
-# anything either way, and confirmation must instead look at the control's
-# retained React-select state (a persisted `aria-selected` option, or
-# `aria-activedescendant`).
+# anything either way. A retained `aria-selected` option or
+# `aria-activedescendant` on the control must never confirm the fill on
+# their own: neither proves commitment (vs. mere highlight/focus), and a
+# later read-back pass has no way to re-derive either once the option node
+# is hidden/detached -- only a control-root attribute (e.g.
+# `data-selected-value`) that ties the dial-code fragment to the fuller
+# committed value, exactly like `read_committed_selected_value` itself
+# requires, can confirm the fill.
 
 
 class _DialCodeCollapsedCountryPage:
-    def __init__(self, *, control_id: str = "country", commit_via: str | None = "aria_selected") -> None:
+    def __init__(self, *, control_id: str = "country", commit_via: str | None = "control_metadata") -> None:
         self.keyboard = _FakeKeyboard()
         self.option_click_count = 0
 
@@ -874,7 +881,16 @@ class _DialCodeCollapsedCountryPage:
             self.single_value.text = "+998"
             self.menu.visible = False
             self.option.visible = False
-            if commit_via == "aria_selected":
+            # A real committed React-select clears its own search input as
+            # part of the same commit; `read_committed_selected_value`
+            # requires this before trusting any control-root attribute.
+            self.input.value = ""
+            if commit_via == "control_metadata":
+                # The only signal `read_committed_selected_value` itself
+                # trusts: a control-root attribute tying the fragment to
+                # the fuller committed value.
+                self.control_wrapper.attrs["data-selected-value"] = "Uzbekistan +998"
+            elif commit_via == "aria_selected":
                 self.option.attrs["aria-selected"] = "true"
             elif commit_via == "activedescendant":
                 self.input.attrs["aria-activedescendant"] = self.option.elem_id
@@ -903,8 +919,8 @@ class _DialCodeCollapsedCountryPage:
         _ = timeout
 
 
-def test_fill_combobox_confirms_via_retained_aria_selected_option_when_display_is_bare_dial_code() -> None:
-    page = _DialCodeCollapsedCountryPage(commit_via="aria_selected")
+def test_fill_combobox_confirms_via_committed_control_metadata_when_display_is_bare_dial_code() -> None:
+    page = _DialCodeCollapsedCountryPage(commit_via="control_metadata")
     control = _FakeLocator([page.input])
 
     ok = _fill_combobox(page, control, "Uzbekistan")
@@ -916,20 +932,38 @@ def test_fill_combobox_confirms_via_retained_aria_selected_option_when_display_i
     assert page.option_click_count == 1
 
 
-def test_fill_combobox_confirms_via_aria_activedescendant_when_display_is_bare_dial_code() -> None:
+def test_fill_combobox_fails_closed_on_retained_aria_selected_option_alone() -> None:
+    """A retained `aria-selected="true"` option is only ever a highlight/
+    focus signal, not proof of commitment -- and a later, independent
+    `read_back` pass has no way to re-derive it once the option node is
+    hidden/detached, so it must never confirm the fill on its own."""
+    page = _DialCodeCollapsedCountryPage(commit_via="aria_selected")
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "Uzbekistan")
+
+    assert ok is False
+    assert page.option_click_count == 1
+
+
+def test_fill_combobox_fails_closed_on_aria_activedescendant_alone() -> None:
+    """`aria-activedescendant` alone means highlighted/focused, not
+    committed -- and like the retained `aria-selected` case, a later
+    `read_back` pass has no way to re-derive it, so it must never confirm
+    the fill on its own."""
     page = _DialCodeCollapsedCountryPage(commit_via="activedescendant")
     control = _FakeLocator([page.input])
 
     ok = _fill_combobox(page, control, "Uzbekistan")
 
-    assert ok is True
+    assert ok is False
     assert page.option_click_count == 1
 
 
 def test_fill_combobox_fails_closed_on_bare_dial_code_with_no_committed_semantic_state() -> None:
-    """No hidden country-name fragment, no retained aria-selected option,
-    no aria-activedescendant -- a bare "+998" must never be accepted as a
-    committed selection, and the same option must not be re-clicked."""
+    """No hidden country-name fragment and no committed control-root
+    metadata -- a bare "+998" must never be accepted as a committed
+    selection, and the same option must not be re-clicked."""
     page = _DialCodeCollapsedCountryPage(commit_via=None)
     control = _FakeLocator([page.input])
 

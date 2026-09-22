@@ -81,6 +81,25 @@ def _gender_field() -> DiscoveredField:
     )
 
 
+def _country_field() -> DiscoveredField:
+    return DiscoveredField(
+        label="Country*",
+        field_type="combobox",
+        required=True,
+        options=["Uzbekistan +998"],
+    )
+
+
+def _country_item(value: str = "Uzbekistan") -> ClassifiedField:
+    return ClassifiedField(
+        field=_country_field(),
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=value,
+        fill=True,
+        kind=QuestionKind.COUNTRY,
+    )
+
+
 def _privacy_field() -> DiscoveredField:
     return DiscoveredField(
         label="I acknowledge that my data will be processed as described in the Privacy Policy",
@@ -128,6 +147,21 @@ def test_readback_matches_still_rejects_unrelated_age_readback() -> None:
         kind=QuestionKind.AGE,
     )
     assert service._readback_matches(item, "Please select") is False
+
+
+def test_readback_matches_rejects_bare_dial_code_for_country() -> None:
+    """A bare dialing code alone (e.g. "+998") must never confirm a COUNTRY
+    fill on its own -- it carries no semantic country information and could
+    just as easily belong to an unrelated phone-country-code widget. Only a
+    read-back that actually names the requested country (e.g. "Uzbekistan
+    +998") may confirm."""
+    item = _country_item("Uzbekistan")
+    assert service._readback_matches(item, "+998") is False
+
+
+def test_readback_matches_accepts_semantic_country_with_dial_code_suffix() -> None:
+    item = _country_item("Uzbekistan")
+    assert service._readback_matches(item, "Uzbekistan +998") is True
 
 
 def test_fill_and_confirm_confirms_age_decline_on_first_attempt_with_fuzzy_readback(

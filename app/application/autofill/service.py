@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 import logging
+import time
 
 from app.application.autofill.answers import ApplicationAnswerGenerator
 from app.application.autofill.browser import (
@@ -573,18 +574,77 @@ def _field_result(item: ClassifiedField) -> AutofillFieldResult:
 
 
 def _fill_and_confirm(adapter: AutofillAdapter, page: object, item: ClassifiedField) -> bool:
-    ok = adapter.fill_field(page, item)
-    check_item = _with_confirmed_choice(adapter, _with_confirmed_multiselect(adapter, item))
-    read_back = adapter.read_back(page, item.field)
+    diagnostic = item.kind in _FILL_DIAGNOSTIC_KINDS
+    ok, check_item, read_back = _fill_and_read_back(adapter, page, item, attempt=1, diagnostic=diagnostic)
     if ok and _readback_matches(check_item, read_back):
         return True
-    ok = adapter.fill_field(page, item)
-    check_item = _with_confirmed_choice(adapter, _with_confirmed_multiselect(adapter, item))
-    read_back = adapter.read_back(page, item.field)
+    ok, check_item, read_back = _fill_and_read_back(adapter, page, item, attempt=2, diagnostic=diagnostic)
     confirmed = bool(ok and _readback_matches(check_item, read_back))
     if not confirmed:
         _log_unconfirmed_select_choice(check_item, adapter, ok=ok, read_back=read_back)
     return confirmed
+
+
+# Kinds this module cannot otherwise distinguish a mapping vs. locator vs.
+# fill vs. readback failure for from a live failure report alone (required
+# current/previous title and the country combobox, whose live DOM shape
+# `react_controls`/`greenhouse` cannot observe directly).
+_FILL_DIAGNOSTIC_KINDS = frozenset({QuestionKind.CURRENT_TITLE, QuestionKind.COUNTRY})
+
+
+def _fill_and_read_back(
+    adapter: AutofillAdapter, page: object, item: ClassifiedField, *, attempt: int, diagnostic: bool
+) -> tuple[bool, ClassifiedField, str | None]:
+    fill_start = time.monotonic()
+    ok = adapter.fill_field(page, item)
+    fill_elapsed_ms = int((time.monotonic() - fill_start) * 1000)
+    check_item = _with_confirmed_choice(adapter, _with_confirmed_multiselect(adapter, item))
+    readback_start = time.monotonic()
+    read_back = adapter.read_back(page, item.field)
+    readback_elapsed_ms = int((time.monotonic() - readback_start) * 1000)
+    if diagnostic:
+        _log_field_fill_diagnostic(
+            item,
+            attempt=attempt,
+            fill_ok=ok,
+            fill_elapsed_ms=fill_elapsed_ms,
+            readback_present=bool(read_back),
+            readback_elapsed_ms=readback_elapsed_ms,
+            confirmed=bool(ok and _readback_matches(check_item, read_back)),
+        )
+    return ok, check_item, read_back
+
+
+def _log_field_fill_diagnostic(
+    item: ClassifiedField,
+    *,
+    attempt: int,
+    fill_ok: bool,
+    fill_elapsed_ms: int,
+    readback_present: bool,
+    readback_elapsed_ms: int,
+    confirmed: bool,
+) -> None:
+    """Compact per-field timing/outcome for the mapping (kind), locator
+    (control_type), fill, and readback stages -- so a live run can show
+    exactly where a required current/previous title or country fill stalls
+    or fails, without printing the candidate/profile value or read-back
+    text.
+    """
+    logger.warning(
+        "field_fill_diagnostic attempt=%d field_label=%r kind=%s control_type=%s required=%s "
+        "fill_ok=%s fill_elapsed_ms=%d readback_present=%s readback_elapsed_ms=%d confirmed=%s",
+        attempt,
+        " ".join(item.field.label.split()),
+        item.kind.value,
+        item.field.field_type,
+        item.field.required,
+        fill_ok,
+        fill_elapsed_ms,
+        readback_present,
+        readback_elapsed_ms,
+        confirmed,
+    )
 
 
 _SELECT_CHOICE_DIAGNOSTIC_KINDS = frozenset(
@@ -808,8 +868,6 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
             return True
     if item.kind in {QuestionKind.LOCATION, QuestionKind.COUNTRY}:
         if wanted.lower() in actual.lower() or actual.lower() in wanted.lower():
-            return True
-        if item.kind is QuestionKind.COUNTRY and actual.startswith("+"):
             return True
         return False
     return False

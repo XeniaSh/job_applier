@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -475,18 +476,24 @@ class GreenhouseAdapter:
             if field.field_type == "radio":
                 return _fill_radio(page, field, classified.value)
             if classified.kind is QuestionKind.COUNTRY:
-                resolved: dict[str, str] = {}
-                choice_ok = _fill_choice(page, locator, field, classified.value, kind=classified.kind, resolved=resolved)
-                self.last_choice_trace = _describe_choice_interaction(
-                    locator, field, classified.kind, choice_ok
-                )
-                if choice_ok:
-                    self.last_choice_selected = resolved.get("label")
-                    return True
-                combo_ok = _fill_combobox(page, locator, str(classified.value))
+                if field.field_type == "select" or _is_native_select(locator):
+                    resolved: dict[str, str] = {}
+                    choice_ok = _fill_choice(
+                        page, locator, field, classified.value, kind=classified.kind, resolved=resolved
+                    )
+                    self.last_choice_trace = _describe_choice_interaction(
+                        locator, field, classified.kind, choice_ok
+                    )
+                    if choice_ok:
+                        self.last_choice_selected = resolved.get("label")
+                    return choice_ok
+                combo_resolved: dict[str, str] = {}
+                combo_ok = _fill_combobox(page, locator, str(classified.value), resolved=combo_resolved)
                 self.last_choice_trace = _describe_choice_interaction(
                     locator, field, classified.kind, combo_ok
                 )
+                if combo_ok:
+                    self.last_choice_selected = combo_resolved.get("label")
                 return combo_ok
             if classified.kind in _MENU_CHOICE_KINDS or isinstance(classified.value, bool):
                 resolved = {}
@@ -670,6 +677,9 @@ class GreenhouseAdapter:
             if typed and typed.lower() not in selected_label.lower() and field.field_type in {"select", "combobox"}:
                 return selected_label
             return selected_label
+        committed = react_controls.read_committed_selected_value(locator)
+        if committed:
+            return committed
         value = _visible_control_value(page, locator)
         return value if value else None
 
@@ -1385,20 +1395,24 @@ def _clear_combobox_input(locator: Locator) -> None:
         pass
 
 
-def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
+def _fill_combobox(
+    page: Page, locator: Locator, value: str, *, resolved: dict[str, str] | None = None
+) -> bool:
     """Type into a custom searchable combobox and commit the exact live
     option, not merely the typed text.
 
-    Option discovery/matching/click go through the shared
-    `react_controls` helpers (`click_option` / `matching_option`), scoped to
-    the live menu actually associated with this control (via ARIA
+    Option discovery/matching go through `react_controls.scoped_*` helpers,
+    scoped to the live menu actually associated with this control (via ARIA
     aria-controls/aria-owns, or the react-select id convention, falling
     back to the sole visible listbox on the page when unambiguous) --
     never blindly page-wide, since Greenhouse's custom React-selects can
     render their live option menu in a portal appended elsewhere in the
     DOM (not a descendant of the combobox markup), and an unrelated
     widget's options (e.g. a phone country-code picker) must never be
-    matched instead.
+    matched instead. These scoped helpers are only used here, never by the
+    shared `open_menu`/`click_option`/`matching_option` primitives the
+    single-select/yes-no/multiselect paths rely on, so an unresolvable
+    listbox association can never change behavior anywhere else.
 
     A single typed value is matched against a single rendered menu
     (never re-typed to force a retry): if the exact value has no live
@@ -1406,11 +1420,15 @@ def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
     "Tashkent") is tried once against that same menu, since some
     combobox options are only worded as the leading component. No blind
     Enter is ever pressed and no other option is ever substituted -- once
-    resolved, only that exact live option locator is clicked (up to twice,
+    resolved, only that exact live option's id/label (captured before any
+    click, since a committed React-select can detach/unmount the option
+    node itself, which would otherwise leave a later attribute read
+    waiting on a locator that never reappears) is clicked (up to twice,
     to tolerate a real async-search quirk where a freshly filtered
     option's first click is swallowed), and the fill fails closed with no
     visible match or no persisted selection.
     """
+    start = time.monotonic()
     try:
         locator.click(timeout=3_000)
     except PlaywrightError:
@@ -1425,19 +1443,33 @@ def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
             _dismiss_overlays(page)
             _clear_combobox_input(locator)
             return False
-    react_controls.wait_visible_options(page, control=locator)
-    option = react_controls.matching_option(page, value, control=locator)
+    react_controls.scoped_visible_option_texts(page, locator)
+    option = react_controls.scoped_matching_option(page, locator, value)
     matched_value = value
     if option is None:
         head = value.strip().split(",")[0].strip()
         if head and head.lower() != value.strip().lower():
-            option = react_controls.matching_option(page, head, control=locator)
+            option = react_controls.scoped_matching_option(page, locator, head)
             matched_value = head
     if option is None:
+        _log_combobox_no_match(page, locator, start)
         _dismiss_overlays(page)
         _clear_combobox_input(locator)
         return False
     for _click_attempt in range(2):
+        # Captured before the click below: a committed React-select can
+        # detach/unmount the clicked option node itself, and reading an
+        # attribute off that same locator afterwards would then wait
+        # (default timeout, twice per field here plus the service's own
+        # fill/confirm retry) for a node that never reappears.
+        try:
+            option_id = (option.get_attribute("id", timeout=1_000) or "").strip()
+        except PlaywrightError:
+            option_id = ""
+        try:
+            option_label = " ".join((option.inner_text(timeout=1_000) or "").split())
+        except PlaywrightError:
+            option_label = ""
         try:
             option.click(timeout=3_000)
         except PlaywrightError:
@@ -1450,12 +1482,19 @@ def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
         # and a freshly filtered option's first click can be swallowed --
         # the click above must actually persist before this counts as a
         # success, or the field can silently revert to its placeholder.
-        # Confirmation prefers display text but falls back to the
-        # control's own committed React-select state (e.g. a retained
-        # aria-selected option, or aria-activedescendant) when the display
-        # has collapsed to a bare dialing-code fragment that alone can
-        # never prove the semantic option committed.
-        if react_controls.confirm_option_selected(page, locator, option, matched_value):
+        # Confirmation prefers display text but falls back to the same
+        # durable control-committed metadata `read_back` itself can later
+        # re-derive (a control-root attribute tying the fragment to a
+        # fuller value that matches the option actually clicked) when the
+        # display has collapsed to a bare dialing-code fragment that alone
+        # can never prove the semantic option committed. A retained
+        # aria-selected option or aria-activedescendant is never enough on
+        # its own: neither proves commitment (vs. mere highlight/focus),
+        # and a later read-back pass has no way to re-derive either once
+        # the option node is hidden/detached.
+        if react_controls.confirm_option_selected(page, locator, option_label, matched_value):
+            if resolved is not None:
+                resolved["label"] = option_label or matched_value
             _dismiss_overlays(page)
             return True
         if react_controls.selection_display_is_dial_code_fragment(locator):
@@ -1464,10 +1503,36 @@ def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
             # not a swallowed click; re-clicking the same option again
             # would not change the outcome, only a genuine fail-closed
             # case (no committed React-select state confirms it).
+            logger.warning(
+                "combobox_dial_code_unconfirmed element_id=%r option_id=%r elapsed_ms=%d",
+                locator.get_attribute("id") or "",
+                option_id,
+                int((time.monotonic() - start) * 1000),
+            )
             break
     _dismiss_overlays(page)
     _clear_combobox_input(locator)
     return False
+
+
+def _log_combobox_no_match(page: Page, locator: Locator, start: float) -> None:
+    """Compact, bounded diagnostic for a combobox fill that found no live
+    option to click -- distinguishes "this control's own live listbox
+    could not be associated at all" (a stronger fail-closed signal worth
+    separating out) from "the listbox resolved but had no matching text".
+    Logs only structural facts (element id, resolution outcome, elapsed
+    time), never the candidate value or any option text.
+    """
+    try:
+        listbox_resolved = react_controls.resolve_combobox_listbox(page, locator) is not None
+    except PlaywrightError:
+        listbox_resolved = False
+    logger.warning(
+        "combobox_no_match element_id=%r listbox_resolved=%s elapsed_ms=%d",
+        locator.get_attribute("id") or "",
+        listbox_resolved,
+        int((time.monotonic() - start) * 1000),
+    )
 
 
 def _fill_choice(
