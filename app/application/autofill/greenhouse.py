@@ -483,7 +483,7 @@ class GreenhouseAdapter:
                 if choice_ok:
                     self.last_choice_selected = resolved.get("label")
                     return True
-                combo_ok = _fill_combobox(page, locator, str(classified.value))
+                combo_ok = _fill_combobox(page, locator, str(classified.value), trace_field=field)
                 self.last_choice_trace = _describe_choice_interaction(
                     locator, field, classified.kind, combo_ok
                 )
@@ -1373,7 +1373,159 @@ def _dismiss_overlays(page: Page) -> None:
         pass
 
 
-def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
+def _clear_combobox_input(locator: Locator) -> None:
+    """Best-effort wipe of a searchable combobox's typed text on a failed
+    fill attempt, so leftover search text can never be mistaken later for a
+    committed selection by `read_back` (which otherwise falls back to the
+    raw input value when no dedicated selected-value node or chip exists).
+    """
+    try:
+        locator.fill("", timeout=1_000)
+    except PlaywrightError:
+        pass
+
+
+# Stable, greppable prefix for temporary bounded diagnostics on the country
+# custom-combobox interaction only -- never emitted for other combobox
+# fills (years/location/etc.), and never containing full DOM/HTML, only
+# sanitized structural facts plus the field's own requested/typed value
+# (already known to whoever configured the profile, not sensitive DOM
+# content).
+_COUNTRY_TRACE_PREFIX = "greenhouse_country_combo_trace"
+_COUNTRY_TRACE_OPTION_LIMIT = 8
+_COUNTRY_TRACE_LISTBOX_LIMIT = 4
+_COUNTRY_TRACE_TEXT_LIMIT = 60
+
+_LISTBOX_TRACE_SUMMARY_JS = """el => {
+    const attrs = [];
+    for (const name of el.getAttributeNames()) {
+        if (name === 'id' || name === 'class' || name === 'role' || name.startsWith('aria-')) {
+            attrs.push(`${name}=${(el.getAttribute(name) || '').slice(0, 40)}`);
+        }
+    }
+    return `${el.tagName.toLowerCase()} ${attrs.join(' ')}`.trim().slice(0, 160);
+}"""
+
+
+def _trace_field_meta(field: DiscoveredField | None) -> str:
+    if field is None:
+        return "label=? id=? name=?"
+    label = " ".join((field.label or "").split())[:80]
+    return f"label={label!r} id={field.element_id} name={field.name}"
+
+
+def _trace_normalize(value: str) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def _trace_option_count(page: Page) -> int:
+    try:
+        options = page.get_by_role("option")
+        count = options.count()
+        if count == 0:
+            count = page.locator("[role='option']").count()
+        return count
+    except PlaywrightError:
+        return -1
+
+
+def _trace_live_options(page: Page, limit: int = _COUNTRY_TRACE_OPTION_LIMIT) -> list[dict[str, object]]:
+    try:
+        options = page.get_by_role("option")
+        if options.count() == 0:
+            options = page.locator("[role='option']")
+        count = options.count()
+    except PlaywrightError:
+        return []
+    records: list[dict[str, object]] = []
+    for index in range(min(count, limit)):
+        option = options.nth(index)
+        try:
+            visible = option.is_visible()
+        except PlaywrightError:
+            visible = False
+        try:
+            text = " ".join((option.inner_text() or "").split())[:_COUNTRY_TRACE_TEXT_LIMIT]
+        except PlaywrightError:
+            text = ""
+        try:
+            elem_id = option.get_attribute("id") or ""
+        except PlaywrightError:
+            elem_id = ""
+        try:
+            aria_selected = option.get_attribute("aria-selected")
+        except PlaywrightError:
+            aria_selected = None
+        records.append(
+            {
+                "text": text,
+                "role": "option",
+                "visible": visible,
+                "id": elem_id,
+                "aria_selected": aria_selected,
+            }
+        )
+    return records
+
+
+def _trace_listbox_summary(page: Page) -> tuple[int, list[str]]:
+    try:
+        listboxes = page.locator("[role='listbox']")
+        total = listboxes.count()
+    except PlaywrightError:
+        return 0, []
+    visible_count = 0
+    summaries: list[str] = []
+    for index in range(total):
+        node = listboxes.nth(index)
+        try:
+            if not node.is_visible():
+                continue
+        except PlaywrightError:
+            continue
+        visible_count += 1
+        if len(summaries) >= _COUNTRY_TRACE_LISTBOX_LIMIT:
+            continue
+        try:
+            summary = node.evaluate(_LISTBOX_TRACE_SUMMARY_JS)
+        except PlaywrightError:
+            summary = "unknown"
+        summaries.append(str(summary)[:160])
+    return visible_count, summaries
+
+
+def _trace_control_state(page: Page, locator: Locator) -> dict[str, object]:
+    try:
+        value = _input_value(locator)
+    except PlaywrightError:
+        value = ""
+    try:
+        expanded = locator.get_attribute("aria-expanded")
+    except PlaywrightError:
+        expanded = None
+    try:
+        activedescendant = locator.get_attribute("aria-activedescendant")
+    except PlaywrightError:
+        activedescendant = None
+    try:
+        selected_label = react_controls.read_selected_label(page, locator)
+    except PlaywrightError:
+        selected_label = None
+    return {
+        "value": (value or "")[:_COUNTRY_TRACE_TEXT_LIMIT],
+        "aria_expanded": expanded,
+        "aria_activedescendant": activedescendant,
+        "selected_label": (selected_label or "")[:_COUNTRY_TRACE_TEXT_LIMIT] or None,
+    }
+
+
+def _fill_combobox(
+    page: Page,
+    locator: Locator,
+    value: str,
+    *,
+    trace_field: DiscoveredField | None = None,
+) -> bool:
     """Type into a custom searchable combobox and commit the exact live
     option, not merely the typed text.
 
@@ -1397,10 +1549,33 @@ def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
     option's first click is swallowed), and the fill fails closed with no
     visible match or no persisted selection.
     """
+    trace = trace_field is not None
+    if trace:
+        logger.info("%s stage=start %s", _COUNTRY_TRACE_PREFIX, _trace_field_meta(trace_field))
+    click_exception: str | None = None
     try:
         locator.click(timeout=3_000)
-    except PlaywrightError:
-        locator.click(force=True, timeout=3_000)
+    except PlaywrightError as exc:
+        click_exception = type(exc).__name__
+        try:
+            locator.click(force=True, timeout=3_000)
+        except PlaywrightError as exc2:
+            if trace:
+                logger.info(
+                    "%s stage=focus %s ok=False exception=%s,force:%s",
+                    _COUNTRY_TRACE_PREFIX,
+                    _trace_field_meta(trace_field),
+                    click_exception,
+                    type(exc2).__name__,
+                )
+            raise
+    if trace:
+        logger.info(
+            "%s stage=focus %s ok=True exception=%s",
+            _COUNTRY_TRACE_PREFIX,
+            _trace_field_meta(trace_field),
+            click_exception,
+        )
     try:
         locator.fill("", timeout=5_000)
         locator.press_sequentially(value, delay=20, timeout=10_000)
@@ -1409,8 +1584,45 @@ def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
             locator.fill(value, timeout=5_000)
         except PlaywrightError:
             _dismiss_overlays(page)
+            _clear_combobox_input(locator)
+            if trace:
+                logger.info(
+                    "%s stage=final %s committed=False readback=None reason=type_failed",
+                    _COUNTRY_TRACE_PREFIX,
+                    _trace_field_meta(trace_field),
+                )
             return False
+    if trace:
+        try:
+            typed_value = _input_value(locator)
+        except PlaywrightError:
+            typed_value = ""
+        logger.info(
+            "%s stage=typed %s input_value=%r",
+            _COUNTRY_TRACE_PREFIX,
+            _trace_field_meta(trace_field),
+            (typed_value or "")[:_COUNTRY_TRACE_TEXT_LIMIT],
+        )
     react_controls.wait_visible_options(page)
+    if trace:
+        option_count = _trace_option_count(page)
+        live_options = _trace_live_options(page)
+        listbox_visible_count, listbox_summaries = _trace_listbox_summary(page)
+        exact_match = any(
+            _trace_normalize(str(item["text"])) == _trace_normalize(value) for item in live_options
+        )
+        logger.info(
+            "%s stage=menu %s option_count=%d live=%s listbox_visible=%d listbox=%s exact_match=%s "
+            "locator_strategy=%s",
+            _COUNTRY_TRACE_PREFIX,
+            _trace_field_meta(trace_field),
+            option_count,
+            live_options,
+            listbox_visible_count,
+            listbox_summaries,
+            exact_match,
+            "get_by_role(option,visible)/locator([role=option],exact)",
+        )
     option = react_controls.matching_option(page, value)
     matched_value = value
     if option is None:
@@ -1418,26 +1630,94 @@ def _fill_combobox(page: Page, locator: Locator, value: str) -> bool:
         if head and head.lower() != value.strip().lower():
             option = react_controls.matching_option(page, head)
             matched_value = head
+    if trace:
+        logger.info(
+            "%s stage=match %s found=%s matched_value=%r",
+            _COUNTRY_TRACE_PREFIX,
+            _trace_field_meta(trace_field),
+            option is not None,
+            matched_value[:_COUNTRY_TRACE_TEXT_LIMIT],
+        )
     if option is None:
         _dismiss_overlays(page)
+        _clear_combobox_input(locator)
+        if trace:
+            try:
+                no_match_readback = react_controls.read_selected_label(page, locator)
+            except PlaywrightError:
+                no_match_readback = None
+            logger.info(
+                "%s stage=final %s committed=False readback=%r",
+                _COUNTRY_TRACE_PREFIX,
+                _trace_field_meta(trace_field),
+                (no_match_readback or "")[:_COUNTRY_TRACE_TEXT_LIMIT] or None,
+            )
         return False
     for _click_attempt in range(2):
+        click_ok = True
+        click_exc_name: str | None = None
         try:
             option.click(timeout=3_000)
-        except PlaywrightError:
+        except PlaywrightError as exc1:
             try:
                 option.click(force=True, timeout=3_000)
-            except PlaywrightError:
-                break
+            except PlaywrightError as exc2:
+                click_ok = False
+                click_exc_name = f"{type(exc1).__name__},force:{type(exc2).__name__}"
+            else:
+                click_exc_name = f"{type(exc1).__name__},force_recovered"
+        if trace:
+            logger.info(
+                "%s stage=click attempt=%d %s ok=%s exception=%s",
+                _COUNTRY_TRACE_PREFIX,
+                _click_attempt,
+                _trace_field_meta(trace_field),
+                click_ok,
+                click_exc_name,
+            )
+        if not click_ok:
+            break
+        if trace:
+            state = _trace_control_state(page, locator)
+            logger.info(
+                "%s stage=post_click attempt=%d %s state=%s",
+                _COUNTRY_TRACE_PREFIX,
+                _click_attempt,
+                _trace_field_meta(trace_field),
+                state,
+            )
         # A searchable combobox can filter its live options down to a match
         # while typing without that typing itself committing a selection,
         # and a freshly filtered option's first click can be swallowed --
         # the click above must actually persist before this counts as a
         # success, or the field can silently revert to its placeholder.
         if react_controls.wait_for_selected_label(page, locator, matched_value):
+            if trace:
+                try:
+                    success_readback = react_controls.read_selected_label(page, locator)
+                except PlaywrightError:
+                    success_readback = None
+                logger.info(
+                    "%s stage=final %s committed=True readback=%r",
+                    _COUNTRY_TRACE_PREFIX,
+                    _trace_field_meta(trace_field),
+                    (success_readback or "")[:_COUNTRY_TRACE_TEXT_LIMIT] or None,
+                )
             _dismiss_overlays(page)
             return True
     _dismiss_overlays(page)
+    _clear_combobox_input(locator)
+    if trace:
+        try:
+            final_readback = react_controls.read_selected_label(page, locator)
+        except PlaywrightError:
+            final_readback = None
+        logger.info(
+            "%s stage=final %s committed=False readback=%r",
+            _COUNTRY_TRACE_PREFIX,
+            _trace_field_meta(trace_field),
+            (final_readback or "")[:_COUNTRY_TRACE_TEXT_LIMIT] or None,
+        )
     return False
 
 

@@ -72,6 +72,7 @@ class _FakeElement:
         self.parent: _FakeElement | None = None
         self.children: list[_FakeElement] = []
         self.visible = True
+        self.value = ""
 
     def add_child(self, child: "_FakeElement") -> "_FakeElement":
         child.parent = self
@@ -157,7 +158,7 @@ class _FakeLocator:
 
     def input_value(self, timeout: int | None = None) -> str:
         _ = timeout
-        return ""
+        return self._elements[0].value if self._elements else ""
 
     def evaluate(self, script: str, arg: object = None) -> object:
         _ = arg
@@ -182,6 +183,7 @@ class _FakeLocator:
     def fill(self, value: str, timeout: int | None = None) -> None:
         _ = timeout
         for el in self._elements:
+            el.value = value
             on_fill = getattr(el, "_on_fill", None)
             if on_fill is not None:
                 on_fill(value)
@@ -684,3 +686,92 @@ def test_fill_combobox_fails_closed_without_pressing_enter_when_no_exact_option(
     assert ok is False
     assert page.single_value.text == ""
     assert "Enter" not in page.keyboard.presses
+
+
+# --- Read-back correctness fix: a failed `_fill_combobox` attempt must
+# never leave typed search text behind for `GreenhouseAdapter.read_back`
+# to report as a committed selection. This only reproduces against a DOM
+# shape where `react_controls._value_root` cannot resolve any ancestor
+# carrying `.select__control`/`.field`/`.iti` (so there is no dedicated
+# single-value node to fall back on) -- `_PortalComboboxPage` above has
+# such an ancestor and therefore always resolves a (possibly empty)
+# single-value node, which already reads back as `None` on its own and
+# never exercises the buggy raw-`input_value()` fallback this fix targets.
+
+
+class _BareInputComboboxPage:
+    """A country-shaped custom combobox whose markup the shared
+    `_value_root`/`_control_root` ancestor-class selectors cannot resolve
+    at all -- no `.select__control` (or `.field`/`.iti`) ancestor exists.
+    This is the shape that forces `react_controls.read_selected_label`
+    into its last-resort `locator.input_value()` fallback, which is
+    exactly the leftover-typed-text-as-selection bug being fixed.
+    """
+
+    def __init__(self, live_options: list[str]) -> None:
+        self.keyboard = _FakeKeyboard()
+        self.input = _FakeElement("input", elem_id="country")
+        self.menu = _FakeElement("div", role="listbox")
+        self.options: list[_FakeElement] = []
+        for text in live_options:
+            option = self.menu.add_child(_FakeElement("div", role="option", text=text))
+            option.visible = False
+            self.options.append(option)
+        self.root = _FakeElement("div")
+        self.root.add_child(self.input)
+        self.root.add_child(self.menu)
+
+        def _open(_el: _FakeElement = self.input) -> None:
+            for opt in self.options:
+                opt.visible = True
+
+        def _filter(value: str) -> None:
+            needle = value.strip().lower()
+            for opt in self.options:
+                opt.visible = not needle or needle in opt.text.lower()
+
+        self.input._on_click = _open  # type: ignore[attr-defined]
+        self.input._on_fill = _filter  # type: ignore[attr-defined]
+
+    def locator(self, selector: str) -> _FakeLocator:
+        match = re.fullmatch(r'\[id="([^"]+)"\]', selector)
+        if match:
+            target_id = match.group(1)
+            for el in self.root.subtree():
+                if el.elem_id == target_id:
+                    return _FakeLocator([el])
+            return _FakeLocator([])
+        return _FakeLocator(_select_descendants([self.root], selector))
+
+    def get_by_role(self, role: str) -> _FakeLocator:
+        return _FakeLocator([el for el in self.root.subtree() if el.role == role])
+
+    def wait_for_function(self, script: object, arg: object = None, timeout: int | None = None) -> None:
+        _ = script, arg, timeout
+        raise PlaywrightTimeoutError("fake page cannot evaluate page.wait_for_function")
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        _ = timeout
+
+
+def _country_field(element_id: str = "country") -> DiscoveredField:
+    return DiscoveredField(label="Country*", field_type="combobox", required=True, element_id=element_id)
+
+
+def test_fill_combobox_failure_clears_typed_text_so_read_back_never_returns_it() -> None:
+    """Regression for the read-back masquerade bug: when no live option
+    matches, `_fill_combobox` must fail closed *and* leave no typed search
+    text behind. Without the fix, `page.input.value` (and therefore
+    `GreenhouseAdapter.read_back`) would still hold "Uzbekistan" even
+    though nothing was ever selected.
+    """
+    page = _BareInputComboboxPage(["Ukraine", "United Kingdom"])
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "Uzbekistan")
+
+    assert ok is False
+    assert page.input.value == ""
+
+    adapter = GreenhouseAdapter()
+    assert adapter.read_back(page, _country_field()) is None
