@@ -87,3 +87,67 @@ def test_java_does_not_match_javascript_title() -> None:
     company = _company(role_title_keywords=["java"])
     assert passes_role_prefilter(_vacancy(title="JavaScript Engineer"), company) is False
     assert passes_role_prefilter(_vacancy(title="Java Engineer"), company) is True
+
+
+def test_above_seniority_titles_are_rejected_without_explicit_exclude() -> None:
+    company = _company(role_title_keywords=["software engineer", "backend"])
+    cases = (
+        "Staff Software Engineer",
+        "Principal Engineer",
+        "Staff Backend Engineer",
+    )
+    for title in cases:
+        assert passes_role_prefilter(_vacancy(title=title), company) is False, title
+
+
+def test_above_seniority_titles_are_rejected_with_empty_include_keywords() -> None:
+    company = _company(role_keywords=[], role_title_keywords=[])
+    cases = (
+        "Staff Software Engineer",
+        "Senior Staff Software Engineer",
+        "Staff Backend Engineer",
+        "Staff Engineer, Backend",
+        "Principal Software Engineer",
+        "Principal Backend Engineer",
+        "Senior Principal Engineer",
+    )
+    for title in cases:
+        assert passes_role_prefilter(_vacancy(title=title), company) is False, title
+
+
+def test_distinguished_and_fellow_titles_are_outside_this_gate() -> None:
+    company = _company(role_title_keywords=[])
+    assert passes_role_prefilter(_vacancy(title="Distinguished Engineer"), company) is True
+    assert passes_role_prefilter(_vacancy(title="Fellow Engineer"), company) is True
+
+
+def test_above_seniority_rejection_examines_title_only() -> None:
+    company = _company(role_title_keywords=["software engineer", "backend"])
+    vacancy = _vacancy(
+        title="Senior Software Engineer",
+        description="Reports to a Staff Engineer and works with Principal architects.",
+    )
+    assert passes_role_prefilter(vacancy, company) is True
+
+
+def test_near_substring_seniority_words_do_not_match() -> None:
+    company = _company(role_title_keywords=["software engineer", "backend"])
+    assert passes_role_prefilter(_vacancy(title="Staffing Software Engineer"), company) is True
+    assert passes_role_prefilter(_vacancy(title="Principality Backend Engineer"), company) is True
+
+
+def test_target_seniority_titles_still_pass() -> None:
+    company = _company(role_title_keywords=["software engineer", "backend", "lead", "engineering manager"])
+    cases = (
+        "Senior Software Engineer",
+        "Senior Backend Engineer",
+        "Lead Engineer",
+        "Tech Lead",
+    )
+    for title in cases:
+        assert passes_role_prefilter(_vacancy(title=title), company) is True, title
+
+
+def test_engineering_manager_still_excluded_by_default_list() -> None:
+    company = _company(role_title_keywords=["engineering manager"])
+    assert passes_role_prefilter(_vacancy(title="Engineering Manager"), company) is False

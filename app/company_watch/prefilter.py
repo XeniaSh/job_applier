@@ -4,6 +4,9 @@ import re
 
 from app.collectors.vacancy_collector import NormalizedVacancy
 from app.company_watch.models import TargetCompany
+from app.title_rules import matched_whole_words, normalize_title
+
+ABOVE_SENIORITY_TITLE_MARKERS: tuple[str, ...] = ("staff", "principal")
 
 DEFAULT_EXCLUDE_TITLE_KEYWORDS: tuple[str, ...] = (
     "sales",
@@ -71,6 +74,8 @@ def exclude_title_keywords(company: TargetCompany) -> list[str]:
 
 def passes_role_prefilter(vacancy: NormalizedVacancy, company: TargetCompany) -> bool:
     title = vacancy.title
+    if matched_whole_words(normalize_title(title), ABOVE_SENIORITY_TITLE_MARKERS):
+        return False
     if any_title_keyword_matches(title, exclude_title_keywords(company)):
         return False
     include = include_title_keywords(company)
