@@ -6,6 +6,7 @@ from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE
 from app.application.autofill.questions import (
     AGE_DECLINE_INTENT,
+    LLM_FORBIDDEN_KINDS,
     SENSITIVE_DECLINE_INTENT,
     QuestionKind,
     map_question,
@@ -2574,3 +2575,507 @@ def test_nationality_question_never_substitutes_residence_or_work_authorization(
     assert mapped.kind is QuestionKind.NATIONALITY
     assert mapped.fillable is False
     assert mapped.value is None
+
+
+# Narrowly recognized Greenhouse sanctions/export-control checkbox family: the
+# full observed option set is a citizen/permanent-resident-of-embargoed-
+# countries option, an ordinary-resident-of-those-countries-or-Ukraine
+# option, a compound "ordinarily a resident of Russia or Belarus and not
+# willing to relocate..." option, and a "None of the above" option, plus a
+# dependent follow-up "Not applicable" confirmation in a separate group. Each
+# checkbox option is discovered as its own field (label=option text,
+# context=shared group text). Group recognition requires evidence of all
+# four sibling options, so the context below always carries the full set.
+_SANCTIONS_GROUP_CONTEXT = (
+    "Please confirm whether any of the below applies to you. Select all that apply. "
+    "Citizen or permanent resident of Cuba, Iran, North Korea, or Syria. "
+    "Ordinarily a resident of Cuba, Iran, North Korea, Syria, or specified regions of Ukraine. "
+    "Ordinarily a resident of Russia or Belarus and not willing to relocate for a Databricks "
+    "role. None of the above."
+)
+_SANCTIONS_CITIZEN_PERMANENT_RESIDENT_OPTION_LABEL = (
+    "Citizen or permanent resident of Cuba, Iran, North Korea, or Syria"
+)
+_SANCTIONS_ORDINARY_RESIDENT_EMBARGOED_OPTION_LABEL = (
+    "Ordinarily a resident of Cuba, Iran, North Korea, Syria, or specified regions of Ukraine"
+)
+_SANCTIONS_COMPOUND_OPTION_LABEL = (
+    "Ordinarily a resident of Russia or Belarus and not willing to relocate for a Databricks role"
+)
+_SANCTIONS_FOLLOWUP_LABEL = "Not applicable (i.e., I selected 'none of the above' for the prior question)"
+
+
+def test_sanctions_compound_residence_relocation_option_is_definitively_false_when_willing() -> None:
+    """The compound option previously matched generic relocation text and was
+    auto-checked whenever the profile's relocation willingness was True. It
+    must instead resolve to a deterministic False: willing=True makes "not
+    willing to relocate" false, so the AND-compound is false regardless of
+    the (never inferred) ordinary-residence fact.
+    """
+    profile = _profile(application_policy={"relocation": {"willing": True}})
+    mapped = map_question(
+        DiscoveredField(
+            label=_SANCTIONS_COMPOUND_OPTION_LABEL,
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+    assert mapped.fillable is True
+    assert mapped.value is False
+
+
+def test_sanctions_compound_residence_relocation_option_never_auto_checked() -> None:
+    """No explicit ordinary-residence-in-Russia/Belarus fact ever exists on
+    the profile, so this compound option must never resolve to True from
+    citizenship, identity country, or current location -- regardless of
+    relocation willingness.
+    """
+    for willing in (False, None):
+        overrides = {} if willing is None else {"application_policy": {"relocation": {"willing": willing}}}
+        profile = _profile(**overrides)
+        mapped = map_question(
+            DiscoveredField(
+                label=_SANCTIONS_COMPOUND_OPTION_LABEL,
+                field_type="checkbox",
+                context=_SANCTIONS_GROUP_CONTEXT,
+                required=True,
+            ),
+            profile,
+        )
+        assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+        assert mapped.fillable is False
+        assert mapped.value is None
+
+
+@pytest.mark.parametrize(
+    "option_label",
+    [
+        _SANCTIONS_CITIZEN_PERMANENT_RESIDENT_OPTION_LABEL,
+        _SANCTIONS_ORDINARY_RESIDENT_EMBARGOED_OPTION_LABEL,
+    ],
+)
+def test_sanctions_other_group_options_fail_closed_regardless_of_relocation_willingness(
+    option_label: str,
+) -> None:
+    """Options 1 and 2 (citizen/permanent resident of embargoed countries;
+    ordinary resident of those countries or Ukraine) never mention relocation
+    in their own label, but the shared group `context` does (from the
+    Russia/Belarus sibling option), so before the narrow group guard these
+    fell through to ordinary `_is_relocation` and got auto-checked whenever
+    the profile's relocation willingness was True. They must instead fail
+    closed unconditionally: this profile has no citizenship/residence fact
+    for embargoed countries at all.
+    """
+    for willing in (True, False, None):
+        overrides = {} if willing is None else {"application_policy": {"relocation": {"willing": willing}}}
+        profile = _profile(**overrides)
+        mapped = map_question(
+            DiscoveredField(
+                label=option_label,
+                field_type="checkbox",
+                context=_SANCTIONS_GROUP_CONTEXT,
+                required=True,
+            ),
+            profile,
+        )
+        assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+        assert mapped.fillable is False
+        assert mapped.value is None
+
+
+@pytest.mark.parametrize(
+    "option_label",
+    [
+        _SANCTIONS_CITIZEN_PERMANENT_RESIDENT_OPTION_LABEL,
+        _SANCTIONS_ORDINARY_RESIDENT_EMBARGOED_OPTION_LABEL,
+    ],
+)
+def test_sanctions_group_not_recognized_without_full_observed_option_evidence(
+    option_label: str,
+) -> None:
+    """A context that only mentions Russia/Belarus (missing the other two
+    named-country options) must not be recognized as the full sanctions
+    group. Options 1 and 2's own labels carry no "relocate" text themselves,
+    but the shared (incomplete) group context does -- from the Russia/
+    Belarus sibling option's own text -- so before the narrow own-label
+    guard this leaked into generic `_is_relocation` matching and got the
+    option auto-checked from relocation willingness alone. Each option must
+    instead be guarded from its own label regardless of group completeness,
+    and must never be auto-filled: this profile has no citizenship/residence
+    fact for embargoed countries at all. (The compound Russia/Belarus option
+    itself is guarded the same way -- see
+    `test_sanctions_compound_option_guarded_even_with_incomplete_group_context`.)
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label=option_label,
+            field_type="checkbox",
+            context=(
+                "Ordinarily a resident of Russia or Belarus and not willing to relocate "
+                "outside of Russia or Belarus. None of the above."
+            ),
+            required=True,
+        ),
+        _profile(application_policy={"relocation": {"willing": True}}),
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_sanctions_compound_option_guarded_even_with_incomplete_group_context() -> None:
+    """The compound Russia/Belarus option's own label unambiguously carries
+    "relocate" text. If discovery ever yields incomplete sibling group
+    context (missing the other two named-country options and/or "None of
+    the above"), this option must still be guarded from its own label alone
+    -- never fall through to generic `_is_relocation` matching and get
+    auto-checked from relocation willingness alone.
+    """
+    incomplete_context = (
+        "Ordinarily a resident of Russia or Belarus and not willing to relocate "
+        "outside of Russia or Belarus."
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label=_SANCTIONS_COMPOUND_OPTION_LABEL,
+            field_type="checkbox",
+            context=incomplete_context,
+            required=True,
+        ),
+        _profile(application_policy={"relocation": {"willing": True}}),
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+    assert mapped.fillable is True
+    assert mapped.value is False
+
+
+def test_sanctions_or_connector_variant_never_resolved_from_relocation_willingness() -> None:
+    """A Russia/Belarus-residence-and-relocation option joined by OR (or any
+    connector other than the exact observed AND) is not the AND-compound: an
+    OR-joined statement is true whenever either clause holds, so relocation
+    willingness=True does not make it false the way it does for the AND
+    conjunction (`test_sanctions_compound_residence_relocation_option_is_definitively_false_when_willing`).
+    It must stay unfillable/unknown rather than being resolved either way
+    from willingness alone, and must not fall through to generic
+    `_is_relocation` matching.
+    """
+    or_connector_label = "Ordinarily a resident of Russia or Belarus OR not willing to relocate for a role"
+    for willing in (True, False, None):
+        overrides = {} if willing is None else {"application_policy": {"relocation": {"willing": willing}}}
+        profile = _profile(**overrides)
+        mapped = map_question(
+            DiscoveredField(
+                label=or_connector_label,
+                field_type="checkbox",
+                context=or_connector_label,
+                required=True,
+            ),
+            profile,
+        )
+        assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+        assert mapped.fillable is False
+        assert mapped.value is None
+
+
+def test_sanctions_compound_option_with_exact_observed_and_conjunction_resolves() -> None:
+    """Regression for the exact observed shape (compound AND clause followed
+    only by the generic "for a <company> role" suffix, nothing else): it must
+    still resolve deterministically False when willing=True.
+    """
+    profile = _profile(application_policy={"relocation": {"willing": True}})
+    mapped = map_question(
+        DiscoveredField(
+            label=_SANCTIONS_COMPOUND_OPTION_LABEL,
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+    assert mapped.fillable is True
+    assert mapped.value is False
+
+
+def test_sanctions_compound_option_with_trailing_or_clause_not_resolved_from_willingness() -> None:
+    """The strict AND regex previously matched as a prefix search, so a label
+    with an extra OR-joined clause appended after the recognized AND+suffix
+    shape (e.g. "...and not willing to relocate for a Databricks role OR
+    [another true condition]") still matched it and was resolved False from
+    willing=True alone. Appending an OR clause turns the whole statement into
+    a disjunction, so it is no longer true only when both the residence and
+    relocation clauses hold -- the trailing clause could independently make
+    it true regardless of relocation willingness. It must fail closed instead
+    of being resolved either way.
+
+    The trailing clause used here ("...OR otherwise subject to export control
+    restrictions") also independently trips the earlier, more general
+    unsafe-legal-acknowledgement guard, which runs before sanctions-specific
+    matching and fails closed with QuestionKind.UNKNOWN rather than
+    QuestionKind.SANCTIONS_RESIDENCE_DECLARATION. Either guard rejecting is
+    an acceptable, safe outcome, so this asserts the safety property --
+    never fillable, never a value -- rather than pinning which guard caught
+    it.
+    """
+    trailing_or_label = (
+        "Ordinarily a resident of Russia or Belarus and not willing to relocate for a "
+        "Databricks role OR otherwise subject to export control restrictions"
+    )
+    for willing in (True, False, None):
+        overrides = {} if willing is None else {"application_policy": {"relocation": {"willing": willing}}}
+        profile = _profile(**overrides)
+        mapped = map_question(
+            DiscoveredField(
+                label=trailing_or_label,
+                field_type="checkbox",
+                context=trailing_or_label,
+                required=True,
+            ),
+            profile,
+        )
+        assert mapped.fillable is False
+        assert mapped.value is None
+
+
+def test_sanctions_none_of_the_above_stays_manual_without_explicit_override() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="None of the above",
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        _profile(),
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_sanctions_none_of_the_above_fills_from_explicit_question_override() -> None:
+    profile = _profile(
+        application_policy={
+            "question_overrides": [
+                {"question_contains": ["russia", "belarus"], "answer": "None of the above"},
+            ],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="None of the above",
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE
+    assert mapped.fillable is True
+    assert mapped.value is True
+
+
+def test_sanctions_none_of_the_above_requires_unambiguous_override_text() -> None:
+    """An override that names this question but answers something other than
+    'None of the above' must never be coerced into checking this option."""
+    profile = _profile(
+        application_policy={
+            "question_overrides": [
+                {"question_contains": ["russia", "belarus"], "answer": "Prefer not to answer"},
+            ],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="None of the above",
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_sanctions_none_of_the_above_rejects_ambiguous_boolean_override() -> None:
+    """A bare `answer: True` override is ambiguous -- it names the sanctions
+    question but does not say which option it affirms -- so it must never be
+    treated as confirmation of 'None of the above' specifically. Only an
+    explicit exact-normalized 'None of the above' answer string counts.
+    """
+    profile = _profile(
+        application_policy={
+            "question_overrides": [
+                {"question_contains": ["russia", "belarus"], "answer": True},
+            ],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="None of the above",
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_unrelated_none_of_the_above_checkbox_is_not_scoped_to_sanctions_group() -> None:
+    """A 'None of the above' checkbox outside the Russia/Belarus sanctions
+    group (e.g. a tech-stack question) must never be swept into the narrow
+    sanctions guard."""
+    mapped = map_question(
+        DiscoveredField(
+            label="None of the above",
+            field_type="checkbox",
+            context="Which of these technologies do you use? Python Go Rust None of the above.",
+            required=False,
+        ),
+        _profile(),
+    )
+    assert mapped.kind is not QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE
+
+
+def test_sanctions_none_of_the_above_stays_manual_with_incomplete_group_context() -> None:
+    """A context that only carries the Russia/Belarus ordinary-residence-and-
+    not-willing-to-relocate mention (missing both embargoed-country
+    declaration options) must not be recognized as the full sanctions group,
+    so before this guard "None of the above" fell through to generic
+    `_is_relocation` matching and got auto-checked purely from relocation
+    willingness=True. It must instead stay manual/unfillable even though the
+    label is an exact 'None of the above' match and even with willing=True --
+    an incomplete group can never be resolved, with or without an override.
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label="None of the above",
+            field_type="checkbox",
+            context=(
+                "Ordinarily a resident of Russia or Belarus and not willing to relocate "
+                "outside of Russia or Belarus. None of the above."
+            ),
+            required=True,
+        ),
+        _profile(application_policy={"relocation": {"willing": True}}),
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_sanctions_full_observed_group_classifies_all_four_options() -> None:
+    """End-to-end check against the full observed group prompt: all four
+    sibling options -- the two named-country declarations, the compound
+    Russia/Belarus option, and "None of the above" -- are recognized and
+    classified as expected in the same group context, with a profile that
+    has no residence override.
+    """
+    profile = _profile(application_policy={"relocation": {"willing": True}})
+
+    citizen_mapped = map_question(
+        DiscoveredField(
+            label=_SANCTIONS_CITIZEN_PERMANENT_RESIDENT_OPTION_LABEL,
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        profile,
+    )
+    assert citizen_mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+    assert citizen_mapped.fillable is False
+    assert citizen_mapped.value is None
+
+    ordinary_resident_mapped = map_question(
+        DiscoveredField(
+            label=_SANCTIONS_ORDINARY_RESIDENT_EMBARGOED_OPTION_LABEL,
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        profile,
+    )
+    assert ordinary_resident_mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+    assert ordinary_resident_mapped.fillable is False
+    assert ordinary_resident_mapped.value is None
+
+    compound_mapped = map_question(
+        DiscoveredField(
+            label=_SANCTIONS_COMPOUND_OPTION_LABEL,
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        profile,
+    )
+    assert compound_mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_DECLARATION
+    assert compound_mapped.fillable is True
+    assert compound_mapped.value is False
+
+    none_mapped = map_question(
+        DiscoveredField(
+            label="None of the above",
+            field_type="checkbox",
+            context=_SANCTIONS_GROUP_CONTEXT,
+            required=True,
+        ),
+        profile,
+    )
+    assert none_mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE
+    assert none_mapped.fillable is False
+    assert none_mapped.value is None
+
+
+def test_sanctions_followup_not_applicable_never_fillable_from_mapping_alone() -> None:
+    """The dependent follow-up depends on cross-field run state (the primary
+    group's 'None of the above' having been confirmed checked earlier in the
+    same service run) that `map_question` cannot see; it must always come
+    back unfillable here -- the service layer is responsible for promoting
+    it. See `test_service.py` for the stateful confirmation regression.
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label=_SANCTIONS_FOLLOWUP_LABEL,
+            field_type="checkbox",
+            context="Please also confirm the following.",
+            required=True,
+        ),
+        _profile(application_policy={"relocation": {"willing": True}}),
+    )
+    assert mapped.kind is QuestionKind.SANCTIONS_RESIDENCE_CONFIRMATION
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_sanctions_followup_decoy_option_never_matches() -> None:
+    """'None of these apply to me' is a decoy live option in the follow-up
+    group and must never be treated as the wanted 'Not applicable' choice."""
+    mapped = map_question(
+        DiscoveredField(
+            label="None of these apply to me",
+            field_type="checkbox",
+            context="Please also confirm the following.",
+            required=True,
+        ),
+        _profile(),
+    )
+    assert mapped.kind is not QuestionKind.SANCTIONS_RESIDENCE_CONFIRMATION
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        QuestionKind.SANCTIONS_RESIDENCE_DECLARATION,
+        QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE,
+        QuestionKind.SANCTIONS_RESIDENCE_CONFIRMATION,
+    ],
+)
+def test_sanctions_kinds_are_llm_forbidden(kind: QuestionKind) -> None:
+    assert kind in LLM_FORBIDDEN_KINDS

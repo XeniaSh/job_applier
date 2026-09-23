@@ -256,6 +256,7 @@ class AutofillService:
         warnings: list[str] = []
         resume_uploaded = False
         cover_letter_filled = False
+        sanctions_none_of_above_confirmed = False
 
         resume_items: list[ClassifiedField] = []
 
@@ -283,9 +284,26 @@ class AutofillService:
             if item.kind is QuestionKind.RESUME and item.fill:
                 resume_items.append(item)
                 continue
+            if (
+                item.kind is QuestionKind.SANCTIONS_RESIDENCE_CONFIRMATION
+                and not item.fill
+                and sanctions_none_of_above_confirmed
+            ):
+                # Only promoted once the primary group's "None of the above"
+                # was itself filled and read back as checked earlier in this
+                # same run -- never from stale/global state.
+                item = replace(
+                    item,
+                    value=True,
+                    fill=True,
+                    classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                )
+                record = _field_result(item)
             if item.fill:
                 if _fill_and_confirm(adapter, page, item):
                     filled.append(record)
+                    if item.kind is QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE:
+                        sanctions_none_of_above_confirmed = True
                     if item.kind is QuestionKind.COVER_LETTER:
                         cover_letter_filled = True
                     if item.generated:

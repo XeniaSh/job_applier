@@ -56,6 +56,56 @@ _GENERIC_COUNTRY_RELATIVE_WORK_AUTH_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SANCTIONS_RESIDENT_RELOCATE_MENTION_RE = re.compile(
+    r"(?:i\s*(?:am|'m)\s+)?ordinarily\s+a\s+resident\s+of\s+"
+    r"(?:russia\s+or\s+belarus|belarus\s+or\s+russia)\b"
+    r".{0,200}?\bnot\s+willing\s+to\s+relocate\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_SANCTIONS_RESIDENT_NOT_RELOCATE_OPTION_RE = re.compile(
+    r"^(?:i\s*(?:am|'m)\s+)?ordinarily\s+a\s+resident\s+of\s+"
+    r"(?:russia\s+or\s+belarus|belarus\s+or\s+russia)"
+    r"\s+and\s+not\s+willing\s+to\s+relocate\b"
+    r"(?:\s+for\s+(?:a|an|this|the)\s+.+?\s+role)?"
+    r"\s*[.?]?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SANCTIONS_CITIZEN_PERMANENT_RESIDENT_EMBARGOED_RE = re.compile(
+    r"citizen\s+or\s+permanent\s+resident\s+of\s+"
+    r"cuba,?\s+iran,?\s+north\s+korea,?\s+(?:or\s+)?syria\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_SANCTIONS_ORDINARY_RESIDENT_EMBARGOED_OR_UKRAINE_RE = re.compile(
+    r"(?:i\s*(?:am|'m)\s+)?ordinarily\s+a\s+resident\s+of\s+"
+    r"cuba,?\s+iran,?\s+north\s+korea,?\s+syria,?\s+or\s+"
+    r"(?:specified\s+regions\s+of\s+)?ukraine\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_SANCTIONS_NONE_OF_THE_ABOVE_LABEL = "None of the above"
+_SANCTIONS_FOLLOWUP_NOT_APPLICABLE_LABEL = (
+    "Not applicable (i.e., I selected none of the above for the prior question)"
+)
+
+
+def _is_recognized_sanctions_group(context: str) -> bool:
+    """Bounded evidence that `context` is the observed Greenhouse sanctions/
+    export-control checkbox fieldset: all four known sibling options --
+    citizen/permanent-resident-of-embargoed-countries, ordinary-resident-of-
+    those-countries-or-Ukraine, the Russia/Belarus-and-unwilling-to-relocate
+    compound, and "None of the above" -- must be present in the observed
+    group prompt. Deliberately strict: a group that only mentions one or two
+    of these (e.g. an unrelated legal/checkbox group that happens to name a
+    country) must never be swept into sanctions-only semantics.
+    """
+    lowered = " ".join(context.split()).lower()
+    return (
+        _SANCTIONS_CITIZEN_PERMANENT_RESIDENT_EMBARGOED_RE.search(lowered) is not None
+        and _SANCTIONS_ORDINARY_RESIDENT_EMBARGOED_OR_UKRAINE_RE.search(lowered) is not None
+        and _SANCTIONS_RESIDENT_RELOCATE_MENTION_RE.search(lowered) is not None
+        and _SANCTIONS_NONE_OF_THE_ABOVE_LABEL.lower() in lowered
+    )
+
+
 QuestionValue = str | bool | list[str] | None
 
 
@@ -106,6 +156,9 @@ class QuestionKind(StrEnum):
     AGE = "age"
     NATIONALITY = "nationality"
     SENSITIVE = "sensitive"
+    SANCTIONS_RESIDENCE_DECLARATION = "sanctions_residence_declaration"
+    SANCTIONS_RESIDENCE_NONE_OF_ABOVE = "sanctions_residence_none_of_above"
+    SANCTIONS_RESIDENCE_CONFIRMATION = "sanctions_residence_confirmation"
     UNKNOWN = "unknown"
 
 
@@ -115,6 +168,9 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.WORK_AUTHORIZATION,
         QuestionKind.SALARY,
         QuestionKind.SENSITIVE,
+        QuestionKind.SANCTIONS_RESIDENCE_DECLARATION,
+        QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE,
+        QuestionKind.SANCTIONS_RESIDENCE_CONFIRMATION,
         QuestionKind.EMPLOYEE_RELATIONSHIP,
         QuestionKind.EMPLOYEE_RELATIONSHIP_DETAILS,
         QuestionKind.PRIOR_AFFILIATION,
@@ -541,6 +597,202 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             kind=QuestionKind.FIELD_OF_INTEREST,
             value=value,
             fillable=bool(value),
+        )
+
+    # Narrowly recognized Greenhouse sanctions/export-control checkbox family
+    # (each option is discovered as its own checkbox field whose label is the
+    # option text and whose context is the shared group text). This guard
+    # must run before ordinary relocation/citizenship matching below -- the
+    # shared group context contains "relocate" (from the Russia/Belarus
+    # sibling option's own text), which would otherwise misroute every other
+    # sibling option in the group as a plain relocation-willingness question
+    # -- and before question overrides / LLM generation, neither of which may
+    # answer a sanctions/legal declaration. Every option is then classified
+    # against its own label only (never the merged label+context `text`,
+    # which carries every sibling option's text and would misclassify one
+    # option as another).
+    #
+    # The compound Russia/Belarus option, and the two named-country
+    # declaration options (citizen/permanent resident of embargoed
+    # countries; ordinary resident of those countries or Ukraine), are each
+    # guarded purely from their own label, regardless of whether the full
+    # sibling group is recognized: the shared group context contains
+    # "relocate" (leaked from the Russia/Belarus sibling's own text), so if
+    # discovery ever yields incomplete group context (e.g. a sibling
+    # option's context is missing or malformed), none of these three
+    # options may fall through to the generic `_is_relocation` matching
+    # below and be auto-checked from relocation willingness alone -- the
+    # AND-with-residence semantics for the compound option are still
+    # required. Only "None of the above" (and any option this guard does
+    # not specifically name) carries no such leakage risk in its own label,
+    # so it is recognized -- and fails closed -- only when the full observed
+    # group prompt is present (`_is_recognized_sanctions_group`); this keeps
+    # the guard from widening to arbitrary unrelated legal/checkbox
+    # questions.
+    if field.field_type == "checkbox":
+        option_label_text = " ".join(field.label.split()).lower()
+        if _SANCTIONS_CITIZEN_PERMANENT_RESIDENT_EMBARGOED_RE.search(
+            option_label_text
+        ) or _SANCTIONS_ORDINARY_RESIDENT_EMBARGOED_OR_UKRAINE_RE.search(option_label_text):
+            # Options 1 and 2 (citizen/permanent resident of embargoed
+            # countries; ordinary resident of those countries or Ukraine)
+            # never mention relocation in their own label, but the shared
+            # group `context` does (from the Russia/Belarus sibling option's
+            # own text). If discovery ever yields incomplete group context
+            # (e.g. a sibling option's context is missing or malformed),
+            # `_is_recognized_sanctions_group` below never fires, and these
+            # options must not be allowed to fall through to the generic
+            # `_is_relocation` matching further down and be auto-checked
+            # from relocation willingness alone. Guarded purely from each
+            # option's own label so this holds regardless of group
+            # completeness; this profile has no citizenship/residence fact
+            # for embargoed countries at all, so it fails closed
+            # unconditionally.
+            return MappedQuestion(
+                kind=QuestionKind.SANCTIONS_RESIDENCE_DECLARATION,
+                fillable=False,
+                unresolved_reason=(
+                    "sanctions/export-control declaration option requires an explicit profile "
+                    "fact this profile does not have; never inferred from citizenship, "
+                    "residence, or relocation willingness"
+                ),
+            )
+        if _SANCTIONS_RESIDENT_NOT_RELOCATE_OPTION_RE.search(option_label_text):
+            # AND semantics: true only if the candidate is both an ordinary
+            # resident of Russia/Belarus (never inferred from citizenship,
+            # identity country, or current location -- the profile has no
+            # explicit fact for this) and unwilling to relocate. With no
+            # residence fact, the only case this can be resolved
+            # deterministically is when relocation willingness is explicitly
+            # True: that alone makes "not willing to relocate" false, so the
+            # compound statement is false regardless of residence. Any other
+            # willingness state leaves the compound truth value unknown, so
+            # it must stay manual rather than guessing either way. This
+            # requires the exact observed AND conjunction between the
+            # residence and relocation clauses, end-anchored to the whole
+            # recognized option shape (bare, or with a generic trailing
+            # "for a <company> role" suffix) -- an OR (or any other
+            # connector), whether replacing the AND or appended after it as
+            # an extra clause, does not make "not willing to relocate" alone
+            # sufficient to resolve the statement, so it must not take this
+            # branch (see the mention-only guard below).
+            definitively_false = profile.relocation_willingness() is True
+            return MappedQuestion(
+                kind=QuestionKind.SANCTIONS_RESIDENCE_DECLARATION,
+                value=False if definitively_false else None,
+                fillable=definitively_false,
+                unresolved_reason=None
+                if definitively_false
+                else (
+                    "compound Russia/Belarus ordinary-residence-and-unwillingness-to-relocate "
+                    "declaration requires an explicit ordinary-residence fact this profile does "
+                    "not have; never inferred from citizenship, identity country, or current "
+                    "location"
+                ),
+            )
+        if _SANCTIONS_RESIDENT_RELOCATE_MENTION_RE.search(option_label_text):
+            # Recognizable as a Russia/Belarus-residence-and-relocation
+            # option, but not via the exact observed AND conjunction (e.g.
+            # an OR connector, or some other connector) -- the willing=True
+            # shortcut above does not apply, since an OR-joined statement is
+            # true whenever either clause holds, and the never-inferred
+            # residence clause could still make it true. This must not fall
+            # through to generic `_is_relocation` matching and be
+            # auto-checked from relocation willingness alone; fail closed.
+            return MappedQuestion(
+                kind=QuestionKind.SANCTIONS_RESIDENCE_DECLARATION,
+                fillable=False,
+                unresolved_reason=(
+                    "Russia/Belarus ordinary-residence-and-relocation declaration does not use "
+                    "the exact observed AND conjunction, so it cannot be resolved from relocation "
+                    "willingness alone; never inferred from citizenship, identity country, or "
+                    "current location"
+                ),
+            )
+    if field.field_type == "checkbox" and _is_recognized_sanctions_group(field.context):
+        if match_option_exact_normalized(_SANCTIONS_NONE_OF_THE_ABOVE_LABEL, [field.label]):
+            # Only an explicit exact-normalized 'None of the above' override
+            # string counts. A bare `answer: True` is ambiguous -- it could
+            # mean "yes, none of the above applies" or "yes" to whatever the
+            # question fragment matched -- so it must never be treated as
+            # confirmation of this specific option.
+            override = profile.question_override_answer(text)
+            confirmed_none = (
+                isinstance(override, str)
+                and match_option_exact_normalized(override, [field.label]) is not None
+            )
+            return MappedQuestion(
+                kind=QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE,
+                value=True if confirmed_none else None,
+                fillable=confirmed_none,
+                unresolved_reason=None
+                if confirmed_none
+                else (
+                    "sanctions residence/relocation group 'None of the above' requires an "
+                    "explicit application_policy.question_overrides answer of exactly "
+                    "'None of the above' for this question"
+                ),
+            )
+        # Any other sibling option in this recognized group -- the
+        # citizen/permanent-resident-of-embargoed-countries option, the
+        # ordinary-resident-of-those-countries-or-Ukraine option, or any
+        # option this guard does not specifically name -- is a sanctions/
+        # legal declaration this profile has no explicit fact for. Fail
+        # closed rather than falling through to generic relocation/
+        # citizenship semantics.
+        return MappedQuestion(
+            kind=QuestionKind.SANCTIONS_RESIDENCE_DECLARATION,
+            fillable=False,
+            unresolved_reason=(
+                "sanctions/export-control declaration option requires an explicit profile "
+                "fact this profile does not have; never inferred from citizenship, "
+                "residence, or relocation willingness"
+            ),
+        )
+
+    if (
+        field.field_type == "checkbox"
+        and match_option_exact_normalized(_SANCTIONS_NONE_OF_THE_ABOVE_LABEL, [field.label])
+        and _SANCTIONS_RESIDENT_RELOCATE_MENTION_RE.search(" ".join(field.context.split()).lower())
+    ):
+        # The group context carries the same recognized Russia/Belarus
+        # ordinary-residence-and-not-willing-to-relocate mention this module
+        # already guards on the compound option's own label, but the full
+        # sibling group (both embargoed-country declaration options) is not
+        # present, so `_is_recognized_sanctions_group` above did not fire.
+        # Falling through to generic `is_located_or_relocate_choice` /
+        # `_is_relocation` matching below would auto-check this "None of the
+        # above" option from relocation willingness alone -- exactly the
+        # ambiguous case the fully-recognized-group branch above guards
+        # against by requiring an explicit override. An incomplete group must
+        # stay manual unconditionally: there is no override that can make a
+        # partially-observed group safe to resolve.
+        return MappedQuestion(
+            kind=QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE,
+            fillable=False,
+            unresolved_reason=(
+                "sanctions residence/relocation group context is incomplete (missing the "
+                "citizen/permanent-resident and ordinary-resident embargoed-country "
+                "declaration options), so 'None of the above' cannot be confirmed even "
+                "with an explicit application_policy.question_overrides answer"
+            ),
+        )
+
+    if field.field_type == "checkbox" and match_option_exact_normalized(
+        _SANCTIONS_FOLLOWUP_NOT_APPLICABLE_LABEL, [field.label]
+    ):
+        # Never fillable from mapping alone: this depends on the primary
+        # group's "None of the above" having been confirmed checked earlier
+        # in the same service run -- state `map_question` cannot see. The
+        # service layer promotes this to fillable once it has observed that
+        # confirmation; see `_fill_open_page`.
+        return MappedQuestion(
+            kind=QuestionKind.SANCTIONS_RESIDENCE_CONFIRMATION,
+            fillable=False,
+            unresolved_reason=(
+                "sanctions follow-up confirmation requires the primary group's "
+                "'None of the above' to be confirmed checked earlier in this run"
+            ),
         )
 
     if is_located_or_relocate_choice(text):

@@ -1262,3 +1262,203 @@ def test_service_adyen_combined_visa_relocation_textarea_stays_unresolved_requir
     unresolved_labels = [item.label for item in result.unresolved_required_fields]
     assert unresolved_labels.count(_ADYEN_VISA_RELOCATION_LABEL) == 1
     assert not any(item.label == _ADYEN_VISA_RELOCATION_LABEL for item in result.filled_fields)
+
+
+# Narrowly recognized Greenhouse sanctions/export-control checkbox family: a
+# primary group's "None of the above" option and a dependent follow-up
+# "Not applicable" confirmation, discovered as separate checkbox fields
+# (label=option text, context=shared group text), same shape as the
+# _checkbox_question_meta/_checkbox_display_label discovery in greenhouse.py.
+# Group recognition requires evidence of the full observed option set (both
+# named-country options plus the Russia/Belarus compound and "None of the
+# above"), so the context below always carries all four.
+_SANCTIONS_GROUP_CONTEXT = (
+    "Please confirm whether any of the below applies to you. Select all that apply. "
+    "Citizen or permanent resident of Cuba, Iran, North Korea, or Syria. "
+    "Ordinarily a resident of Cuba, Iran, North Korea, Syria, or specified regions of Ukraine. "
+    "Ordinarily a resident of Russia or Belarus and not willing to relocate for a Databricks "
+    "role. None of the above."
+)
+_SANCTIONS_NONE_OF_ABOVE_LABEL = "None of the above"
+_SANCTIONS_FOLLOWUP_LABEL = "Not applicable (i.e., I selected 'none of the above' for the prior question)"
+
+
+def _profile_with_question_overrides(overrides: list[dict[str, object]]) -> CandidateProfile:
+    return CandidateProfile.model_validate(
+        {
+            "identity": {
+                "first_name": "Ada",
+                "last_name": "Example",
+                "email": "ada.example@example.test",
+                "phone": "+15555550100",
+            },
+            "application_files": {"default_resume": "tests/fixtures/autofill/resume.txt"},
+            "application_policy": {"question_overrides": overrides},
+        }
+    )
+
+
+class _SanctionsGroupAdapter:
+    """Discovers the primary group's "None of the above" checkbox and the
+    dependent follow-up "Not applicable" checkbox, and reports every
+    fill_field call so the test can assert the follow-up is only ever
+    attempted after the primary is confirmed checked -- never from stale or
+    global state.
+    """
+
+    def __init__(self) -> None:
+        self.fill_calls: list[tuple[str, object, object]] = []
+
+    def detect_challenge(self, page: object) -> str | None:
+        _ = page
+        return None
+
+    def recognize(self, page: object) -> bool:
+        _ = page
+        return True
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(
+                label=_SANCTIONS_NONE_OF_ABOVE_LABEL,
+                field_type="checkbox",
+                context=_SANCTIONS_GROUP_CONTEXT,
+                required=True,
+                element_id="group_none_of_above",
+            ),
+            DiscoveredField(
+                label=_SANCTIONS_FOLLOWUP_LABEL,
+                field_type="checkbox",
+                context="Please also confirm the following.",
+                required=True,
+                element_id="group_followup_not_applicable",
+            ),
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        self.fill_calls.append((classified.field.element_id, classified.fill, classified.value))
+        return bool(getattr(classified, "fill", False))
+
+    def upload_resume(self, page: object, resume_path: object, field: object) -> bool:
+        _ = page, resume_path, field
+        return False
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        if field.element_id in {"group_none_of_above", "group_followup_not_applicable"}:
+            return "true"
+        return None
+
+
+def test_sanctions_followup_fills_only_after_primary_none_of_above_confirmed() -> None:
+    """With an explicit question_overrides declaration unambiguously selecting
+    'None of the above' for the primary group, the primary checkbox is
+    confirmed checked first, and only then does the dependent follow-up
+    'Not applicable' checkbox get filled -- in this same run, never from
+    stale/global state.
+    """
+    adapter = _SanctionsGroupAdapter()
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=lambda: _profile_with_question_overrides(
+            [{"question_contains": ["russia", "belarus"], "answer": "None of the above"}]
+        ),
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    filled_labels = [item.label for item in result.filled_fields]
+    assert _SANCTIONS_NONE_OF_ABOVE_LABEL in filled_labels
+    assert _SANCTIONS_FOLLOWUP_LABEL in filled_labels
+    # The primary must have been attempted (and confirmed) before the
+    # dependent follow-up was ever attempted with a truthy value.
+    none_of_above_index = next(
+        index for index, call in enumerate(adapter.fill_calls) if call[0] == "group_none_of_above"
+    )
+    followup_calls = [call for call in adapter.fill_calls if call[0] == "group_followup_not_applicable"]
+    assert followup_calls, "the follow-up checkbox must have been attempted"
+    followup_index = adapter.fill_calls.index(followup_calls[0])
+    assert none_of_above_index < followup_index
+    assert followup_calls[0][1] is True
+    assert followup_calls[0][2] is True
+
+
+def test_sanctions_followup_never_fills_without_confirmed_primary() -> None:
+    """Without an explicit override, the primary 'None of the above' stays
+    manual/unresolved -- so the dependent follow-up must never be filled
+    (and fill_field must never be attempted with a truthy value for it),
+    even though both checkboxes were discovered.
+    """
+    adapter = _SanctionsGroupAdapter()
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=lambda: _profile_with_question_overrides([]),
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    filled_labels = [item.label for item in result.filled_fields]
+    assert _SANCTIONS_NONE_OF_ABOVE_LABEL not in filled_labels
+    assert _SANCTIONS_FOLLOWUP_LABEL not in filled_labels
+    unresolved_labels = [item.label for item in result.unresolved_required_fields]
+    assert _SANCTIONS_NONE_OF_ABOVE_LABEL in unresolved_labels
+    assert _SANCTIONS_FOLLOWUP_LABEL in unresolved_labels
+    followup_calls = [call for call in adapter.fill_calls if call[0] == "group_followup_not_applicable"]
+    assert followup_calls == [], (
+        "fill_field must never be attempted for the follow-up when the primary was not confirmed"
+    )
+
+
+class _SanctionsGroupReadbackFailureAdapter(_SanctionsGroupAdapter):
+    """Same discovery as `_SanctionsGroupAdapter`, but the primary 'None of
+    the above' checkbox's click succeeds while its read-back never confirms
+    a checked state -- the real-world failure mode this guard must survive.
+    """
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        if field.element_id == "group_none_of_above":
+            return "false"
+        if field.element_id == "group_followup_not_applicable":
+            return "true"
+        return None
+
+
+def test_sanctions_followup_never_fills_when_primary_click_readback_fails() -> None:
+    """Even with an explicit override unambiguously selecting 'None of the
+    above', if the primary checkbox's click/read-back never confirms a
+    checked state, the dependent follow-up must never be filled -- run-local
+    confirmation state must come from an actually confirmed fill, not merely
+    an attempted one.
+    """
+    adapter = _SanctionsGroupReadbackFailureAdapter()
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=lambda: _profile_with_question_overrides(
+            [{"question_contains": ["russia", "belarus"], "answer": "None of the above"}]
+        ),
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    filled_labels = [item.label for item in result.filled_fields]
+    assert _SANCTIONS_NONE_OF_ABOVE_LABEL not in filled_labels
+    assert _SANCTIONS_FOLLOWUP_LABEL not in filled_labels
+    unresolved_labels = [item.label for item in result.unresolved_required_fields]
+    assert _SANCTIONS_FOLLOWUP_LABEL in unresolved_labels
+    followup_calls = [call for call in adapter.fill_calls if call[0] == "group_followup_not_applicable"]
+    assert followup_calls == [], (
+        "fill_field must never be attempted for the follow-up when the primary's "
+        "click/read-back never confirmed a checked state"
+    )
