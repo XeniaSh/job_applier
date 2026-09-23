@@ -276,6 +276,56 @@ def test_application_prepare_is_supported_for_target_company_lever() -> None:
     assert target_full[-1][0].url == url
 
 
+def test_target_company_ashby_callback_round_trip() -> None:
+    full_perk = "target_company:ashby:perk"
+    full_other = "target_company:ashby:other"
+    assert map_source_to_code(full_perk) == "tca.perk"
+    assert map_source_to_code("tca.perk") == "tca.perk"
+    assert map_code_to_source("tca.perk") == full_perk
+    assert map_code_to_source(full_perk) == full_perk
+    assert map_code_to_source(map_source_to_code(full_perk)) == full_perk
+    assert map_source_to_code(map_code_to_source("tca.other")) == "tca.other"
+
+    parsed_perk = parse_callback_data("skip:tca.perk:12")
+    parsed_other = parse_callback_data("applied:tca.other:12")
+    assert parsed_perk == ("skip", full_perk, "12", None)
+    assert parsed_other == ("applied", full_other, "12", None)
+    assert parsed_perk[1] != parsed_other[1]
+    assert parse_callback_data("undo:tca.perk:739281:abc12345") == (
+        "undo",
+        full_perk,
+        "739281",
+        "abc12345",
+    )
+
+    # Ashby codes never collide with Greenhouse or Lever target-company codes.
+    assert map_source_to_code(full_perk) != map_source_to_code("target_company:greenhouse:perk")
+    assert map_source_to_code(full_perk) != map_source_to_code("target_company:lever:perk")
+
+
+def test_application_prepare_is_not_supported_for_target_company_ashby() -> None:
+    # Ashby discovery/delivery confirms only URL identity, never autofill
+    # support -- Prepare application must stay hidden and no callback for it
+    # should ever be constructed for this source.
+    url = "https://jobs.ashbyhq.com/perk/739281"
+    target_full = build_action_buttons("target_company:ashby:perk", "739281", url)
+    target_code = build_action_buttons("tca.perk", "739281", url)
+
+    assert source_supports_prepare("target_company:ashby:perk") is False
+    assert source_supports_prepare("tca.perk") is False
+    assert source_supports_application_prepare("target_company:ashby:perk") is False
+    assert source_supports_application_prepare("tca.perk") is False
+
+    for buttons in (target_full, target_code):
+        labels = [button.text for row in buttons for button in row]
+        assert "🛠 Prepare" not in labels
+        assert APPLICATION_PREPARE_BUTTON_TEXT not in labels
+        assert labels == ["✅ Applied", "⏭ Skip", "🔗 Open vacancy"]
+        assert buttons[0][0].callback_data == "applied:tca.perk:739281"
+        assert buttons[1][0].callback_data == "skip:tca.perk:739281"
+    assert target_full[-1][0].url == url
+
+
 def test_send_prepared_application_payload_contains_buttons(monkeypatch) -> None:
     calls: list[tuple[str, dict]] = []
     responses = [

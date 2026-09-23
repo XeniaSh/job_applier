@@ -12,6 +12,7 @@ from app.company_watch.feasibility import ApplicationFeasibility
 from app.company_watch.seniority import SeniorityClassification
 from app.company_watch.watchers.greenhouse import GreenhouseWatchResult
 from app.company_watch.watchers.lever import LeverWatchResult
+from app.company_watch.watchers.ashby import AshbyCompanyError, AshbyWatchResult
 from app.models import (
     Decision,
     RecommendedCoverTemplate,
@@ -55,6 +56,18 @@ LEVER_COMPANY_CONFIG = """  - name: Loom
 """
 
 LEVER_ONLY_CONFIG = "companies:\n" + LEVER_COMPANY_CONFIG
+
+ASHBY_COMPANY_CONFIG = """  - name: TravelPerk
+    priority: A
+    language: english
+    relocation_status: confirmed_role_based
+    watcher_type: ashby
+    ats: ashby
+    job_board_url: https://jobs.ashbyhq.com/Perk
+    role_keywords: [java, backend]
+"""
+
+ASHBY_ONLY_CONFIG = "companies:\n" + ASHBY_COMPANY_CONFIG
 
 
 def _constraints() -> CandidateConstraints:
@@ -131,6 +144,29 @@ def _lever_vacancy(
     )
 
 
+def _ashby_vacancy(
+    *,
+    company: str = "TravelPerk",
+    slug: str | None = None,
+    external_id: str = "701",
+    title: str = "Java Backend Engineer",
+    description: str = "Java backend services",
+    url: str | None = None,
+) -> NormalizedVacancy:
+    site = slug or "Perk"
+    return NormalizedVacancy(
+        source=f"target_company:ashby:{site.lower()}",
+        external_id=external_id,
+        title=title,
+        company=company,
+        location="Bangkok",
+        employment="Full-time",
+        description=description,
+        url=url or f"https://jobs.ashbyhq.com/{site}/{external_id}",
+        published_at="2026-09-05T10:00:00Z",
+    )
+
+
 def _feasibility() -> ApplicationFeasibility:
     return ApplicationFeasibility(
         label="UNCLEAR",
@@ -148,11 +184,20 @@ def _seniority() -> SeniorityClassification:
     return SeniorityClassification(label="SENIOR", reasons=["title has senior"])
 
 
-def _write_config(tmp_path: Path, *, include_lever: bool = False) -> Path:
+def _write_config(
+    tmp_path: Path,
+    *,
+    include_lever: bool = False,
+    include_ashby: bool = False,
+) -> Path:
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_file = config_dir / "target_companies.yaml"
-    content = MINIMAL_CONFIG + (LEVER_COMPANY_CONFIG if include_lever else "")
+    content = (
+        MINIMAL_CONFIG
+        + (LEVER_COMPANY_CONFIG if include_lever else "")
+        + (ASHBY_COMPANY_CONFIG if include_ashby else "")
+    )
     config_file.write_text(content, encoding="utf-8")
     return config_file
 
@@ -193,6 +238,19 @@ def _fake_lever_watcher(vacancies: list[NormalizedVacancy]):
     return FakeLeverWatcher()
 
 
+def _fake_ashby_watcher(vacancies: list[NormalizedVacancy], *, errors: list[object] | None = None):
+    class FakeAshbyWatcher:
+        def watch(self, companies: object) -> AshbyWatchResult:
+            _ = companies
+            return AshbyWatchResult(
+                vacancies=list(vacancies),
+                errors=list(errors or []),
+                raw_fetched=len(vacancies),
+            )
+
+    return FakeAshbyWatcher()
+
+
 class _CountingAnalyzer:
     def __init__(self, evaluation: VacancyEvaluation | None = None) -> None:
         self.calls: list[str] = []
@@ -224,6 +282,9 @@ def _run_cycle(
     vacancies: list[NormalizedVacancy],
     lever_vacancies: list[NormalizedVacancy] | None = None,
     include_lever_company: bool = False,
+    ashby_vacancies: list[NormalizedVacancy] | None = None,
+    ashby_errors: list[object] | None = None,
+    include_ashby_company: bool = False,
     analyzer: _CountingAnalyzer | None = None,
     telegram: _FakeTelegram | None = None,
     deliveries: TelegramDeliveryStorage | None = None,
@@ -235,7 +296,11 @@ def _run_cycle(
     if reset_sent_memory:
         cli_module._TARGET_COMPANY_SENT_IN_PROCESS.clear()
     _set_base_env(monkeypatch, tmp_path, target_chat_id=target_chat_id)
-    config_file = _write_config(tmp_path, include_lever=include_lever_company)
+    config_file = _write_config(
+        tmp_path,
+        include_lever=include_lever_company,
+        include_ashby=include_ashby_company,
+    )
     monkeypatch.setattr(cli_module, "load_candidate_constraints", lambda path: _constraints())
     analyzer = analyzer or _CountingAnalyzer()
     telegram = telegram or _FakeTelegram(chat_id=target_chat_id)
@@ -250,6 +315,7 @@ def _run_cycle(
         analyze_limit_per_company=analyze_limit_per_company,
         watcher=_fake_watcher(vacancies),
         lever_watcher=_fake_lever_watcher(lever_vacancies or []),
+        ashby_watcher=_fake_ashby_watcher(ashby_vacancies or [], errors=ashby_errors),
         telegram_client=telegram,
     )
     return result, analyzer, telegram, deliveries
@@ -759,6 +825,137 @@ def test_cycle_enabled_with_only_lever_companies(monkeypatch, tmp_path: Path) ->
     assert result.sent == 1
 
 
+def test_ashby_watcher_is_combined_with_greenhouse_and_lever(monkeypatch, tmp_path: Path) -> None:
+    gh_vacancy = _vacancy(external_id="1", title="Java Backend Engineer")
+    lever_vacancy = _lever_vacancy(external_id="501", title="Kotlin Backend Engineer")
+    ashby_vacancy = _ashby_vacancy(external_id="701", title="Go Backend Engineer")
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, deliveries = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[gh_vacancy],
+        lever_vacancies=[lever_vacancy],
+        include_lever_company=True,
+        ashby_vacancies=[ashby_vacancy],
+        include_ashby_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.watched == 3
+    assert result.sent == 3
+    assert {getattr(card, "source") for card in telegram.cards} == {
+        gh_vacancy.source,
+        lever_vacancy.source,
+        ashby_vacancy.source,
+    }
+    assert deliveries.get_message_ref(
+        source=ashby_vacancy.source,
+        external_id=ashby_vacancy.external_id,
+        chat_id="222",
+    ) is not None
+
+
+def test_ashby_vacancy_with_canonical_hosted_url_passes_supported_form_gate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Discovery through the Ashby watcher confirms only the discovery/delivery
+    # identity of this URL shape, not autofill support -- see
+    # app.application.autofill.ashby_url.is_canonical_ashby_hosted_url.
+    ashby_vacancy = _ashby_vacancy(external_id="701", title="Java Backend Engineer")
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        ashby_vacancies=[ashby_vacancy],
+        include_ashby_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.dropped_unsupported_form == 0
+    assert result.selected == 1
+    assert len(analyzer.calls) == 1
+    assert telegram.cards
+    assert getattr(telegram.cards[0], "external_id") == "701"
+
+
+def test_ashby_unsupported_form_url_is_excluded_before_ranking(monkeypatch, tmp_path: Path) -> None:
+    # Discovered via Ashby (source=target_company:ashby:perk), but the URL is
+    # not Ashby's own public job-board shape -- see
+    # app.application.autofill.ashby_url.is_canonical_ashby_hosted_url. Must
+    # stay gated/dropped, never treated as a SKIP recommendation.
+    custom_domain = NormalizedVacancy(
+        source="target_company:ashby:perk",
+        external_id="1",
+        title="Java Backend Engineer",
+        company="TravelPerk",
+        location="Remote",
+        employment="Full-time",
+        description="Java backend services",
+        url="https://careers.travelperk.com/apply?job=1",
+        published_at="2026-09-05T10:00:00Z",
+    )
+    non_canonical_path = NormalizedVacancy(
+        source="target_company:ashby:perk",
+        external_id="2",
+        title="Kotlin Backend Engineer",
+        company="TravelPerk",
+        location="Remote",
+        employment="Full-time",
+        description="Kotlin backend services",
+        url="https://jobs.ashbyhq.com/Perk",
+        published_at="2026-09-05T10:00:00Z",
+    )
+    remaining = _ashby_vacancy(external_id="3", title="Office Coordinator")
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        ashby_vacancies=[custom_domain, non_canonical_path, remaining],
+        include_ashby_company=True,
+        analyzer=analyzer,
+        analyze_limit=1,
+        analyze_limit_per_company=1,
+    )
+
+    assert result.dropped_unsupported_form == 2
+    assert result.selected == 1
+    assert len(analyzer.calls) == 1
+    assert "Office Coordinator" in analyzer.calls[0]
+    assert telegram.cards
+    assert getattr(telegram.cards[0], "external_id") == "3"
+
+
+def test_cycle_enabled_with_only_ashby_companies(monkeypatch, tmp_path: Path) -> None:
+    _set_base_env(monkeypatch, tmp_path, target_chat_id="222")
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "target_companies.yaml"
+    config_file.write_text(ASHBY_ONLY_CONFIG, encoding="utf-8")
+    monkeypatch.setattr(cli_module, "load_candidate_constraints", lambda path: _constraints())
+    analyzer = _CountingAnalyzer()
+    telegram = _FakeTelegram(chat_id="222")
+    deliveries = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
+    ashby_vacancy = _ashby_vacancy(external_id="1")
+
+    result = cli_module._run_target_companies_cycle(
+        settings=cli_module.Settings(),
+        analyzer=analyzer,
+        deliveries=deliveries,
+        config_path=config_file,
+        cache_path=tmp_path / "analysis_cache.json",
+        watcher=_fake_watcher([]),
+        lever_watcher=_fake_lever_watcher([]),
+        ashby_watcher=_fake_ashby_watcher([ashby_vacancy]),
+        telegram_client=telegram,
+    )
+
+    assert result.enabled is True
+    assert result.skip_reason is None
+    assert result.sent == 1
+
+
 def test_cycle_skips_when_no_supported_target_companies(monkeypatch, tmp_path: Path) -> None:
     _set_base_env(monkeypatch, tmp_path, target_chat_id="222")
     config_dir = tmp_path / "config"
@@ -1137,6 +1334,70 @@ def test_provider_funnel_counts_greenhouse_and_lever_combined(monkeypatch, tmp_p
     assert any("Target companies: watched=" in line for line in out.splitlines())
 
 
+def test_provider_funnel_counts_ashby(monkeypatch, tmp_path: Path, capsys) -> None:
+    ashby_vacancy = _ashby_vacancy(external_id="701", title="Go Backend Engineer")
+    result, analyzer, telegram, deliveries = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        ashby_vacancies=[ashby_vacancy],
+        include_ashby_company=True,
+    )
+
+    ab = result.provider_funnels["ashby"]
+    assert ab.configured_companies == 1  # TravelPerk
+    assert ab.raw_fetched == 1
+    assert ab.title_prefilter_pass == 1
+    assert ab.watcher_errors == 0
+    assert ab.post_gate_candidates == 1
+    assert ab.selected == 1
+    assert ab.analyzed == 1
+    assert ab.sent == 1
+
+    out = capsys.readouterr().out
+    ab_lines = [line for line in out.splitlines() if "Target companies funnel[ashby]:" in line]
+    assert len(ab_lines) == 1
+    assert "configured=1" in ab_lines[0]
+    assert "sent=1" in ab_lines[0]
+
+
+def test_provider_funnel_counts_ashby_watcher_errors_without_leaking_details(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        ashby_vacancies=[],
+        ashby_errors=[
+            AshbyCompanyError(
+                company_name="TravelPerk",
+                message="super secret internal failure detail",
+                response_snippet="<html>leaked-response-body</html>",
+                status_code=500,
+            )
+        ],
+        include_ashby_company=True,
+    )
+
+    ab = result.provider_funnels["ashby"]
+    assert ab.configured_companies == 1
+    assert ab.raw_fetched == 0
+    assert ab.title_prefilter_pass == 0
+    assert ab.watcher_errors == 1
+    assert ab.post_gate_candidates == 0
+    assert ab.selected == 0
+    assert ab.analyzed == 0
+    assert ab.sent == 0
+
+    out = capsys.readouterr().out
+    ab_lines = [line for line in out.splitlines() if "Target companies funnel[ashby]:" in line]
+    assert len(ab_lines) == 1
+    for line in ab_lines:
+        assert "secret" not in line
+        assert "leaked" not in line
+
+
 def test_provider_funnel_zero_valued_when_provider_not_configured(monkeypatch, tmp_path: Path, capsys) -> None:
     gh_vacancy = _vacancy(external_id="1")
     result, *_ = _run_cycle(monkeypatch, tmp_path, vacancies=[gh_vacancy])
@@ -1203,7 +1464,7 @@ def test_provider_funnel_counts_watcher_errors_without_leaking_details(
 
     out = capsys.readouterr().out
     funnel_lines = [line for line in out.splitlines() if "Target companies funnel[" in line]
-    assert len(funnel_lines) == 2  # one for greenhouse, one for lever
+    assert len(funnel_lines) == 3  # one each for greenhouse, lever, ashby
     for line in funnel_lines:
         assert "secret" not in line
         assert "leaked" not in line

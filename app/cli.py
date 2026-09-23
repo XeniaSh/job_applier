@@ -63,6 +63,7 @@ from app.company_watch.watchers.greenhouse import (
     is_greenhouse_target,
 )
 from app.company_watch.watchers.lever import LeverTargetWatcher, is_lever_target
+from app.company_watch.watchers.ashby import AshbyTargetWatcher, is_ashby_target
 from app.collectors.email_imap_client import (
     EmailAuthenticationError,
     EmailConnectionError,
@@ -142,6 +143,7 @@ from app.telegram.application_prepare import (
 )
 from app.application.autofill.greenhouse_url import is_canonical_greenhouse_hosted_url
 from app.application.autofill.lever_url import is_canonical_lever_hosted_url
+from app.application.autofill.ashby_url import is_canonical_ashby_hosted_url
 from app.application.autofill.review_session import ReviewSessionRegistry, default_review_registry
 from app.telegram.formatter import (
     card_display_sections,
@@ -1246,36 +1248,47 @@ def _has_unchanged_cached_analysis(
 
 _TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX = "target_company:greenhouse:"
 _TARGET_COMPANY_LEVER_SOURCE_PREFIX = "target_company:lever:"
+_TARGET_COMPANY_ASHBY_SOURCE_PREFIX = "target_company:ashby:"
 _GREENHOUSE_HOSTED_HOST_SUFFIX = ".greenhouse.io"
 _GREENHOUSE_HOSTED_HOST_EXACT = "greenhouse.io"
 _LEVER_HOSTED_HOST_SUFFIX = ".lever.co"
 _LEVER_HOSTED_HOST_EXACT = "lever.co"
+_ASHBY_HOSTED_HOST_EXACT = "jobs.ashbyhq.com"
 
 
 def _has_unconfirmed_application_form(vacancy: NormalizedVacancy) -> bool:
     """Stage 1 delivery gate only: True when we cannot yet confirm the
     application form is supported without a browser (see
-    `greenhouse_url.is_canonical_greenhouse_hosted_url` and
-    `lever_url.is_canonical_lever_hosted_url`). This is not a
+    `greenhouse_url.is_canonical_greenhouse_hosted_url`,
+    `lever_url.is_canonical_lever_hosted_url`, and
+    `ashby_url.is_canonical_ashby_hosted_url`). This is not a
     recommendation and must never be treated as SKIP — a custom-domain
     Greenhouse embed may still work once an adapter/heuristic can confirm
-    it; we just can't tell before Telegram delivery today.
+    it; we just can't tell before Telegram delivery today. For Ashby there
+    is no autofill adapter at all yet: a recognized canonical public job URL
+    is only a delivery eligibility signal (this is Ashby's own job-board
+    shape, safe to send), never confirmation that an Ashby application-form
+    adapter exists or that autofill is supported.
     """
     if vacancy.source.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX):
         return not is_canonical_lever_hosted_url(vacancy.url)
+    if vacancy.source.startswith(_TARGET_COMPANY_ASHBY_SOURCE_PREFIX):
+        return not is_canonical_ashby_hosted_url(vacancy.url)
     return not is_canonical_greenhouse_hosted_url(vacancy.url)
 
 
 def _target_company_form_provider(source: str) -> str:
     """Deterministic ATS classification from the discovery source prefix.
 
-    Falls back to "unknown" for any source outside the two Target Companies
+    Falls back to "unknown" for any source outside the Target Companies
     watchers so the diagnostic never guesses at an unrecognized provider.
     """
     if source.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX):
         return "greenhouse"
     if source.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX):
         return "lever"
+    if source.startswith(_TARGET_COMPANY_ASHBY_SOURCE_PREFIX):
+        return "ashby"
     return "unknown"
 
 
@@ -1303,6 +1316,10 @@ def _unsupported_application_form_reason(provider: str, url: str) -> str:
         if host != _LEVER_HOSTED_HOST_EXACT and not host.endswith(_LEVER_HOSTED_HOST_SUFFIX):
             return "lever_custom_domain"
         return "lever_non_canonical_path"
+    if provider == "ashby":
+        if host != _ASHBY_HOSTED_HOST_EXACT:
+            return "ashby_custom_domain"
+        return "ashby_non_canonical_path"
     return "unknown_provider_unconfirmed_form"
 
 
@@ -1439,6 +1456,7 @@ def _run_target_companies_cycle(
     analyze_limit_per_company: int | None = _RUN_TARGET_COMPANY_ANALYZE_LIMIT_PER_COMPANY,
     watcher: GreenhouseTargetWatcher | None = None,
     lever_watcher: LeverTargetWatcher | None = None,
+    ashby_watcher: AshbyTargetWatcher | None = None,
     telegram_client: TelegramClient | None = None,
 ) -> _TargetCompaniesCycleResult:
     chat_id = _target_companies_run_chat_id(settings)
@@ -1453,7 +1471,8 @@ def _run_target_companies_cycle(
 
     greenhouse_companies = [item for item in loaded.companies if is_greenhouse_target(item)]
     lever_companies = [item for item in loaded.companies if is_lever_target(item)]
-    if not greenhouse_companies and not lever_companies:
+    ashby_companies = [item for item in loaded.companies if is_ashby_target(item)]
+    if not greenhouse_companies and not lever_companies and not ashby_companies:
         _run_log("Target companies: skipped (no supported target companies)", component="main")
         return _TargetCompaniesCycleResult(enabled=False, skip_reason="no_supported_target_companies")
 
@@ -1476,12 +1495,18 @@ def _run_target_companies_cycle(
     analysis_cache = TargetCompanyAnalysisCache(cache_path)
     analysis_cache.load()
     companies_by_name = {
-        item.name.casefold(): item for item in (*greenhouse_companies, *lever_companies)
+        item.name.casefold(): item
+        for item in (*greenhouse_companies, *lever_companies, *ashby_companies)
     }
     greenhouse_watch_result = (watcher or GreenhouseTargetWatcher()).watch(greenhouse_companies)
     lever_watch_result = (lever_watcher or LeverTargetWatcher()).watch(lever_companies)
-    watched_vacancies = [*greenhouse_watch_result.vacancies, *lever_watch_result.vacancies]
-    watch_errors = [*greenhouse_watch_result.errors, *lever_watch_result.errors]
+    ashby_watch_result = (ashby_watcher or AshbyTargetWatcher()).watch(ashby_companies)
+    watched_vacancies = [
+        *greenhouse_watch_result.vacancies,
+        *lever_watch_result.vacancies,
+        *ashby_watch_result.vacancies,
+    ]
+    watch_errors = [*greenhouse_watch_result.errors, *lever_watch_result.errors, *ashby_watch_result.errors]
 
     provider_funnels: dict[str, _ProviderFunnelCounts] = {
         "greenhouse": _ProviderFunnelCounts(
@@ -1495,6 +1520,12 @@ def _run_target_companies_cycle(
             raw_fetched=lever_watch_result.raw_fetched,
             title_prefilter_pass=len(lever_watch_result.vacancies),
             watcher_errors=len(lever_watch_result.errors),
+        ),
+        "ashby": _ProviderFunnelCounts(
+            configured_companies=len(ashby_companies),
+            raw_fetched=ashby_watch_result.raw_fetched,
+            title_prefilter_pass=len(ashby_watch_result.vacancies),
+            watcher_errors=len(ashby_watch_result.errors),
         ),
     }
 
@@ -1599,7 +1630,7 @@ def _run_target_companies_cycle(
         f"send_errors={result.send_errors}",
         component="main",
     )
-    for provider_name in ("greenhouse", "lever"):
+    for provider_name in ("greenhouse", "lever", "ashby"):
         _log_provider_funnel(provider_name, provider_funnels[provider_name])
     _log_target_company_outcomes(outcome_counts)
     if verbose:

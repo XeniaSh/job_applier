@@ -126,6 +126,62 @@ def test_exclude_title_keywords() -> None:
 
 
 @respx.mock
+def test_fetches_and_maps_documented_api_shaped_job() -> None:
+    # Shaped after Ashby's public posting API sample response
+    # (https://api.ashbyhq.com/posting-api/job-board/<board>), which uses
+    # `location` rather than the `locationName` field the other fixtures in
+    # this file use.
+    api_shaped_job = {
+        "id": "5f6e7d8c-1234-5678-9abc-def012345678",
+        "title": "Java Backend Engineer",
+        "department": "Engineering",
+        "team": "Payments",
+        "employmentType": "FullTime",
+        "location": "Barcelona, Spain",
+        "isRemote": False,
+        "descriptionPlain": "Java backend services and payments.",
+        "descriptionHtml": "<p>Java backend services and payments.</p>",
+        "publishedAt": "2026-09-01T00:00:00Z",
+        "jobUrl": "https://jobs.ashbyhq.com/Perk/5f6e7d8c-1234-5678-9abc-def012345678",
+        "applyUrl": "https://jobs.ashbyhq.com/Perk/5f6e7d8c-1234-5678-9abc-def012345678/application",
+    }
+    respx.get(ashby_jobs_endpoint("Perk")).mock(
+        return_value=httpx.Response(status_code=200, json={"jobs": [api_shaped_job]})
+    )
+    result = _watcher().watch(_company(role_keywords=["java", "backend"]))
+    assert len(result.vacancies) == 1
+    vacancy = result.vacancies[0]
+    assert vacancy.source == "target_company:ashby:perk"
+    assert vacancy.external_id == "5f6e7d8c-1234-5678-9abc-def012345678"
+    assert vacancy.title == "Java Backend Engineer"
+    assert vacancy.company == "TravelPerk"
+    assert vacancy.location == "Barcelona, Spain"
+    assert vacancy.description == "Java backend services and payments."
+    assert vacancy.published_at == "2026-09-01T00:00:00Z"
+    assert vacancy.url == "https://jobs.ashbyhq.com/Perk/5f6e7d8c-1234-5678-9abc-def012345678"
+    assert result.errors == []
+
+
+@respx.mock
+def test_documented_api_shaped_job_excluded_by_title_prefilter() -> None:
+    api_shaped_job = {
+        "id": "202",
+        "title": "Warehouse Operator",
+        "employmentType": "FullTime",
+        "location": "Barcelona, Spain",
+        "descriptionPlain": "Warehouse operations.",
+        "publishedAt": "2026-09-01T00:00:00Z",
+        "jobUrl": "https://jobs.ashbyhq.com/Perk/202",
+    }
+    respx.get(ashby_jobs_endpoint("Perk")).mock(
+        return_value=httpx.Response(status_code=200, json={"jobs": [api_shaped_job]})
+    )
+    result = _watcher().watch(_company(role_keywords=["java", "backend"]))
+    assert result.vacancies == []
+    assert result.errors == []
+
+
+@respx.mock
 def test_one_company_error_does_not_stop_other_companies() -> None:
     respx.get(ashby_jobs_endpoint("Perk")).mock(return_value=httpx.Response(status_code=500))
     respx.get(ashby_jobs_endpoint("other")).mock(
