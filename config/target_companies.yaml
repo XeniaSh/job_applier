@@ -620,3 +620,143 @@ companies:
       - Public Greenhouse board (slug wolt) is reachable and returns canonical job-board URLs.
       - Some backend roles are Go-only. Titles that are Go-only with no backend/software-engineer keyword are excluded upstream by the title prefilter; titles with a generic backend/software-engineer keyword may pass title filtering and are governed downstream by the existing generic backend-stack mismatch filter, not by any Wolt-specific code.
       - Relocation/visa support is not confirmed company-wide; check per role.
+
+  - name: ClickHouse
+    priority: A
+    category: database_analytics
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid, remote_region_limited]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Remote Europe]
+    remote: region_limited
+    java_backend_relevance: medium
+    role_keywords: [backend, database, distributed systems, query engine, platform, analytics]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://clickhouse.com/company/careers
+    job_board_url: https://jobs.ashbyhq.com/clickhouse
+    notes:
+      - Verified public Ashby job board (slug clickhouse); backend/JVM-style title filter matched a subset of open roles via the read-only API, including some in Europe.
+      - Relocation/visa sponsorship is not confirmed company-wide; check per role.
+
+  - name: Supabase
+    priority: A
+    category: database_cloud_devtools
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_global]
+    relocation_status: remote_global
+    known_hiring_locations: [Worldwide]
+    remote: worldwide
+    java_backend_relevance: low
+    role_keywords: [backend, platform, postgres, database, developer tools, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://supabase.com/careers
+    job_board_url: https://jobs.ashbyhq.com/supabase
+    notes:
+      - Verified public Ashby job board (slug supabase); fully remote/globally distributed team.
+      - Stack is not Java-first (Postgres/Go/TypeScript/Elixir); check backend keyword relevance per role.
+
+  - name: Constructor
+    priority: A
+    category: search_ai_ecommerce
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_region_limited, hybrid]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Remote EMEA, Spain]
+    remote: region_limited
+    java_backend_relevance: medium
+    role_keywords: [backend, search, platform, ecommerce, distributed systems, ai]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://constructor.com/about/careers
+    job_board_url: https://jobs.ashbyhq.com/constructor
+    notes:
+      - Verified public Ashby job board (slug constructor); EMEA/Spain remote roles observed.
+      - Relocation/visa sponsorship is not confirmed company-wide; check per role.
+
+  - name: Kestra
+    priority: A
+    category: data_orchestration_devtools
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_region_limited, hybrid]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Remote Europe]
+    remote: region_limited
+    java_backend_relevance: high
+    role_keywords: [backend, java, kotlin, orchestration, platform, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://kestra.io/careers
+    job_board_url: https://jobs.ashbyhq.com/kestra
+    notes:
+      - Verified public Ashby job board (slug kestra); small team, but the orchestration engine itself is Java/Kotlin-based.
+      - Relocation/visa sponsorship is not confirmed; check per role.
+
+  - name: Trigger.dev
+    priority: A
+    category: developer_tools_workflow
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_region_limited, hybrid]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Europe, UK]
+    remote: region_limited
+    java_backend_relevance: low
+    role_keywords: [backend, platform, developer tools, workflow, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://trigger.dev/careers
+    job_board_url: https://jobs.ashbyhq.com/triggerdev
+    notes:
+      - Verified public Ashby job board (slug triggerdev); small team, Europe/UK roles observed.
+      - Stack is TypeScript-first, not Java-specific. Relocation/visa sponsorship is not confirmed; check per role.
+
+  - name: Moss
+    priority: A
+    category: fintech_spend_management
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid, remote_region_limited]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Warsaw, Poland, Berlin, Germany, Tallinn, Estonia]
+    remote: region_limited
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, fintech, payments, spend management]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://www.getmoss.com/careers
+    job_board_url: https://jobs.ashbyhq.com/moss
+    notes:
+      - Verified public Ashby job board (slug moss); engineering hubs observed in Warsaw/Berlin/Tallinn.
+      - Relocation/visa sponsorship is not confirmed company-wide; check per role.
+
+  - name: Sentry
+    priority: A
+    category: developer_tools_observability
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid, remote_region_limited]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Vienna, Austria, Toronto, Canada, San Francisco, USA]
+    remote: region_limited
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, observability, distributed systems, developer tools]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://sentry.io/careers/
+    job_board_url: https://jobs.ashbyhq.com/sentry
+    notes:
+      - Verified public Ashby job board (slug sentry); title filter matched a subset of open roles across Vienna/Toronto/US offices.
+      - Relocation/visa sponsorship is not confirmed company-wide; check per role.
