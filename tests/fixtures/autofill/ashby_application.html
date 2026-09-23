@@ -1,0 +1,189 @@
+<!doctype html>
+<html>
+<head><title>Backend Engineer - Perk</title></head>
+<body>
+<div id="ashby_app">
+  <div role="tablist">
+    <button id="job-application-form" role="tab" aria-selected="true" type="button">Application</button>
+  </div>
+  <div id="form" role="tabpanel" aria-labelledby="job-application-form">
+    <div class="ashby-application-form-autofill-uploader">
+      <input type="file" style="display:none" />
+    </div>
+
+    <div class="ashby-application-form-container">
+        <fieldset data-field-path="_systemfield_name">
+          <label class="ashby-application-form-question-title" for="_systemfield_name">Name</label>
+          <input
+            id="_systemfield_name"
+            name="_systemfield_name"
+            type="text"
+            required
+            class="ashby-application-form-input-text"
+          />
+        </fieldset>
+
+        <fieldset data-field-path="_systemfield_email">
+          <label class="ashby-application-form-question-title" for="_systemfield_email">Email</label>
+          <input
+            id="_systemfield_email"
+            name="_systemfield_email"
+            type="email"
+            required
+            class="ashby-application-form-input-text"
+          />
+        </fieldset>
+
+        <fieldset data-field-path="_systemfield_resume">
+          <label class="ashby-application-form-question-title" for="_systemfield_resume">Resume/CV</label>
+          <div class="ashby-application-form-input-file">
+            <input id="_systemfield_resume" name="_systemfield_resume" type="file" required />
+          </div>
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-linkedin-uuid">
+          <label class="ashby-application-form-question-title" for="a1b2c3d4-linkedin-uuid">LinkedIn Profile</label>
+          <input
+            id="a1b2c3d4-linkedin-uuid"
+            name="a1b2c3d4-linkedin-uuid"
+            type="url"
+            required
+            class="ashby-application-form-input-text"
+          />
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-source-uuid">
+          <label class="ashby-application-form-question-title">Where did you hear about this opportunity?</label>
+          <input
+            type="text"
+            role="combobox"
+            required
+            class="ashby-application-form-input-autocomplete"
+          />
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-location-uuid">
+          <label class="ashby-application-form-question-title">Current Location</label>
+          <input
+            type="text"
+            role="combobox"
+            required
+            class="ashby-application-form-input-autocomplete"
+          />
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-applying-location-uuid">
+          <div class="ashby-application-form-question-title _required_f7cvd_91">Which location are you applying for?</div>
+          <div class="ashby-application-form-input-radio-group">
+            <label><input type="radio" name="applying-location" value="Boston" /> Boston</label>
+          </div>
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-legal-auth-uuid">
+          <div class="ashby-application-form-question-title _required_f7cvd_91">
+            Do you have legal authorisation to work in the country where this role is based?
+          </div>
+          <div class="ashby-application-form-input-yesno">
+            <button type="button" class="ashby-application-form-input-yesno-option" data-option="yes" aria-pressed="false">Yes</button>
+            <button type="button" class="ashby-application-form-input-yesno-option" data-option="no" aria-pressed="false">No</button>
+            <input type="checkbox" style="display:none" />
+          </div>
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-office-uuid">
+          <div class="ashby-application-form-question-title _required_f7cvd_91">
+            This role requires working 3 days per week in the office. Are you comfortable with this arrangement?
+          </div>
+          <div class="ashby-application-form-input-yesno">
+            <button type="button" class="ashby-application-form-input-yesno-option" data-option="yes" aria-pressed="false">Yes</button>
+            <button type="button" class="ashby-application-form-input-yesno-option" data-option="no" aria-pressed="false">No</button>
+            <input type="checkbox" style="display:none" />
+          </div>
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-visa-uuid">
+          <label class="ashby-application-form-question-title">
+            Will you require visa sponsorship to work in this role now or in the future?
+          </label>
+          <input type="text" required class="ashby-application-form-input-text" />
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-salary-uuid">
+          <label class="ashby-application-form-question-title">Salary expectations</label>
+          <input type="number" required class="ashby-application-form-input-text" />
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-notice-uuid">
+          <label class="ashby-application-form-question-title">Notice period / earliest start date</label>
+          <input type="text" required class="ashby-application-form-input-text" />
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-relationship-uuid">
+          <div class="ashby-application-form-question-title">
+            Are you related to any current employees?
+          </div>
+          <div class="ashby-application-form-input-checkbox-group">
+            <label><input type="checkbox" name="relationship" value="sibling" /> Sibling</label>
+            <label><input type="checkbox" name="relationship" value="parent" /> Parent</label>
+          </div>
+        </fieldset>
+    </div>
+
+    <div class="ashby-application-form-container">
+      <fieldset data-field-path="_systemfield_eeoc_gender">
+        <div class="ashby-application-form-question-title">Gender</div>
+        <div class="ashby-application-form-input-radio-group">
+          <label><input type="radio" name="eeoc-gender" value="Man" /> Man</label>
+          <label><input type="radio" name="eeoc-gender" value="Woman" /> Woman</label>
+          <label><input type="radio" name="eeoc-gender" value="Decline to self-identify" /> Decline to self-identify</label>
+        </div>
+      </fieldset>
+    </div>
+
+    <div class="ashby-application-form-container">
+      <fieldset data-field-path="_systemfield_data_consent_ack">
+        <label>
+          <input
+            type="checkbox"
+            id="9f1e2d3c-4b5a-6789-abcd-ef0123456789-labeled-checkbox-0"
+            name="I agree"
+          />
+          I agree to be contacted about other roles for up to 2 years.
+        </label>
+      </fieldset>
+    </div>
+
+    <button type="button" class="ashby-application-form-submit-button">Submit Application</button>
+
+    <script>
+      // Real Ashby pages load a passive reCAPTCHA badge/script even on an
+      // otherwise usable form -- represented here structurally (with a real
+      // challenge iframe inside it, positioned off-screen the way the real
+      // widget is, rather than visibility:hidden) so recognition/challenge
+      // logic must exclude it by ancestry, not by visibility.
+
+      // Minimal stand-in for the real yesno button widget's own click
+      // behavior: toggles aria-pressed on the clicked option and clears it
+      // on its sibling within the same control, mutually exclusive.
+      document.querySelectorAll(".ashby-application-form-input-yesno").forEach(function (group) {
+        group.querySelectorAll(".ashby-application-form-input-yesno-option").forEach(function (button) {
+          button.addEventListener("click", function () {
+            group.querySelectorAll(".ashby-application-form-input-yesno-option").forEach(function (sibling) {
+              sibling.setAttribute("aria-pressed", sibling === button ? "true" : "false");
+            });
+          });
+        });
+      });
+    </script>
+    <div class="grecaptcha-badge" style="position: fixed; bottom: -1000px; right: 0px; width: 256px; height: 60px;">
+      <iframe title="recaptcha" src="about:blank" style="width: 256px; height: 60px; border: none;"></iframe>
+    </div>
+  </div>
+
+  <div data-field-path="decoy-outside-panel-uuid">
+    <label class="ashby-application-form-question-title">Should never be discovered (outside the application tabpanel)</label>
+    <input type="text" />
+  </div>
+</div>
+</body>
+</html>

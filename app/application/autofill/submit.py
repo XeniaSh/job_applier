@@ -36,7 +36,7 @@ from typing import Protocol
 
 from app.application.autofill.models import AutofillResult
 from app.application.autofill.policy import AutoSubmitDecision, evaluate_auto_submit_policy
-from app.application.autofill.resolver import TARGET_COMPANY_LEVER_PREFIX
+from app.application.autofill.resolver import TARGET_COMPANY_ASHBY_PREFIX, TARGET_COMPANY_LEVER_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +136,32 @@ class LeverSubmitAdapter(_ClickSubmitButtonAdapter):
     """Real Submit-button click for Lever. See module docstring for gating."""
 
 
+class AshbySubmitAdapter:
+    """Never submits. There is no Ashby submit capability yet -- `AshbyAdapter`
+    only discovers/fills fields (see `app.application.autofill.ashby`), and
+    this class exists solely so that an Ashby-sourced vacancy can never fall
+    through `default_submit_adapter_for_source`'s generic default and end up
+    driven by `GreenhouseSubmitAdapter`'s click-based logic. `submit` always
+    returns False, so `attempt_auto_submit` always leaves `result` unchanged
+    for Ashby regardless of `auto_submit_enabled`.
+    """
+
+    def submit(self, page: object) -> bool:
+        _ = page
+        return False
+
+    def submit_confirmed(self, page: object) -> bool:
+        _ = page
+        return False
+
+
 def default_submit_adapter_for_source(source: str) -> SubmitAdapter:
     """Source-aware submit adapter selection, mirroring `default_adapter_for_source`."""
-    if source.strip().startswith(TARGET_COMPANY_LEVER_PREFIX):
+    cleaned = source.strip()
+    if cleaned.startswith(TARGET_COMPANY_LEVER_PREFIX):
         return LeverSubmitAdapter()
+    if cleaned.startswith(TARGET_COMPANY_ASHBY_PREFIX):
+        return AshbySubmitAdapter()
     return GreenhouseSubmitAdapter()
 
 

@@ -523,8 +523,10 @@ def source_supports_prepare(source: str) -> bool:
 def source_supports_application_prepare(source: str) -> bool:
     """Return whether explicit Target Company application prepare is offered."""
     canonical = _canonical_source(source)
-    return canonical.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX) or canonical.startswith(
-        _TARGET_COMPANY_LEVER_SOURCE_PREFIX
+    return (
+        canonical.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX)
+        or canonical.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX)
+        or canonical.startswith(_TARGET_COMPANY_ASHBY_SOURCE_PREFIX)
     )
 
 

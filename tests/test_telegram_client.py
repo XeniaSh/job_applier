@@ -303,27 +303,38 @@ def test_target_company_ashby_callback_round_trip() -> None:
     assert map_source_to_code(full_perk) != map_source_to_code("target_company:lever:perk")
 
 
-def test_application_prepare_is_not_supported_for_target_company_ashby() -> None:
-    # Ashby discovery/delivery confirms only URL identity, never autofill
-    # support -- Prepare application must stay hidden and no callback for it
-    # should ever be constructed for this source.
+def test_application_prepare_is_supported_for_target_company_ashby() -> None:
+    # Ashby now has a bounded autofill adapter (AshbyAdapter) -- explicit
+    # Prepare application must be offered, exactly like Greenhouse/Lever.
     url = "https://jobs.ashbyhq.com/perk/739281"
     target_full = build_action_buttons("target_company:ashby:perk", "739281", url)
     target_code = build_action_buttons("tca.perk", "739281", url)
 
     assert source_supports_prepare("target_company:ashby:perk") is False
     assert source_supports_prepare("tca.perk") is False
-    assert source_supports_application_prepare("target_company:ashby:perk") is False
-    assert source_supports_application_prepare("tca.perk") is False
+    assert source_supports_application_prepare("target_company:ashby:perk") is True
+    assert source_supports_application_prepare("tca.perk") is True
 
     for buttons in (target_full, target_code):
         labels = [button.text for row in buttons for button in row]
         assert "🛠 Prepare" not in labels
-        assert APPLICATION_PREPARE_BUTTON_TEXT not in labels
-        assert labels == ["✅ Applied", "⏭ Skip", "🔗 Open vacancy"]
-        assert buttons[0][0].callback_data == "applied:tca.perk:739281"
-        assert buttons[1][0].callback_data == "skip:tca.perk:739281"
+        assert labels == [
+            APPLICATION_PREPARE_BUTTON_TEXT,
+            "✅ Applied",
+            "⏭ Skip",
+            "🔗 Open vacancy",
+        ]
+        assert buttons[0][0].callback_data == "prepapp:tca.perk:739281"
+        assert buttons[1][0].callback_data == "applied:tca.perk:739281"
+        assert buttons[2][0].callback_data == "skip:tca.perk:739281"
     assert target_full[-1][0].url == url
+
+
+def test_application_prepare_is_not_supported_for_generic_ashby_source() -> None:
+    # Only the explicit target_company:ashby:* namespace is wired to Prepare
+    # -- a bare/generic "ashby" source string must never match.
+    assert source_supports_application_prepare("ashby") is False
+    assert source_supports_application_prepare("ashbyhq") is False
 
 
 def test_send_prepared_application_payload_contains_buttons(monkeypatch) -> None:

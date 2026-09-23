@@ -7,6 +7,7 @@ from app.application.autofill.models import (
     FieldClassification,
 )
 from app.application.autofill.submit import (
+    AshbySubmitAdapter,
     GreenhouseSubmitAdapter,
     LeverSubmitAdapter,
     attempt_auto_submit,
@@ -164,6 +165,27 @@ def test_default_submit_adapter_for_source_is_source_aware() -> None:
     assert isinstance(default_submit_adapter_for_source("target_company:lever:qonto"), LeverSubmitAdapter)
     # Unknown sources keep the historical Greenhouse default, like default_adapter_for_source.
     assert isinstance(default_submit_adapter_for_source("linkedin-email"), GreenhouseSubmitAdapter)
+
+
+def test_default_submit_adapter_for_source_ashby_never_falls_back_to_greenhouse() -> None:
+    adapter = default_submit_adapter_for_source("target_company:ashby:perk")
+    assert isinstance(adapter, AshbySubmitAdapter)
+    assert not isinstance(adapter, GreenhouseSubmitAdapter)
+
+
+def test_ashby_submit_adapter_never_submits_even_when_policy_is_safe() -> None:
+    result = _safe_result(source="target_company:ashby:perk")
+    detector = _FakeChallengeDetector()
+    adapter = AshbySubmitAdapter()
+
+    out = attempt_auto_submit(
+        result, enabled=True, challenge_detector=detector, submit_adapter=adapter, page=object()
+    )
+
+    assert out is result
+    assert out.submit_performed is False
+    assert adapter.submit(object()) is False
+    assert adapter.submit_confirmed(object()) is False
 
 
 class _FakeLocator:

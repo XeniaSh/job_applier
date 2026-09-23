@@ -9,6 +9,7 @@ import logging
 import time
 
 from app.application.autofill.answers import ApplicationAnswerGenerator
+from app.application.autofill.ashby import AshbyAdapter, AshbyFormError
 from app.application.autofill.browser import (
     BrowserSession,
     BrowserSetupError,
@@ -31,6 +32,7 @@ from app.application.autofill.models import (
 from app.application.autofill.options import match_option, match_option_exact_normalized, match_yes_no
 from app.application.autofill.questions import QuestionKind
 from app.application.autofill.resolver import (
+    TARGET_COMPANY_ASHBY_PREFIX,
     TARGET_COMPANY_LEVER_PREFIX,
     ResolvedVacancy,
     VacancyResolveError,
@@ -47,7 +49,11 @@ from app.application.candidate_profile_loader import CandidateProfileLoadError, 
 
 logger = logging.getLogger(__name__)
 
-_UNSUPPORTED_FORM_ERRORS: tuple[type[Exception], ...] = (GreenhouseFormError, LeverFormError)
+_UNSUPPORTED_FORM_ERRORS: tuple[type[Exception], ...] = (
+    GreenhouseFormError,
+    LeverFormError,
+    AshbyFormError,
+)
 
 
 class AutofillAdapter(Protocol):
@@ -63,12 +69,19 @@ class AutofillAdapter(Protocol):
 
 def default_adapter_for_source(source: str) -> AutofillAdapter:
     """Source-aware ATS adapter selection. Unknown sources keep the historical Greenhouse default."""
-    if source.strip().startswith(TARGET_COMPANY_LEVER_PREFIX):
+    cleaned = source.strip()
+    if cleaned.startswith(TARGET_COMPANY_LEVER_PREFIX):
         logger.warning(
             "autofill_adapter_dispatch provider=lever adapter=LeverAdapter source=%s",
             source,
         )
         return LeverAdapter()
+    if cleaned.startswith(TARGET_COMPANY_ASHBY_PREFIX):
+        logger.warning(
+            "autofill_adapter_dispatch provider=ashby adapter=AshbyAdapter source=%s",
+            source,
+        )
+        return AshbyAdapter()
     return GreenhouseAdapter()
 
 

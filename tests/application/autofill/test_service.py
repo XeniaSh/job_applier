@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from app.application.autofill.ashby import AshbyAdapter
 from app.application.autofill.browser import BrowserNavigationError, BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.classifier import classify_field
@@ -684,6 +685,26 @@ def test_default_adapter_for_source_selects_greenhouse_without_dispatch_log(capl
     assert not any(
         record.getMessage().startswith("autofill_adapter_dispatch") for record in caplog.records
     )
+
+
+def test_default_adapter_for_source_selects_ashby_and_logs_dispatch(caplog) -> None:
+    """Regression: an Ashby-sourced vacancy must be driven by `AshbyAdapter`,
+    never silently fall back to `GreenhouseAdapter` (which would drive an
+    Ashby page with Greenhouse-specific field semantics).
+    """
+    caplog.set_level(logging.WARNING, logger="app.application.autofill.service")
+    adapter = default_adapter_for_source("target_company:ashby:perk")
+    assert isinstance(adapter, AshbyAdapter)
+    assert not isinstance(adapter, GreenhouseAdapter)
+    dispatch_records = [
+        record for record in caplog.records if record.getMessage().startswith("autofill_adapter_dispatch")
+    ]
+    assert len(dispatch_records) == 1
+    assert dispatch_records[0].levelno == logging.WARNING
+    message = dispatch_records[0].getMessage()
+    assert "provider=ashby" in message
+    assert "adapter=AshbyAdapter" in message
+    assert "source=target_company:ashby:perk" in message
 
 
 class _LeverFakeLocator:

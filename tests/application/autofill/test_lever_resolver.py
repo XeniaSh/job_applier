@@ -94,4 +94,4 @@ def test_default_resolver_dispatches_lever_and_greenhouse_by_source() -> None:
 
 def test_default_resolver_rejects_unknown_source() -> None:
     with pytest.raises(VacancyResolveError, match="Unsupported vacancy source"):
-        DefaultVacancyResolver().resolve("target_company:ashby:acme", "1")
+        DefaultVacancyResolver().resolve("target_company:smartrecruiters:acme", "1")
