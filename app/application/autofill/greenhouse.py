@@ -20,6 +20,7 @@ from app.application.autofill.options import (
     match_gender_option,
     match_located_or_relocate_option,
     match_option,
+    match_option_exact_normalized,
     match_prefer_not_to_disclose_gender,
     match_sponsorship_option,
     match_work_authorization_option,
@@ -535,7 +536,7 @@ class GreenhouseAdapter:
                 locator.set_input_files(str(classified.value))
                 return True
             if classified.kind in {QuestionKind.LOCATION} or _is_combobox(locator, field):
-                return _fill_combobox(page, locator, str(classified.value))
+                return _fill_combobox(page, locator, str(classified.value), kind=classified.kind)
             if field.field_type in _TEXT_TYPES or field.field_type == "textarea":
                 return _fill_text(page, locator, str(classified.value))
         except PlaywrightError:
@@ -1396,7 +1397,12 @@ def _clear_combobox_input(locator: Locator) -> None:
 
 
 def _fill_combobox(
-    page: Page, locator: Locator, value: str, *, resolved: dict[str, str] | None = None
+    page: Page,
+    locator: Locator,
+    value: str,
+    *,
+    kind: QuestionKind | None = None,
+    resolved: dict[str, str] | None = None,
 ) -> bool:
     """Type into a custom searchable combobox and commit the exact live
     option, not merely the typed text.
@@ -1418,7 +1424,10 @@ def _fill_combobox(
     (never re-typed to force a retry): if the exact value has no live
     match, the comma-separated head (e.g. "Tashkent, Uzbekistan" ->
     "Tashkent") is tried once against that same menu, since some
-    combobox options are only worded as the leading component. No blind
+    combobox options are only worded as the leading component -- except
+    for SCHOOL, which never tries this head fallback, since an explicit
+    value like "Aalto University, Helsinki" must never resolve to a
+    different institution's live option ("Aalto University"). No blind
     Enter is ever pressed and no other option is ever substituted -- once
     resolved, only that exact live option's id/label (captured before any
     click, since a committed React-select can detach/unmount the option
@@ -1444,12 +1453,23 @@ def _fill_combobox(
             _clear_combobox_input(locator)
             return False
     react_controls.scoped_visible_option_texts(page, locator)
-    option = react_controls.scoped_matching_option(page, locator, value)
+    # SCHOOL never uses the shared fuzzy/prefix scoped matcher -- a partial
+    # or unrelated live option (e.g. "Aalto University" when the candidate's
+    # explicit school is a different institution) must never be clicked.
+    matcher = (
+        react_controls.scoped_matching_option_exact_normalized
+        if kind is QuestionKind.SCHOOL
+        else react_controls.scoped_matching_option
+    )
+    option = matcher(page, locator, value)
     matched_value = value
-    if option is None:
+    # SCHOOL never falls back to the comma head: an explicit value like
+    # "Aalto University, Helsinki" must never resolve to "Aalto University"
+    # -- only an exact normalized match of the full value is acceptable.
+    if option is None and kind is not QuestionKind.SCHOOL:
         head = value.strip().split(",")[0].strip()
         if head and head.lower() != value.strip().lower():
-            option = react_controls.scoped_matching_option(page, locator, head)
+            option = matcher(page, locator, head)
             matched_value = head
     if option is None:
         _log_combobox_no_match(page, locator, start)
@@ -1596,6 +1616,13 @@ def _fill_choice(
             # matching option.
             react_controls.dismiss_menu(page)
             return False
+        if matched is None and kind is QuestionKind.SCHOOL:
+            # The explicit school text itself must never be clicked as a
+            # literal label -- an unresolved school must fail closed rather
+            # than fall through to whatever `select_single_option` fuzzy
+            # matches the raw text against next.
+            react_controls.dismiss_menu(page)
+            return False
         match = matched or wanted
     react_controls.dismiss_menu(page)
     # `wanted` here is the discovery-time value (e.g. GENDER's non-disclosure
@@ -1650,6 +1677,11 @@ def _live_choice_match(
         return match_prefer_not_to_disclose_gender(live) or match_gender_option(wanted, live)
     if kind is QuestionKind.ACADEMIC_LEVEL:
         return match_academic_option(wanted, live)
+    if kind is QuestionKind.SCHOOL:
+        # Never fuzzy/prefix -- a partial or unrelated live option (e.g. a
+        # portal-rendered "Aalto University" when the candidate's explicit
+        # school is a different institution) must never be substituted.
+        return match_option_exact_normalized(wanted, live)
     if kind in (QuestionKind.AGE, QuestionKind.SENSITIVE):
         # AGE/SENSITIVE never carry any wanted text other than a decline
         # intent (see `_age_decline_value` / `_sensitive_decline_value`), so

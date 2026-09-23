@@ -712,6 +712,32 @@ def test_fill_combobox_fails_closed_without_pressing_enter_when_no_exact_option(
     assert "Enter" not in page.keyboard.presses
 
 
+def test_fill_combobox_school_never_selects_prefix_or_partial_live_option() -> None:
+    """SCHOOL must never use the shared fuzzy/prefix scoped matcher (the one
+    every other combobox kind above relies on): a live option that merely
+    starts with the typed school name (e.g. "Aalto University of Applied
+    Sciences" for a typed "Aalto University") is a different real-world
+    institution and must never be clicked.
+    """
+    page = _PortalComboboxPage(["Aalto University of Applied Sciences"])
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "Aalto University", kind=QuestionKind.SCHOOL)
+
+    assert ok is False
+    assert page.single_value.text == ""
+
+
+def test_fill_combobox_school_matches_live_option_despite_case_difference() -> None:
+    page = _PortalComboboxPage(["Aalto University", "University of Helsinki"])
+    control = _FakeLocator([page.input])
+
+    ok = _fill_combobox(page, control, "AALTO UNIVERSITY", kind=QuestionKind.SCHOOL)
+
+    assert ok is True
+    assert page.single_value.text == "Aalto University"
+
+
 # --- Read-back correctness fix: a failed `_fill_combobox` attempt must
 # never leave typed search text behind for `GreenhouseAdapter.read_back`
 # to report as a committed selection. This only reproduces against a DOM

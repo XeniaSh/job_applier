@@ -452,6 +452,39 @@ def label_matches(wanted: str, option: str) -> bool:
     return not before.isalnum() and not after.isalnum()
 
 
+_NORMALIZE_PUNCTUATION_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _normalize_exact_label(value: str) -> str:
+    """Case/whitespace/punctuation-insensitive normalization only -- never a
+    fuzzy similarity transform (no stemming, no partial-token reduction).
+    """
+    stripped = _NORMALIZE_PUNCTUATION_RE.sub(" ", value.strip().lower())
+    return " ".join(stripped.split())
+
+
+def match_option_exact_normalized(wanted: str, options: list[str]) -> str | None:
+    """Match an option only when it is exactly equal to `wanted` after
+    normalizing harmless case/whitespace/punctuation differences.
+
+    Never uses fuzzy similarity, prefix/substring, token-overlap, or
+    ranking, and never falls back to the first option: an option that is
+    merely related (e.g. a different school) must never be substituted for
+    the candidate's explicit intended value. Returns None both when there is
+    no live option list and when no option is an exact normalized
+    equivalent, so the caller can fail closed instead of guessing.
+    """
+    needle = _normalize_exact_label(wanted)
+    if not needle or not options:
+        return None
+    for option in options:
+        if not option or not option.strip():
+            continue
+        if _normalize_exact_label(option) == needle:
+            return option.strip()
+    return None
+
+
 def match_option(wanted: str, options: list[str]) -> str | None:
     needle = wanted.strip()
     if not needle or not options:

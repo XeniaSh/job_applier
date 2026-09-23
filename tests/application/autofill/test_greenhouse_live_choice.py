@@ -45,6 +45,18 @@ def test_live_sensitive_match_returns_none_when_no_decline_option_exists() -> No
     assert _live_choice_match("decline_to_answer", live, QuestionKind.SENSITIVE) is None
 
 
+def test_live_school_matches_only_exact_normalized_equivalent() -> None:
+    live = ["Aalto University", "University of Helsinki"]
+    assert _live_choice_match("Example University", live, QuestionKind.SCHOOL) is None
+    assert _live_choice_match("aalto, university.", live, QuestionKind.SCHOOL) == "Aalto University"
+
+
+def test_live_school_never_selects_partial_or_prefix_match() -> None:
+    live = ["Aalto University of Applied Sciences"]
+    assert _live_choice_match("Aalto University", live, QuestionKind.SCHOOL) is None
+    assert _live_choice_match("Aalto", live, QuestionKind.SCHOOL) is None
+
+
 def test_live_sponsorship_does_not_select_unrelated_netherlands_hsm() -> None:
     live = ["Yes, Netherlands Highly Skilled Migrant Visa", "No"]
     assert _live_choice_match("Yes", live, QuestionKind.VISA_SPONSORSHIP, "uzbekistan") is None

@@ -22,6 +22,7 @@ from app.application.autofill.options import (
     match_located_or_relocate_option,
     match_named_skill_set,
     match_option,
+    match_option_exact_normalized,
     match_prefer_not_to_disclose_gender,
     match_remote_work_arrangement_option,
     match_years_option,
@@ -490,7 +491,10 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
 
     if _is_school(field):
         school = profile.employment.school
-        value = match_option(school, field.options) if school and field.options else school
+        if school and field.options:
+            value = match_option_exact_normalized(school, field.options)
+        else:
+            value = school
         return MappedQuestion(kind=QuestionKind.SCHOOL, value=value, fillable=bool(value))
 
     if _is_anticipated_work_country(text):

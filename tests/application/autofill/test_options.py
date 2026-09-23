@@ -8,6 +8,7 @@ from app.application.autofill.options import (
     match_application_source,
     match_gender_option,
     match_option,
+    match_option_exact_normalized,
     match_prefer_not_to_disclose_gender,
     match_years_option,
     match_yes_no,
@@ -20,6 +21,28 @@ from app.application.autofill.options import (
     match_work_authorization_option,
     select_listed_options,
 )
+
+
+def test_match_option_exact_normalized_ignores_case_whitespace_and_punctuation() -> None:
+    options = ["Aalto University", "University of Helsinki"]
+    assert match_option_exact_normalized("aalto university", options) == "Aalto University"
+    assert match_option_exact_normalized("  AALTO   UNIVERSITY  ", options) == "Aalto University"
+    assert match_option_exact_normalized("Aalto, University.", options) == "Aalto University"
+    assert match_option_exact_normalized("Aalto-University", options) == "Aalto University"
+
+
+def test_match_option_exact_normalized_rejects_partial_or_prefix_match() -> None:
+    options = ["Aalto University", "Aalto University of Applied Sciences"]
+    # A different, real institution the candidate did not name must never be
+    # substituted just because it shares a prefix/substring.
+    assert match_option_exact_normalized("Aalto", options) is None
+    assert match_option_exact_normalized("Aalto University of Technology", options) is None
+
+
+def test_match_option_exact_normalized_returns_none_when_no_options_or_no_match() -> None:
+    assert match_option_exact_normalized("Aalto University", []) is None
+    assert match_option_exact_normalized("Aalto University", ["University of Helsinki"]) is None
+    assert match_option_exact_normalized("", ["Aalto University"]) is None
 
 
 def test_parse_max_choices_and_relocation_destination() -> None:

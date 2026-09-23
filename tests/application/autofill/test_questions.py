@@ -1758,6 +1758,59 @@ def test_stripe_school_uses_explicit_profile_fact_and_matches_live_option() -> N
     assert mapped.fillable is True
 
 
+def test_stripe_school_never_selects_unrelated_live_option() -> None:
+    """The candidate's explicit school is neither live option -- selecting
+    "Aalto University" (or any other unrelated option) just because it is
+    present would substitute a different real-world institution for the
+    candidate's explicit fact.
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label="School *",
+            field_type="combobox",
+            required=True,
+            options=["Aalto University", "University of Helsinki"],
+        ),
+        _profile(employment={"school": "Example University"}),
+    )
+    assert mapped.kind is QuestionKind.SCHOOL
+    assert mapped.value is None
+    assert mapped.fillable is False
+
+
+def test_stripe_school_matches_live_option_despite_harmless_formatting_differences() -> None:
+    mapped = map_question(
+        DiscoveredField(
+            label="School *",
+            field_type="combobox",
+            required=True,
+            options=["Aalto University"],
+        ),
+        _profile(employment={"school": "  aalto, university."}),
+    )
+    assert mapped.kind is QuestionKind.SCHOOL
+    assert mapped.value == "Aalto University"
+    assert mapped.fillable is True
+
+
+def test_stripe_school_rejects_partial_or_prefix_live_option() -> None:
+    """A live option that merely starts with (or contains) the explicit
+    school name must never be treated as the same institution.
+    """
+    mapped = map_question(
+        DiscoveredField(
+            label="School *",
+            field_type="combobox",
+            required=True,
+            options=["Aalto University of Applied Sciences"],
+        ),
+        _profile(employment={"school": "Aalto University"}),
+    )
+    assert mapped.kind is QuestionKind.SCHOOL
+    assert mapped.value is None
+    assert mapped.fillable is False
+
+
 def test_stripe_location_relative_authorization_accepts_explicit_negative_fact() -> None:
     mapped = map_question(
         DiscoveredField(

@@ -28,7 +28,7 @@ from app.application.autofill.models import (
     FieldClassification,
     stage1_autofill_result,
 )
-from app.application.autofill.options import match_option, match_yes_no
+from app.application.autofill.options import match_option, match_option_exact_normalized, match_yes_no
 from app.application.autofill.questions import QuestionKind
 from app.application.autofill.resolver import (
     TARGET_COMPANY_LEVER_PREFIX,
@@ -809,6 +809,12 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
         expected_level = canonical_academic_level(wanted)
         actual_level = canonical_academic_level(actual)
         return expected_level is not None and expected_level == actual_level
+    if item.kind is QuestionKind.SCHOOL:
+        # Normalized (case/whitespace/punctuation) equality only -- never a
+        # partial/substring match, since a readback of a different, merely
+        # related school (e.g. "Aalto University" when the candidate's
+        # explicit school is a different institution) must not confirm.
+        return match_option_exact_normalized(wanted, [actual]) is not None
     if wanted == actual:
         return True
     if item.kind is QuestionKind.PHONE:

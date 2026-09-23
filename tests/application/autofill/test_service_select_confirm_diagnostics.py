@@ -100,6 +100,25 @@ def _country_item(value: str = "Uzbekistan") -> ClassifiedField:
     )
 
 
+def _school_field() -> DiscoveredField:
+    return DiscoveredField(
+        label="School *",
+        field_type="combobox",
+        required=True,
+        options=["Aalto University"],
+    )
+
+
+def _school_item(value: str = "Aalto University") -> ClassifiedField:
+    return ClassifiedField(
+        field=_school_field(),
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=value,
+        fill=True,
+        kind=QuestionKind.SCHOOL,
+    )
+
+
 def _privacy_field() -> DiscoveredField:
     return DiscoveredField(
         label="I acknowledge that my data will be processed as described in the Privacy Policy",
@@ -162,6 +181,24 @@ def test_readback_matches_rejects_bare_dial_code_for_country() -> None:
 def test_readback_matches_accepts_semantic_country_with_dial_code_suffix() -> None:
     item = _country_item("Uzbekistan")
     assert service._readback_matches(item, "Uzbekistan +998") is True
+
+
+def test_readback_matches_accepts_school_equivalent_modulo_formatting() -> None:
+    item = _school_item("Aalto University")
+    assert service._readback_matches(item, "aalto, university.") is True
+    assert service._readback_matches(item, "  AALTO   UNIVERSITY  ") is True
+
+
+def test_readback_matches_rejects_partial_prefix_or_unrelated_school_readback() -> None:
+    """A readback that is only a substring/superset, a bare prefix, or a
+    different institution entirely must never confirm the fill -- SCHOOL is
+    deliberately never part of the fuzzy substring-match kind allowlist the
+    other menu-choice kinds share.
+    """
+    item = _school_item("Aalto University")
+    assert service._readback_matches(item, "Aalto University of Applied Sciences") is False
+    assert service._readback_matches(item, "Aalto") is False
+    assert service._readback_matches(item, "University of Helsinki") is False
 
 
 def test_fill_and_confirm_confirms_age_decline_on_first_attempt_with_fuzzy_readback(

@@ -11,6 +11,7 @@ from app.application.autofill.options import (
     label_matches,
     match_affirmative_option,
     match_option,
+    match_option_exact_normalized,
 )
 
 _CHIP_SELECTOR = (
@@ -118,6 +119,25 @@ def scoped_matching_option(page: Page, control: Locator, wanted: str) -> Locator
     return _first_matching_option(options, needle)
 
 
+def scoped_matching_option_exact_normalized(page: Page, control: Locator, wanted: str) -> Locator | None:
+    """Exact-normalized-only variant of `scoped_matching_option`.
+
+    Used only for SCHOOL: `_first_matching_option`'s `label_matches`
+    fallback is a fuzzy/prefix match, which would let a portal-rendered
+    "Aalto University" option get selected for a typed/explicit school that
+    is merely a substring or prefix of it, substituting a different
+    real-world institution for the candidate's explicit value. This never
+    falls back to a fuzzy match or the first option.
+    """
+    needle = wanted.strip()
+    if not needle:
+        return None
+    options = _scoped_options(page, control)
+    if options is None:
+        return None
+    return _first_exact_normalized_option(options, needle)
+
+
 def _option_texts(options: Locator) -> list[str]:
     texts: list[str] = []
     for index in range(options.count()):
@@ -152,6 +172,22 @@ def _first_matching_option(options: Locator, needle: str) -> Locator | None:
         if label_matches(needle, text):
             prefix = prefix or option
     return prefix
+
+
+def _first_exact_normalized_option(options: Locator, needle: str) -> Locator | None:
+    for index in range(options.count()):
+        option = options.nth(index)
+        try:
+            if not option.is_visible():
+                continue
+        except PlaywrightError:
+            continue
+        text = " ".join((option.inner_text() or "").split())
+        if not text:
+            continue
+        if match_option_exact_normalized(needle, [text]) is not None:
+            return option
+    return None
 
 
 def dismiss_menu(page: Page) -> None:
