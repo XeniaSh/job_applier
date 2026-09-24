@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head><title>Backend Engineer - Perk</title></head>
+<body>
+<div id="ashby_app">
+  <div role="tablist">
+    <button id="job-application-form" role="tab" aria-selected="true" type="button">Application</button>
+  </div>
+  <div id="form" role="tabpanel" aria-labelledby="job-application-form">
+    <div class="ashby-application-form-container">
+        <fieldset data-field-path="_systemfield_name">
+          <label class="ashby-application-form-question-title" for="_systemfield_name">Name</label>
+          <input
+            id="_systemfield_name"
+            name="_systemfield_name"
+            type="text"
+            required
+            class="ashby-application-form-input-text"
+          />
+        </fieldset>
+
+        <fieldset data-field-path="_systemfield_email">
+          <label class="ashby-application-form-question-title" for="_systemfield_email">Email</label>
+          <input
+            id="_systemfield_email"
+            name="_systemfield_email"
+            type="email"
+            required
+            class="ashby-application-form-input-text"
+          />
+        </fieldset>
+
+        <!-- Live-observed shape: the Phone Number field's own
+             `[data-field-path]` wrapper additionally nests a
+             `.ashby-application-form-texting-consent-description` component
+             holding two distinct radio groups -- an unrelated `smsConsent`
+             group and the platform's own exact `whatsAppConsent` group --
+             sharing this same wrapper rather than each getting its own. -->
+        <fieldset data-field-path="a1b2c3d4-phone-uuid">
+          <label class="ashby-application-form-question-title" for="a1b2c3d4-phone-uuid">Phone Number</label>
+          <input
+            id="a1b2c3d4-phone-uuid"
+            name="a1b2c3d4-phone-uuid"
+            type="tel"
+            required
+            class="ashby-application-form-input-text"
+          />
+          <div class="ashby-application-form-texting-consent-description">
+            By providing your phone number, you agree we may text you about your application.
+            <div class="ashby-application-form-input-radio-group">
+              <label><input type="radio" name="smsConsent" value="Yes - I consent to receiving SMS messages" /> Yes - I consent to receiving SMS messages</label>
+              <label><input type="radio" name="smsConsent" value="No - I do not consent to receiving SMS messages" /> No - I do not consent to receiving SMS messages</label>
+            </div>
+            Can we also contact you on WhatsApp about your application? (optional)
+            <div class="ashby-application-form-input-radio-group">
+              <label><input type="radio" name="whatsAppConsent" value="Yes - I consent to receiving WhatsApp messages" /> Yes - I consent to receiving WhatsApp messages</label>
+              <label><input type="radio" name="whatsAppConsent" value="No - I do not consent to receiving WhatsApp messages" /> No - I do not consent to receiving WhatsApp messages</label>
+            </div>
+          </div>
+        </fieldset>
+
+        <!-- Live-observed shape: the same conjunctive skill question
+             rendered as a native radio group instead of the yesno button
+             widget (see `_is_yes_no_control`). -->
+        <fieldset data-field-path="a1b2c3d4-java-spring-uuid">
+          <div class="ashby-application-form-question-title">
+            Do you have recent hands-on working experience with Java and Spring Boot?
+          </div>
+          <div class="ashby-application-form-input-radio-group" aria-required="true">
+            <label><input type="radio" name="java-spring-boot" value="Yes" /> Yes</label>
+            <label><input type="radio" name="java-spring-boot" value="No" /> No</label>
+          </div>
+        </fieldset>
+    </div>
+
+    <button type="button" class="ashby-application-form-submit-button">Submit Application</button>
+  </div>
+</div>
+</body>
+</html>

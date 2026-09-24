@@ -41,6 +41,16 @@ observed question shape and never guessing beyond it:
   marketing contact must never be automatic. A distinct, exact-worded
   "WhatsApp"-style optional communications-consent Yes/No control is instead
   always answered explicit No (never Yes/opt-in) via `adjust_classified_field`.
+  That control is also recognized when Ashby renders it as a nested
+  `.ashby-application-form-texting-consent-description` component sharing the
+  Phone Number field's own `[data-field-path]` wrapper (see
+  `_discover_nested_whatsapp_consent`): discovery always yields the phone
+  `tel` input as its own text field regardless, and additionally yields the
+  consent question as a separate field only when the nested component's
+  radio group name is the platform's own exact `whatsAppConsent` and the
+  live options include the platform's exact safe negative wording -- never
+  guessing at an unrelated same-block SMS-consent radio group under a
+  different name.
 
 `AshbyAdapter.adjust_classified_field` is an optional, Ashby-only hook
 `AutofillService` calls (when present) right after the shared
@@ -99,6 +109,8 @@ _APPLICATION_PANEL_SELECTOR = (
 )
 _FIELD_WRAPPER_SELECTOR = "[data-field-path]"
 _YESNO_OPTION_CLASS = "ashby-application-form-input-yesno-option"
+_TEXTING_CONSENT_DESCRIPTION_CLASS = "ashby-application-form-texting-consent-description"
+_WHATSAPP_CONSENT_RADIO_NAME = "whatsAppConsent"
 _CONSENT_FIELD_NAME = "_systemfield_data_consent_ack"
 _GENERIC_FORM_CONTAINER_SELECTOR = ".ashby-application-form-container"
 _SUBMIT_BUTTON_SELECTOR = "button.ashby-application-form-submit-button"
@@ -135,6 +147,7 @@ _TECH_EXPERIENCE_QUESTION_RE = re.compile(
     r"experience\s+(?:with|in|using)\s+(.+?)\s*\??\s*$",
     re.IGNORECASE,
 )
+_WHATSAPP_CONSENT_SAFE_NEGATIVE_RE = re.compile(r"^no\b.*\bdo not consent\b", re.IGNORECASE)
 _SALARY_LOCAL_CURRENCY_CUE = "local currency"
 _SALARY_ANNUAL_LABEL_TERMS = ("annual", "per year", "yearly", "/year")
 _SALARY_ANNUAL_PERIOD_VALUES = frozenset(
@@ -169,6 +182,29 @@ _WRAPPER_INFO_JS = """el => {
         'input[type="text"], input[type="email"], input[type="url"], '
         + 'input[type="number"], input[type="tel"], textarea'
     );
+    const consentEl = q('.ashby-application-form-texting-consent-description');
+    const consentRadioNames = consentEl
+        ? Array.from(new Set(
+            Array.from(consentEl.querySelectorAll('input[type="radio"]'))
+                .map((radio) => radio.name || '')
+                .filter(Boolean)
+        ))
+        : [];
+    const collectNonInputText = (node) => {
+        let text = '';
+        node.childNodes.forEach((child) => {
+            if (child.nodeType === 3) {
+                text += child.textContent;
+            } else if (child.nodeType === 1 && child.tagName !== 'INPUT' && child.tagName !== 'LABEL') {
+                text += ' ' + collectNonInputText(child);
+            }
+        });
+        return text;
+    };
+    const consentText = consentEl ? collectNonInputText(consentEl).replace(/\\s+/g, ' ').trim() : '';
+    const consentRequired = consentEl
+        ? (/\\*/.test(consentEl.innerText || '') || !!consentEl.querySelector('[aria-required="true"], [required]'))
+        : false;
     const hasRequiredClassPrefix = (node) => !!node && Array.from(node.classList || [])
         .some((cls) => cls.indexOf('_required_') === 0);
     const requiredClassMarker = titleEl
@@ -195,6 +231,10 @@ _WRAPPER_INFO_JS = """el => {
         textInputId: textInput ? (textInput.id || '') : '',
         textInputName: textInput ? (textInput.name || '') : '',
         required: requiredMarker,
+        hasConsentBlock: !!consentEl,
+        consentRadioNames: consentRadioNames,
+        consentText: consentText,
+        consentRequired: consentRequired,
     };
 }"""
 
@@ -517,14 +557,29 @@ class AshbyAdapter:
         scope = page.locator(_APPLICATION_PANEL_SELECTOR).first
         wrappers = scope.locator(_FIELD_WRAPPER_SELECTOR)
         for index in range(wrappers.count()):
-            field = _discover_wrapper(wrappers.nth(index), seen_radio_names)
-            if field is None:
-                continue
-            if field.element_id:
-                if field.element_id in seen_element_ids:
-                    continue
-                seen_element_ids.add(field.element_id)
-            fields.append(field)
+            # A wrapper can yield more than one field -- e.g. the Phone
+            # Number wrapper's own nested WhatsApp-consent component (see
+            # `_discover_nested_whatsapp_consent`) -- so every field this
+            # wrapper produced is deduped and logged the same way.
+            for field in _discover_wrapper(wrappers.nth(index), seen_radio_names):
+                if field.element_id:
+                    if field.element_id in seen_element_ids:
+                        continue
+                    seen_element_ids.add(field.element_id)
+                fields.append(field)
+                # Compact, privacy-safe pipeline diagnostic -- `context` is
+                # Ashby's own generated `data-field-path` identifier (never a
+                # candidate value or the question label), so this can freely
+                # log at this volume. Paired with the "resolved"/"interaction"/
+                # "readback" stage logs below, this lets a live run's logs alone
+                # localize which stage a given field (e.g. the phone field)
+                # stalled at, without ever exposing what was typed.
+                logger.warning(
+                    "ashby_field stage=discovered context=%s field_type=%s required=%s",
+                    field.context,
+                    field.field_type,
+                    field.required,
+                )
         return fields
 
     def fill_field(self, page: Page, classified: ClassifiedField) -> bool:
@@ -537,6 +592,17 @@ class AshbyAdapter:
             return False
         if not classified.fill or classified.value is None:
             return False
+        result = self._attempt_fill(page, classified)
+        logger.warning(
+            "ashby_field stage=interaction context=%s field_type=%s result=%s",
+            field.context,
+            field.field_type,
+            result,
+        )
+        return result
+
+    def _attempt_fill(self, page: Page, classified: ClassifiedField) -> bool:
+        field = classified.field
         try:
             if field.field_type == "file":
                 locator = _field_locator(page, field)
@@ -575,6 +641,16 @@ class AshbyAdapter:
         return _resume_is_attached(page, field, resume_path.name)
 
     def read_back(self, page: Page, field: DiscoveredField) -> str | None:
+        value = self._read_back_value(page, field)
+        logger.warning(
+            "ashby_field stage=readback context=%s field_type=%s empty=%s",
+            field.context,
+            field.field_type,
+            not value,
+        )
+        return value
+
+    def _read_back_value(self, page: Page, field: DiscoveredField) -> str | None:
         if field.field_type == "file":
             names = _file_names(page, field)
             return names[0] if names else None
@@ -641,6 +717,13 @@ class AshbyAdapter:
         item = _adjust_notice_period(item, profile)
         item = _adjust_current_location_combobox(item, profile)
         item = _adjust_country_relative_work_authorization(item, profile, vacancy)
+        logger.warning(
+            "ashby_field stage=resolved context=%s field_type=%s kind=%s fill=%s",
+            item.field.context,
+            item.field.field_type,
+            item.kind,
+            item.fill,
+        )
         return item
 
 
@@ -843,12 +926,55 @@ def _adjust_application_source_checkbox_group(
     return item
 
 
+_YES_PREFIX_RE = re.compile(r"^yes\b", re.IGNORECASE)
+_NO_PREFIX_RE = re.compile(r"^no\b", re.IGNORECASE)
+
+
+def _is_yes_no_control(field: DiscoveredField) -> bool:
+    """True for Ashby's custom Yes/No button widget (`field_type ==
+    "yesno"`) and for a plain native radio group Ashby renders for the exact
+    same semantic Yes/No question shape instead (`field_type == "radio"`
+    with exactly two live options, one Yes-prefixed and one No-prefixed,
+    e.g. "Yes - I consent to receiving WhatsApp messages" /
+    "No - I do not consent..."). A live posting was observed rendering both
+    the WhatsApp-consent and Java/Spring-Boot-experience questions this way
+    -- via `.ashby-application-form-input-radio-group` -- rather than the
+    yesno widget, so `_looks_like_optional_whatsapp_consent` and
+    `_adjust_conjunctive_skill_experience` must recognize either shape.
+    Never any other radio group (three-plus options, or two options that are
+    not a Yes/No pair) -- this never broadens radio handling beyond the
+    exact semantic shape both callers already require.
+    """
+    if field.field_type == "yesno":
+        return True
+    if field.field_type != "radio":
+        return False
+    options = [option.strip() for option in field.options if option and option.strip()]
+    if len(options) != 2:
+        return False
+    return any(_YES_PREFIX_RE.match(option) for option in options) and any(
+        _NO_PREFIX_RE.match(option) for option in options
+    )
+
+
 def _looks_like_optional_whatsapp_consent(field: DiscoveredField) -> bool:
-    if field.field_type != "yesno" or field.required:
+    if not _is_yes_no_control(field) or field.required:
         # A required control is never eligible: declining a mandatory
         # question is not the same safe no-op as declining a clearly
         # optional one, so this stays manual instead.
         return False
+    if field.name == _WHATSAPP_CONSENT_RADIO_NAME:
+        # The exact `whatsAppConsent` radio name alone is not proof this
+        # field went through `_discover_nested_whatsapp_consent`'s safe
+        # negative-option check -- a same-named group could in principle
+        # reach here via the generic radio-group discovery branch instead,
+        # which never checks live option wording. So this re-verifies the
+        # platform's own exact "No - I do not consent..." wording is present
+        # among this field's *own* discovered options before trusting the
+        # name alone; only then can `label` skip the generic cue-phrase
+        # check below (the nested component's free-form description text --
+        # or a fallback placeholder -- need not itself mention WhatsApp).
+        return any(_WHATSAPP_CONSENT_SAFE_NEGATIVE_RE.match(option.strip()) for option in field.options)
     label = " ".join(field.label.lower().split())
     if "whatsapp" not in label:
         return False
@@ -905,7 +1031,7 @@ def _adjust_conjunctive_skill_experience(item: ClassifiedField, profile: Candida
     never answered No, since the absence of a configured entry is not
     truthful evidence the candidate lacks that experience.
     """
-    if item.fill or item.kind is not QuestionKind.UNKNOWN or item.field.field_type != "yesno":
+    if item.fill or item.kind is not QuestionKind.UNKNOWN or not _is_yes_no_control(item.field):
         return item
     named = _parse_conjunctive_tech_question(item.field.label)
     if not named:
@@ -1066,13 +1192,79 @@ def _adjust_country_relative_work_authorization(
     )
 
 
-def _discover_wrapper(wrapper: Locator, seen_radio_names: set[str]) -> DiscoveredField | None:
+def _text_field_from_info(info: dict, label: str, required: bool, data_field_path: str) -> DiscoveredField:
+    tag = str(info.get("textInputTag") or "")
+    input_type = str(info.get("textInputType") or "")
+    element_id = str(info.get("textInputId") or "")
+    name = str(info.get("textInputName") or "")
+    field_type = "textarea" if tag == "textarea" else (input_type or "text")
+    if field_type not in _TEXT_TYPES and field_type != "textarea":
+        field_type = "text"
+    return DiscoveredField(
+        label=label,
+        name=name or None,
+        field_type=field_type,
+        required=required,
+        element_id=element_id or None,
+        context=data_field_path,
+    )
+
+
+def _discover_nested_whatsapp_consent(
+    wrapper: Locator,
+    data_field_path: str,
+    consent_radio_names: list[str],
+    consent_text: str,
+    consent_required: bool,
+) -> DiscoveredField | None:
+    """A live posting was observed rendering the Phone Number field's own
+    `[data-field-path]` wrapper with a second, nested
+    `.ashby-application-form-texting-consent-description` component holding
+    a distinct optional WhatsApp-consent radio group -- real evidence from
+    Ashby's own public frontend bundle names that radio group's `name`
+    attribute exactly `whatsAppConsent`, alongside (on some postings) an
+    unrelated same-block SMS-consent radio group under a different name.
+    Scoped strictly to `name="whatsAppConsent"` within the consent
+    component -- never the SMS group, and never the phone `tel` input in
+    the same wrapper -- so neither is ever read, selected, or exposed as if
+    it were this control. Also requires the platform's own exact,
+    safe "No - I do not consent..." negative wording to actually be present
+    among the live options: component identity (the class plus the exact
+    radio name) alone is not enough to trust an unverified live options
+    list, so an unrecognized options list fails closed (returns None) here,
+    leaving the wrapper's phone text field as the only field discovered
+    from it.
+    """
+    if _WHATSAPP_CONSENT_RADIO_NAME not in consent_radio_names:
+        return None
+    scoped_radios = wrapper.locator(
+        f'.{_TEXTING_CONSENT_DESCRIPTION_CLASS} input[type="radio"][name="{_WHATSAPP_CONSENT_RADIO_NAME}"]'
+    )
+    options: list[str] = []
+    for index in range(scoped_radios.count()):
+        radio = scoped_radios.nth(index)
+        value = _radio_option_label(radio) or radio.get_attribute("value")
+        if value:
+            options.append(str(value).strip())
+    if not any(_WHATSAPP_CONSENT_SAFE_NEGATIVE_RE.match(option) for option in options):
+        return None
+    return DiscoveredField(
+        label=consent_text or "WhatsApp messaging consent",
+        name=_WHATSAPP_CONSENT_RADIO_NAME,
+        field_type="radio",
+        required=consent_required,
+        options=options,
+        context=data_field_path,
+    )
+
+
+def _discover_wrapper(wrapper: Locator, seen_radio_names: set[str]) -> list[DiscoveredField]:
     try:
         info = wrapper.evaluate(_WRAPPER_INFO_JS)
     except PlaywrightError:
-        return None
+        return []
     if not isinstance(info, dict):
-        return None
+        return []
 
     data_field_path = str(info.get("dataFieldPath") or "")
     label = str(info.get("label") or "")
@@ -1085,102 +1277,123 @@ def _discover_wrapper(wrapper: Locator, seen_radio_names: set[str]) -> Discovere
             # reliable handle, so discovery (and `_field_locator` below)
             # never depend on an id being present.
             combo_input_id = str(info.get("comboInputId") or "")
-            return DiscoveredField(
-                label=label,
-                field_type="combobox_location",
-                required=required,
-                element_id=combo_input_id or None,
-                context=data_field_path,
-            )
+            return [
+                DiscoveredField(
+                    label=label,
+                    field_type="combobox_location",
+                    required=required,
+                    element_id=combo_input_id or None,
+                    context=data_field_path,
+                )
+            ]
         # Fail-closed regardless of what the shared classifier would
         # otherwise resolve -- see module docstring.
-        return DiscoveredField(
-            label=label or "Unknown", field_type="unknown", required=required, context=data_field_path
-        )
+        return [
+            DiscoveredField(
+                label=label or "Unknown", field_type="unknown", required=required, context=data_field_path
+            )
+        ]
 
     if info.get("hasFileInput"):
         file_id = str(info.get("fileInputId") or "")
         if not file_id:
-            return None
-        return DiscoveredField(
-            label=label,
-            name=file_id,
-            field_type="file",
-            required=required,
-            element_id=file_id,
-            context=data_field_path,
-        )
+            return []
+        return [
+            DiscoveredField(
+                label=label,
+                name=file_id,
+                field_type="file",
+                required=required,
+                element_id=file_id,
+                context=data_field_path,
+            )
+        ]
 
     if info.get("hasYesno"):
         options = _yesno_options(wrapper)
-        return DiscoveredField(
-            label=label, field_type="yesno", required=required, options=options, context=data_field_path
+        return [
+            DiscoveredField(
+                label=label, field_type="yesno", required=required, options=options, context=data_field_path
+            )
+        ]
+
+    if info.get("hasTextInput") and info.get("hasConsentBlock"):
+        # The phone `tel` input and a nested WhatsApp/SMS-consent radio
+        # component can share this exact wrapper (see
+        # `_discover_nested_whatsapp_consent`) -- the text input is always
+        # this wrapper's primary field regardless of whether the nested
+        # consent component's own identity resolves cleanly below, so this
+        # never falls through to the generic `radioCount > 0` branch and
+        # gets misdiscovered as a single radio field labeled "Phone Number".
+        fields = [_text_field_from_info(info, label, required, data_field_path)]
+        consent_radio_names = [str(name) for name in (info.get("consentRadioNames") or []) if name]
+        consent_field = _discover_nested_whatsapp_consent(
+            wrapper,
+            data_field_path,
+            consent_radio_names,
+            str(info.get("consentText") or ""),
+            bool(info.get("consentRequired")),
         )
+        if consent_field is not None:
+            fields.append(consent_field)
+        return fields
 
     radio_count = int(info.get("radioCount") or 0)
     if radio_count > 0:
         radio_name = str(info.get("radioName") or "")
         if radio_name:
             if radio_name in seen_radio_names:
-                return None
+                return []
             seen_radio_names.add(radio_name)
         options = _radio_options_in_wrapper(wrapper)
-        return DiscoveredField(
-            label=label,
-            name=radio_name or None,
-            field_type="radio",
-            required=required,
-            options=options,
-            context=data_field_path,
-        )
+        return [
+            DiscoveredField(
+                label=label,
+                name=radio_name or None,
+                field_type="radio",
+                required=required,
+                options=options,
+                context=data_field_path,
+            )
+        ]
 
     checkbox_count = int(info.get("checkboxCount") or 0)
     if checkbox_count > 1:
         if _looks_like_application_source_group_label(label):
             source_options = _checkbox_options_in_wrapper(wrapper)
             if len(source_options) >= 2:
-                return DiscoveredField(
-                    label=label,
-                    field_type="checkbox_group",
-                    required=required,
-                    options=source_options,
-                    context=data_field_path,
-                )
+                return [
+                    DiscoveredField(
+                        label=label,
+                        field_type="checkbox_group",
+                        required=required,
+                        options=source_options,
+                        context=data_field_path,
+                    )
+                ]
         # An optional multi-option checkbox group (e.g. employee
         # relationship) has no safe, generic per-option semantic this
         # adapter can resolve -- left undiscovered so it is never guessed
         # at or auto-checked. See module docstring.
-        return None
+        return []
     if checkbox_count == 1:
         checkbox_id = str(info.get("checkboxId") or "")
         checkbox_name = str(info.get("checkboxName") or "")
-        return DiscoveredField(
-            label=label,
-            name=checkbox_name or None,
-            field_type="checkbox",
-            required=required,
-            element_id=checkbox_id or None,
-            context=data_field_path,
-        )
+        return [
+            DiscoveredField(
+                label=label,
+                name=checkbox_name or None,
+                field_type="checkbox",
+                required=required,
+                element_id=checkbox_id or None,
+                context=data_field_path,
+            )
+        ]
 
     if info.get("hasTextInput"):
-        tag = str(info.get("textInputTag") or "")
-        input_type = str(info.get("textInputType") or "")
-        element_id = str(info.get("textInputId") or "")
-        name = str(info.get("textInputName") or "")
-        field_type = "textarea" if tag == "textarea" else (input_type or "text")
-        if field_type not in _TEXT_TYPES and field_type != "textarea":
-            field_type = "text"
-        return DiscoveredField(
-            label=label,
-            name=name or None,
-            field_type=field_type,
-            required=required,
-            element_id=element_id or None,
-            context=data_field_path,
-        )
+        return [_text_field_from_info(info, label, required, data_field_path)]
 
-    return None
+    return []
 
 
 def _looks_like_current_location_label(label: str) -> bool:
@@ -1258,10 +1471,37 @@ def _field_locator(page: Page, field: DiscoveredField) -> Locator:
         # the live input has no stable id on every observed Ashby form (see
         # `_discover_wrapper`).
         return page.locator(f'[data-field-path="{field.context}"] input[role="combobox"]')
+    if field.field_type in _TEXT_TYPES or field.field_type == "textarea":
+        return _text_field_locator(page, field)
     if field.element_id:
         return page.locator(f'[id="{field.element_id}"]')
     if field.name:
         return page.locator(f'[name="{field.name}"]')
+    return page.get_by_label(field.label)
+
+
+def _text_field_locator(page: Page, field: DiscoveredField) -> Locator:
+    """Scoped to the field's own `data-field-path` wrapper -- a bare,
+    page-wide `[id="..."]`/`[name="..."]` lookup (the prior behavior) can
+    also match an unrelated node elsewhere on the page that happens to reuse
+    the same id/name (e.g. a masked/formatted phone-input widget's own
+    mirrored or hidden value input), which would either silently target the
+    wrong element or make Playwright's strict-mode matching raise on more
+    than one match -- either way, a fill/readback that looks like it simply
+    did nothing. Narrowing to this field's own wrapper can only ever reduce
+    the match set, never change which element a working field (one with no
+    such id/name collision) already resolves to. Falls back to the unscoped
+    id/name lookup, and finally to label association, only when there is no
+    `data-field-path` context to scope to.
+    """
+    tag = "textarea" if field.field_type == "textarea" else "input"
+    scope = f'[data-field-path="{field.context}"] ' if field.context else ""
+    if field.element_id:
+        return page.locator(f'{scope}{tag}[id="{field.element_id}"]')
+    if field.name:
+        return page.locator(f'{scope}{tag}[name="{field.name}"]')
+    if scope:
+        return page.locator(f"{scope}{tag}")
     return page.get_by_label(field.label)
 
 

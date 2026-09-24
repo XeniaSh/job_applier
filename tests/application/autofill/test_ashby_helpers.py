@@ -22,7 +22,9 @@ from app.application.autofill.ashby import (
     _adjust_optional_messaging_consent,
     _adjust_salary_applicability,
     _classify_application_page,
+    _discover_wrapper,
     _has_visible_active_captcha,
+    _is_yes_no_control,
     _label_or_value_candidates,
     _looks_like_application_source_group_label,
     _looks_like_country_relative_work_auth_yesno,
@@ -32,6 +34,7 @@ from app.application.autofill.ashby import (
     _parse_conjunctive_tech_question,
     _revert_to_manual,
     _single_vacancy_work_country,
+    _text_field_locator,
     detect_security_challenge,
 )
 from app.application.autofill.classifier import ClassifiedField
@@ -248,6 +251,64 @@ def test_label_or_value_candidates_never_lets_value_rescue_a_mismatching_label()
     assert match_option_exact_normalized("Yes", candidates) is None
 
 
+# -- _text_field_locator (pure -- records the selector it builds) ----------
+#
+# A bare page-wide `[id="..."]`/`[name="..."]` lookup (the prior behavior)
+# can also match an unrelated node elsewhere on the page that happens to
+# reuse the same id/name outside this field's own wrapper (e.g. a masked
+# phone-input widget's own mirrored/hidden value input) -- these pin that
+# the selector is always scoped to the field's own `data-field-path`
+# wrapper and its live input tag, never a bare id/name.
+
+
+class _RecordingPage:
+    def __init__(self) -> None:
+        self.selectors: list[str] = []
+
+    def locator(self, selector: str) -> str:
+        self.selectors.append(selector)
+        return selector
+
+    def get_by_label(self, label: str) -> str:
+        return f"label:{label}"
+
+
+def test_text_field_locator_scopes_id_lookup_to_the_field_wrapper() -> None:
+    page = _RecordingPage()
+    field = DiscoveredField(
+        label="Phone Number",
+        field_type="tel",
+        element_id="a1b2c3d4-phone-uuid",
+        context="a1b2c3d4-phone-uuid",
+    )
+    _text_field_locator(page, field)  # type: ignore[arg-type]
+    assert page.selectors == ['[data-field-path="a1b2c3d4-phone-uuid"] input[id="a1b2c3d4-phone-uuid"]']
+
+
+def test_text_field_locator_scopes_name_lookup_to_the_field_wrapper_when_no_id() -> None:
+    page = _RecordingPage()
+    field = DiscoveredField(label="Phone Number", field_type="tel", name="phone", context="phone-wrapper")
+    _text_field_locator(page, field)  # type: ignore[arg-type]
+    assert page.selectors == ['[data-field-path="phone-wrapper"] input[name="phone"]']
+
+
+def test_text_field_locator_uses_textarea_tag_for_textarea_fields() -> None:
+    page = _RecordingPage()
+    field = DiscoveredField(
+        label="Cover letter", field_type="textarea", element_id="cover", context="cover-wrapper"
+    )
+    _text_field_locator(page, field)  # type: ignore[arg-type]
+    assert page.selectors == ['[data-field-path="cover-wrapper"] textarea[id="cover"]']
+
+
+def test_text_field_locator_falls_back_to_label_with_no_id_name_or_context() -> None:
+    page = _RecordingPage()
+    field = DiscoveredField(label="Phone Number", field_type="tel")
+    result = _text_field_locator(page, field)  # type: ignore[arg-type]
+    assert result == "label:Phone Number"
+    assert page.selectors == []
+
+
 # -- detect_security_challenge / _has_visible_active_captcha ----------------
 
 
@@ -366,6 +427,312 @@ def test_looks_like_optional_whatsapp_consent_rejects_whatsapp_mention_without_c
     # channel is never swept in.
     field = DiscoveredField(label="Do you use WhatsApp for work?", field_type="yesno")
     assert _looks_like_optional_whatsapp_consent(field) is False
+
+
+def test_looks_like_optional_whatsapp_consent_recognizes_identity_verified_field_regardless_of_label() -> None:
+    # A field discovered via `_discover_nested_whatsapp_consent` carries the
+    # phone wrapper's own "Phone Number" label (or the consent block's own
+    # free-form text) -- neither of which need pass the generic cue-phrase
+    # check -- so this must be recognized from the platform's own exact
+    # `whatsAppConsent` radio name plus its own exact safe negative option,
+    # both already verified at discovery time.
+    field = DiscoveredField(
+        label="Phone Number",
+        field_type="radio",
+        name="whatsAppConsent",
+        options=[
+            "Yes - I consent to receiving WhatsApp messages",
+            "No - I do not consent to receiving WhatsApp messages",
+        ],
+    )
+    assert _looks_like_optional_whatsapp_consent(field) is True
+
+
+def test_looks_like_optional_whatsapp_consent_still_rejects_required_identity_verified_field() -> None:
+    field = DiscoveredField(
+        label="Phone Number",
+        field_type="radio",
+        name="whatsAppConsent",
+        required=True,
+        options=[
+            "Yes - I consent to receiving WhatsApp messages",
+            "No - I do not consent to receiving WhatsApp messages",
+        ],
+    )
+    assert _looks_like_optional_whatsapp_consent(field) is False
+
+
+def test_looks_like_optional_whatsapp_consent_rejects_name_match_without_the_exact_safe_negative_option() -> None:
+    # A same-named `whatsAppConsent` radio group could in principle reach
+    # this function via the generic radio-group discovery branch instead of
+    # `_discover_nested_whatsapp_consent` -- that branch never checks live
+    # option wording, so the name alone (`_is_yes_no_control` only requires
+    # a Yes-prefixed/No-prefixed pair, not the platform's own exact "do not
+    # consent" wording) must never be enough to authorize an automatic
+    # decline. Regression for a gap where the name-based path trusted
+    # identity alone.
+    field = DiscoveredField(
+        label="Phone Number",
+        field_type="radio",
+        name="whatsAppConsent",
+        options=["Yes", "No thanks"],
+    )
+    assert _looks_like_optional_whatsapp_consent(field) is False
+
+
+# -- _discover_wrapper: phone `tel` input with a nested WhatsApp-consent
+# component sharing the same `[data-field-path]` wrapper -----------------
+#
+# A live posting was observed rendering the Phone Number field's own
+# wrapper with a second, nested `.ashby-application-form-texting-consent-
+# description` component holding a distinct optional WhatsApp-consent radio
+# group (`name="whatsAppConsent"`), sometimes alongside an unrelated
+# same-block SMS-consent radio group under a different name. `_discover_
+# wrapper` must still discover the phone `tel` input as its own text field
+# (never misclassified as a single "radio" field labeled "Phone Number")
+# and, only when the WhatsApp group's exact name and a safe negative option
+# are both present, discover it as a second, separate field scoped to only
+# that radio group. These fakes model the wrapper-info dict a real
+# `_WRAPPER_INFO_JS` evaluation would produce for that DOM shape, and the
+# nested radios `_discover_nested_whatsapp_consent` reads from it --
+# validating this module's own decision logic without a real browser.
+
+_PHONE_WRAPPER_PATH = "3f6a8b2c-0a92-4d5e-9c33-7a1b6e2f5d40"
+
+
+def _phone_with_consent_info(*, consent_radio_names: list[str], consent_required: bool = False) -> dict:
+    return {
+        "dataFieldPath": _PHONE_WRAPPER_PATH,
+        "label": "Phone Number",
+        "hasFileInput": False,
+        "isAutocomplete": False,
+        "hasYesno": False,
+        "radioCount": 2,
+        "radioName": "whatsAppConsent",
+        "checkboxCount": 0,
+        "hasTextInput": True,
+        "textInputTag": "input",
+        "textInputType": "tel",
+        "textInputId": _PHONE_WRAPPER_PATH,
+        "textInputName": _PHONE_WRAPPER_PATH,
+        "required": True,
+        "hasConsentBlock": bool(consent_radio_names),
+        "consentRadioNames": consent_radio_names,
+        "consentText": "Can we contact you on WhatsApp about your application?",
+        "consentRequired": consent_required,
+    }
+
+
+class _FakeConsentRadio:
+    def __init__(self, label: str, value: str | None = None) -> None:
+        self._label = label
+        self._value = value if value is not None else label
+
+    def evaluate(self, script: str) -> str:
+        return self._label
+
+    def get_attribute(self, name: str) -> str | None:
+        return self._value if name == "value" else None
+
+
+class _FakeConsentRadioLocator:
+    def __init__(self, radios: list[_FakeConsentRadio]) -> None:
+        self._radios = radios
+
+    def count(self) -> int:
+        return len(self._radios)
+
+    def nth(self, index: int) -> _FakeConsentRadio:
+        return self._radios[index]
+
+
+class _FakePhoneWrapper:
+    """`.locator(selector)` asserts the selector is always scoped to exactly
+    `name="whatsAppConsent"` -- never the unrelated `smsConsent` group also
+    modeled by `info["consentRadioNames"]` in the contamination test below,
+    and never a bare unscoped radio query.
+    """
+
+    def __init__(self, info: dict, whatsapp_radios: list[_FakeConsentRadio]) -> None:
+        self._info = info
+        self._whatsapp_radios = whatsapp_radios
+
+    def evaluate(self, script: str) -> dict:
+        return self._info
+
+    def locator(self, selector: str) -> _FakeConsentRadioLocator:
+        assert "ashby-application-form-texting-consent-description" in selector
+        assert 'name="whatsAppConsent"' in selector
+        assert "smsConsent" not in selector
+        return _FakeConsentRadioLocator(self._whatsapp_radios)
+
+
+class _NoLocatorProbeWrapper:
+    """Raises if `.locator(...)` is ever called -- pins that discovery never
+    even probes for consent radios when the `whatsAppConsent` identity is
+    absent from `consentRadioNames` (e.g. only an unrelated SMS-consent
+    group was nested in the nested consent block).
+    """
+
+    def __init__(self, info: dict) -> None:
+        self._info = info
+
+    def evaluate(self, script: str) -> dict:
+        return self._info
+
+    def locator(self, selector: str):
+        raise AssertionError("must not probe consent radios without the whatsAppConsent identity")
+
+
+def test_discover_wrapper_phone_with_nested_whatsapp_consent_yields_both_fields() -> None:
+    info = _phone_with_consent_info(consent_radio_names=["whatsAppConsent"])
+    whatsapp_radios = [
+        _FakeConsentRadio("Yes - I consent to receiving WhatsApp messages"),
+        _FakeConsentRadio("No - I do not consent to receiving WhatsApp messages"),
+    ]
+    wrapper = _FakePhoneWrapper(info, whatsapp_radios)
+
+    fields = _discover_wrapper(wrapper, set())  # type: ignore[arg-type]
+
+    assert len(fields) == 2
+    phone_field, consent_field = fields
+    assert phone_field.field_type == "tel"
+    assert phone_field.element_id == _PHONE_WRAPPER_PATH
+    assert phone_field.context == _PHONE_WRAPPER_PATH
+    assert consent_field.field_type == "radio"
+    assert consent_field.name == "whatsAppConsent"
+    assert consent_field.required is False
+    assert consent_field.context == _PHONE_WRAPPER_PATH
+    assert consent_field.options == [
+        "Yes - I consent to receiving WhatsApp messages",
+        "No - I do not consent to receiving WhatsApp messages",
+    ]
+
+
+def test_discover_wrapper_ignores_sms_consent_contamination_in_the_same_block() -> None:
+    # `consentRadioNames` models both groups being present in the nested
+    # consent block -- `_FakePhoneWrapper.locator` itself asserts the SMS
+    # name never leaks into the selector used to read live options.
+    info = _phone_with_consent_info(consent_radio_names=["whatsAppConsent", "smsConsent"])
+    whatsapp_radios = [
+        _FakeConsentRadio("Yes - I consent to receiving WhatsApp messages"),
+        _FakeConsentRadio("No - I do not consent to receiving WhatsApp messages"),
+    ]
+    wrapper = _FakePhoneWrapper(info, whatsapp_radios)
+
+    fields = _discover_wrapper(wrapper, set())  # type: ignore[arg-type]
+
+    assert len(fields) == 2
+    assert fields[1].name == "whatsAppConsent"
+
+
+def test_discover_wrapper_fails_closed_without_the_exact_safe_negative_option() -> None:
+    # A live options list that no longer offers the platform's own exact
+    # "do not consent" negative wording must never be guessed at -- only the
+    # phone text field is discovered, never a consent field built from an
+    # unverified options list.
+    info = _phone_with_consent_info(consent_radio_names=["whatsAppConsent"])
+    whatsapp_radios = [_FakeConsentRadio("Yes"), _FakeConsentRadio("No thanks")]
+    wrapper = _FakePhoneWrapper(info, whatsapp_radios)
+
+    fields = _discover_wrapper(wrapper, set())  # type: ignore[arg-type]
+
+    assert len(fields) == 1
+    assert fields[0].field_type == "tel"
+
+
+def test_discover_wrapper_never_probes_consent_radios_without_whatsapp_identity() -> None:
+    # Only an unrelated SMS-consent group is nested here -- no `whatsAppConsent`
+    # name at all -- so discovery must recognize the phone text field and
+    # never even attempt to read the nested radios.
+    info = _phone_with_consent_info(consent_radio_names=["smsConsent"])
+    wrapper = _NoLocatorProbeWrapper(info)
+
+    fields = _discover_wrapper(wrapper, set())  # type: ignore[arg-type]
+
+    assert len(fields) == 1
+    assert fields[0].field_type == "tel"
+
+
+def test_discover_wrapper_required_nested_consent_is_still_discovered_but_stays_manual() -> None:
+    info = _phone_with_consent_info(consent_radio_names=["whatsAppConsent"], consent_required=True)
+    whatsapp_radios = [
+        _FakeConsentRadio("Yes - I consent to receiving WhatsApp messages"),
+        _FakeConsentRadio("No - I do not consent to receiving WhatsApp messages"),
+    ]
+    wrapper = _FakePhoneWrapper(info, whatsapp_radios)
+
+    fields = _discover_wrapper(wrapper, set())  # type: ignore[arg-type]
+
+    assert len(fields) == 2
+    consent_field = fields[1]
+    assert consent_field.required is True
+    assert _looks_like_optional_whatsapp_consent(consent_field) is False
+
+
+def test_looks_like_optional_whatsapp_consent_recognizes_native_radio_rendering() -> None:
+    # A live posting was observed rendering this exact question as a native
+    # radio group -- `.ashby-application-form-input-radio-group` -- instead
+    # of the yesno button widget, with the platform's own Yes/No consent
+    # wording. Must still be recognized as the same safe-decline shape.
+    field = DiscoveredField(
+        label="Can we contact you on WhatsApp about your application? (optional)",
+        field_type="radio",
+        options=[
+            "Yes - I consent to receiving WhatsApp messages",
+            "No - I do not consent to receiving WhatsApp messages",
+        ],
+    )
+    assert _looks_like_optional_whatsapp_consent(field) is True
+
+
+def test_looks_like_optional_whatsapp_consent_rejects_radio_with_non_yes_no_options() -> None:
+    field = DiscoveredField(
+        label="Can we contact you on WhatsApp about your application?",
+        field_type="radio",
+        options=["Mobile", "Landline"],
+    )
+    assert _looks_like_optional_whatsapp_consent(field) is False
+
+
+def test_looks_like_optional_whatsapp_consent_rejects_radio_with_more_than_two_options() -> None:
+    field = DiscoveredField(
+        label="Can we contact you on WhatsApp about your application?",
+        field_type="radio",
+        options=["Yes", "No", "Maybe"],
+    )
+    assert _looks_like_optional_whatsapp_consent(field) is False
+
+
+# -- _is_yes_no_control (pure) ------------------------------------------------
+
+
+def test_is_yes_no_control_true_for_yesno_widget() -> None:
+    assert _is_yes_no_control(DiscoveredField(label="x", field_type="yesno")) is True
+
+
+def test_is_yes_no_control_true_for_radio_with_yes_no_prefixed_pair() -> None:
+    field = DiscoveredField(
+        label="x",
+        field_type="radio",
+        options=["No - I do not consent", "Yes - I consent"],
+    )
+    assert _is_yes_no_control(field) is True
+
+
+def test_is_yes_no_control_false_for_radio_with_three_options() -> None:
+    field = DiscoveredField(label="x", field_type="radio", options=["Yes", "No", "Unsure"])
+    assert _is_yes_no_control(field) is False
+
+
+def test_is_yes_no_control_false_for_radio_with_unrelated_two_options() -> None:
+    field = DiscoveredField(label="x", field_type="radio", options=["Man", "Woman"])
+    assert _is_yes_no_control(field) is False
+
+
+def test_is_yes_no_control_false_for_other_field_types() -> None:
+    assert _is_yes_no_control(DiscoveredField(label="x", field_type="checkbox")) is False
+    assert _is_yes_no_control(DiscoveredField(label="x", field_type="text")) is False
 
 
 # -- _parse_conjunctive_tech_question (pure) ---------------------------------
@@ -720,6 +1087,24 @@ def test_adjust_optional_messaging_consent_overrides_an_already_resolved_yes() -
     assert adjusted.value is False
 
 
+def test_adjust_optional_messaging_consent_declines_whatsapp_rendered_as_radio() -> None:
+    # See `_is_yes_no_control` -- a live posting renders this exact question
+    # as a native radio pair rather than the yesno widget.
+    field = DiscoveredField(
+        label="Can we contact you on WhatsApp about your application? (optional)",
+        field_type="radio",
+        options=[
+            "Yes - I consent to receiving WhatsApp messages",
+            "No - I do not consent to receiving WhatsApp messages",
+        ],
+    )
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    adjusted = _adjust_optional_messaging_consent(item)
+    assert adjusted.fill is True
+    assert adjusted.value is False
+    assert adjusted.field.field_type == "radio"
+
+
 def test_adjust_optional_messaging_consent_ignores_required_whatsapp_question() -> None:
     # A required control is never eligible -- declining a mandatory question
     # is not the same safe no-op as declining a clearly optional one, so it
@@ -766,6 +1151,51 @@ def test_adjust_conjunctive_skill_experience_stays_manual_with_no_configured_tec
     item = _skill_item("Do you have recent hands-on working experience with Java and Spring Boot?")
     adjusted = _adjust_conjunctive_skill_experience(item, _profile())
     assert adjusted.fill is False
+
+
+def test_adjust_conjunctive_skill_experience_yes_when_rendered_as_native_radio_pair() -> None:
+    # A live posting was observed rendering this exact question as a native
+    # radio group (`.ashby-application-form-input-radio-group`) rather than
+    # the yesno widget -- see `_is_yes_no_control`.
+    field = DiscoveredField(
+        label="Do you have recent hands-on working experience with Java and Spring Boot?",
+        field_type="radio",
+        options=["Yes", "No"],
+    )
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    profile = _profile(employment={"professional_tech_stack": ["Java", "Spring Boot"]})
+    adjusted = _adjust_conjunctive_skill_experience(item, profile)
+    assert adjusted.fill is True
+    assert adjusted.value is True
+    assert adjusted.kind is QuestionKind.SKILL_SET_CHOICE
+    assert adjusted.field.field_type == "radio"
+
+
+def test_adjust_conjunctive_skill_experience_radio_stays_manual_when_one_technology_is_missing() -> None:
+    field = DiscoveredField(
+        label="Do you have recent hands-on working experience with Java and Spring Boot?",
+        field_type="radio",
+        options=["Yes", "No"],
+    )
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    profile = _profile(employment={"professional_tech_stack": ["Java"]})
+    adjusted = _adjust_conjunctive_skill_experience(item, profile)
+    assert adjusted.fill is False
+
+
+def test_adjust_conjunctive_skill_experience_ignores_radio_with_non_yes_no_options() -> None:
+    # A three-plus-option or non-Yes/No radio group is never this control --
+    # `_is_yes_no_control` must reject it, never guessing a conjunctive
+    # skill answer onto an unrelated radio question that merely names two
+    # technologies in its label.
+    field = DiscoveredField(
+        label="Which of Java and Spring Boot do you prefer?",
+        field_type="radio",
+        options=["Java", "Spring Boot", "Both"],
+    )
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    profile = _profile(employment={"professional_tech_stack": ["Java", "Spring Boot"]})
+    assert _adjust_conjunctive_skill_experience(item, profile) is item
 
 
 # -- _adjust_notice_period (pure) --------------------------------------------

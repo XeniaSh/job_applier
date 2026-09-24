@@ -17,6 +17,7 @@ from app.collectors.vacancy_collector import NormalizedVacancy
 
 ASHBY_FIXTURE = Path("tests/fixtures/autofill/ashby_application.html")
 ASHBY_OVERVIEW_FIXTURE = Path("tests/fixtures/autofill/ashby_overview.html")
+ASHBY_NESTED_WHATSAPP_CONSENT_FIXTURE = Path("tests/fixtures/autofill/ashby_nested_whatsapp_consent.html")
 UNRELATED_FIXTURE = Path("tests/fixtures/autofill/unrelated.html")
 RESUME_FIXTURE = Path("tests/fixtures/autofill/resume.txt")
 
@@ -554,6 +555,69 @@ def test_whatsapp_worded_sms_updates_question_is_never_answered_yes_via_shared_c
 
     adjusted = AshbyAdapter().adjust_classified_field(classified, profile=profile, vacancy=_vacancy())
     assert adjusted.value is False
+
+
+def test_discover_nested_whatsapp_consent_via_real_dom_fills_and_reads_back_separately_from_phone() -> None:
+    # Real-DOM counterpart to the hand-fed `_WRAPPER_INFO_JS`-shaped dicts in
+    # test_ashby_helpers.py: exercises actual browser discovery of the Phone
+    # Number wrapper's nested `.ashby-application-form-texting-consent-
+    # description` component (see `_discover_nested_whatsapp_consent`),
+    # which holds both an unrelated `smsConsent` radio group and the
+    # platform's own exact `whatsAppConsent` group in the same block.
+    session = _open(ASHBY_NESTED_WHATSAPP_CONSENT_FIXTURE)
+    adapter = AshbyAdapter()
+    profile = _profile()
+    fields = adapter.discover_fields(session.page)
+
+    phone = next(f for f in fields if f.field_type == "tel")
+    consent = next(f for f in fields if f.name == "whatsAppConsent")
+    assert not any(f.name == "smsConsent" for f in fields)
+    assert consent.context == phone.context
+    assert consent.required is False
+    assert consent.options == [
+        "Yes - I consent to receiving WhatsApp messages",
+        "No - I do not consent to receiving WhatsApp messages",
+    ]
+
+    # Phone and consent are discovered, resolved, filled, and read back as
+    # two fully independent fields sharing only the wrapper.
+    phone_classified = classify_field(phone, profile)
+    assert adapter.fill_field(session.page, phone_classified) is True
+    assert adapter.read_back(session.page, phone) == profile.identity.phone
+
+    consent_classified = classify_field(consent, profile)
+    assert consent_classified.fill is False  # the shared classifier never resolves this alone
+    consent_adjusted = adapter.adjust_classified_field(consent_classified, profile=profile, vacancy=_vacancy())
+    assert consent_adjusted.fill is True
+    assert consent_adjusted.value is False
+    assert adapter.fill_field(session.page, consent_adjusted) is True
+    assert adapter.read_back(session.page, consent) == "No - I do not consent to receiving WhatsApp messages"
+    session.close()
+
+
+def test_discover_native_radio_java_spring_boot_via_real_dom_fills_and_reads_back() -> None:
+    # Real-DOM counterpart to the hand-fed dicts in test_ashby_helpers.py:
+    # exercises actual browser discovery of the conjunctive skill question
+    # rendered as a plain native radio group (`_is_yes_no_control`'s
+    # non-yesno branch) rather than the yesno button widget.
+    session = _open(ASHBY_NESTED_WHATSAPP_CONSENT_FIXTURE)
+    adapter = AshbyAdapter()
+    profile = _profile(employment={"professional_tech_stack": ["Java", "Spring Boot"]})
+    fields = adapter.discover_fields(session.page)
+    skill = _field(fields, "Java and Spring Boot")
+    assert skill.field_type == "radio"
+    assert skill.required is True
+
+    classified = classify_field(skill, profile)
+    assert classified.fill is False  # the shared classifier itself never resolves this
+
+    adjusted = adapter.adjust_classified_field(classified, profile=profile, vacancy=_vacancy())
+    assert adjusted.fill is True
+    assert adjusted.value is True
+
+    assert adapter.fill_field(session.page, adjusted) is True
+    assert adapter.read_back(session.page, skill) == "Yes"
+    session.close()
 
 
 def test_java_spring_boot_conjunctive_skill_yesno_is_yes_when_both_are_configured() -> None:
