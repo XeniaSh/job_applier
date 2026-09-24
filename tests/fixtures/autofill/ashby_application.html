@@ -52,6 +52,17 @@
           />
         </fieldset>
 
+        <fieldset data-field-path="a1b2c3d4-phone-uuid">
+          <label class="ashby-application-form-question-title" for="a1b2c3d4-phone-uuid">Phone Number</label>
+          <input
+            id="a1b2c3d4-phone-uuid"
+            name="a1b2c3d4-phone-uuid"
+            type="tel"
+            required
+            class="ashby-application-form-input-text"
+          />
+        </fieldset>
+
         <fieldset data-field-path="a1b2c3d4-source-uuid">
           <label class="ashby-application-form-question-title">Where did you hear about this opportunity?</label>
           <input
@@ -62,14 +73,57 @@
           />
         </fieldset>
 
+        <fieldset data-field-path="a1b2c3d4-source-checkbox-uuid">
+          <div class="ashby-application-form-question-title">How did you hear about our company?</div>
+          <div class="ashby-application-form-input-checkbox-group">
+            <label><input type="checkbox" name="source" value="Company Website" /> Company Website</label>
+            <label><input type="checkbox" name="source" value="LinkedIn" /> LinkedIn</label>
+            <label><input type="checkbox" name="source" value="Employee Referral" /> Employee Referral</label>
+          </div>
+        </fieldset>
+
         <fieldset data-field-path="a1b2c3d4-location-uuid">
-          <label class="ashby-application-form-question-title">Current Location</label>
+          <label class="ashby-application-form-question-title" for="a1b2c3d4-location-input">Current Location</label>
           <input
+            id="a1b2c3d4-location-input"
             type="text"
             role="combobox"
+            aria-controls="a1b2c3d4-location-listbox"
             required
             class="ashby-application-form-input-autocomplete"
           />
+          <ul id="a1b2c3d4-location-listbox" role="listbox" style="display:none">
+            <li role="option">Berlin, Germany</li>
+            <li role="option">Berlin, New Hampshire</li>
+            <li role="option">Remote</li>
+          </ul>
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-whatsapp-uuid">
+          <div class="ashby-application-form-question-title">
+            Can we contact you on WhatsApp about your application? (optional)
+          </div>
+          <div class="ashby-application-form-input-yesno">
+            <button type="button" class="ashby-application-form-input-yesno-option" data-option="yes" aria-pressed="false">Yes</button>
+            <button type="button" class="ashby-application-form-input-yesno-option" data-option="no" aria-pressed="false">No</button>
+            <input type="checkbox" style="display:none" />
+          </div>
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-java-spring-uuid">
+          <div class="ashby-application-form-question-title">
+            Do you have recent hands-on working experience with Java and Spring Boot?
+          </div>
+          <div class="ashby-application-form-input-yesno">
+            <button type="button" class="ashby-application-form-input-yesno-option" data-option="yes" aria-pressed="false">Yes</button>
+            <button type="button" class="ashby-application-form-input-yesno-option" data-option="no" aria-pressed="false">No</button>
+            <input type="checkbox" style="display:none" />
+          </div>
+        </fieldset>
+
+        <fieldset data-field-path="a1b2c3d4-salary-local-uuid">
+          <label class="ashby-application-form-question-title">Gross annual salary (local currency)</label>
+          <input type="number" required class="ashby-application-form-input-text" />
         </fieldset>
 
         <fieldset data-field-path="a1b2c3d4-applying-location-uuid">
@@ -174,6 +228,29 @@
           });
         });
       });
+
+      // Minimal stand-in for a real autocomplete widget: typing reveals its
+      // ARIA-associated listbox (never a different one), and clicking a
+      // live option commits that option's own text back into the input,
+      // mirroring how a real combobox persists a selection.
+      (function () {
+        var input = document.getElementById("a1b2c3d4-location-input");
+        var listbox = document.getElementById("a1b2c3d4-location-listbox");
+        if (!input || !listbox) {
+          return;
+        }
+        input.addEventListener("input", function () {
+          listbox.style.display = input.value.trim() ? "block" : "none";
+        });
+        listbox.querySelectorAll('[role="option"]').forEach(function (option) {
+          option.addEventListener("click", function () {
+            input.value = option.textContent.trim();
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            listbox.style.display = "none";
+          });
+        });
+      })();
     </script>
     <div class="grecaptcha-badge" style="position: fixed; bottom: -1000px; right: 0px; width: 256px; height: 60px;">
       <iframe title="recaptcha" src="about:blank" style="width: 256px; height: 60px; border: none;"></iframe>

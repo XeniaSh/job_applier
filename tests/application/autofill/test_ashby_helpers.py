@@ -13,13 +13,79 @@ from __future__ import annotations
 from app.application.autofill.ashby import (
     _ACTIVE_CAPTCHA_SELECTOR,
     _APPLICATION_PANEL_SELECTOR,
+    _adjust_application_source_checkbox_group,
+    _adjust_conjunctive_skill_experience,
+    _adjust_country_relative_work_authorization,
+    _adjust_current_location_combobox,
+    _adjust_notice_period,
+    _adjust_office_work_feasibility,
+    _adjust_optional_messaging_consent,
+    _adjust_salary_applicability,
     _classify_application_page,
     _has_visible_active_captcha,
     _label_or_value_candidates,
+    _looks_like_application_source_group_label,
+    _looks_like_country_relative_work_auth_yesno,
+    _looks_like_current_location_label,
+    _looks_like_optional_whatsapp_consent,
     _matching_radio_indices,
+    _parse_conjunctive_tech_question,
+    _revert_to_manual,
+    _single_vacancy_work_country,
     detect_security_challenge,
 )
+from app.application.autofill.classifier import ClassifiedField
+from app.application.autofill.fields import DiscoveredField
+from app.application.autofill.models import FieldClassification
 from app.application.autofill.options import match_option_exact_normalized
+from app.application.autofill.questions import QuestionKind
+from app.application.autofill.resolver import ResolvedVacancy
+from app.application.candidate_profile import CandidateProfile
+from app.collectors.vacancy_collector import NormalizedVacancy
+
+
+def _profile(**overrides: object) -> CandidateProfile:
+    payload: dict[str, object] = {
+        "identity": {
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+        },
+        "application_files": {"default_resume": "resume.txt"},
+    }
+    payload.update(overrides)
+    return CandidateProfile.model_validate(payload)
+
+
+def _vacancy(
+    application_url: str = "https://jobs.ashbyhq.com/perk/abc-123/application",
+    *,
+    source: str = "target_company:ashby:perk",
+    location: str | None = None,
+) -> ResolvedVacancy:
+    normalized = None
+    if location is not None:
+        normalized = NormalizedVacancy(
+            source=source,
+            external_id="abc-123",
+            title="Backend Engineer",
+            company="Perk",
+            location=location,
+            employment=None,
+            description="",
+            url=application_url,
+            published_at=None,
+        )
+    return ResolvedVacancy(
+        source=source,
+        external_id="abc-123",
+        title="Backend Engineer",
+        company="Perk",
+        url=application_url,
+        application_url=application_url,
+        vacancy=normalized,
+    )
 
 
 class _FakeLocator:
@@ -255,3 +321,711 @@ def test_has_visible_active_captcha_flags_visible_candidate_outside_the_badge() 
         }
     )
     assert _has_visible_active_captcha(page) is True  # type: ignore[arg-type]
+
+
+# -- label cue matchers (pure) -----------------------------------------------
+
+
+def test_looks_like_current_location_label_matches_observed_wording() -> None:
+    assert _looks_like_current_location_label("Current Location") is True
+    assert _looks_like_current_location_label("Where are you currently based?") is True
+
+
+def test_looks_like_current_location_label_rejects_unrelated_labels() -> None:
+    assert _looks_like_current_location_label("Where did you hear about this opportunity?") is False
+    assert _looks_like_current_location_label("Country") is False
+
+
+def test_looks_like_application_source_group_label_matches_observed_wording() -> None:
+    assert _looks_like_application_source_group_label("How did you hear about our company?") is True
+    assert _looks_like_application_source_group_label("Where did you hear about this opportunity?") is True
+
+
+def test_looks_like_application_source_group_label_rejects_unrelated_labels() -> None:
+    assert _looks_like_application_source_group_label("Are you related to any current employees?") is False
+
+
+def test_looks_like_optional_whatsapp_consent_requires_yesno_and_whatsapp_and_contact_cue() -> None:
+    field = DiscoveredField(label="Can we contact you on WhatsApp about your application?", field_type="yesno")
+    assert _looks_like_optional_whatsapp_consent(field) is True
+
+
+def test_looks_like_optional_whatsapp_consent_rejects_non_yesno_control() -> None:
+    field = DiscoveredField(label="Can we contact you on WhatsApp about your application?", field_type="checkbox")
+    assert _looks_like_optional_whatsapp_consent(field) is False
+
+
+def test_looks_like_optional_whatsapp_consent_rejects_missing_whatsapp_mention() -> None:
+    field = DiscoveredField(label="Can we contact you about your application?", field_type="yesno")
+    assert _looks_like_optional_whatsapp_consent(field) is False
+
+
+def test_looks_like_optional_whatsapp_consent_rejects_whatsapp_mention_without_contact_cue() -> None:
+    # "whatsapp" alone, with no contact/message cue, is not enough --
+    # deliberately narrow so an unrelated question that merely names the
+    # channel is never swept in.
+    field = DiscoveredField(label="Do you use WhatsApp for work?", field_type="yesno")
+    assert _looks_like_optional_whatsapp_consent(field) is False
+
+
+# -- _parse_conjunctive_tech_question (pure) ---------------------------------
+
+
+def test_parse_conjunctive_tech_question_extracts_two_named_technologies() -> None:
+    label = "Do you have recent hands-on working experience with Java and Spring Boot?"
+    assert _parse_conjunctive_tech_question(label) == ["Java", "Spring Boot"]
+
+
+def test_parse_conjunctive_tech_question_none_for_single_technology() -> None:
+    assert _parse_conjunctive_tech_question("Do you have experience with Kubernetes?") is None
+
+
+def test_parse_conjunctive_tech_question_none_when_no_experience_phrase() -> None:
+    assert _parse_conjunctive_tech_question("Do you know Java and Spring Boot?") is None
+
+
+# -- _revert_to_manual (pure) -------------------------------------------------
+
+
+def test_revert_to_manual_uses_unknown_required_for_a_required_field() -> None:
+    field = DiscoveredField(label="Salary expectations", field_type="number", required=True)
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value="150000",
+        fill=True,
+        kind=QuestionKind.SALARY,
+    )
+    reverted = _revert_to_manual(item, reason="test reason")
+    assert reverted.classification is FieldClassification.UNKNOWN_REQUIRED
+    assert reverted.fill is False
+    assert reverted.value is None
+    assert reverted.unresolved_reason == "test reason"
+
+
+def test_revert_to_manual_uses_unknown_optional_for_an_optional_field() -> None:
+    field = DiscoveredField(label="Salary expectations", field_type="number", required=False)
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value="150000",
+        fill=True,
+        kind=QuestionKind.SALARY,
+        generated=True,
+    )
+    reverted = _revert_to_manual(item, reason="test reason")
+    assert reverted.classification is FieldClassification.UNKNOWN_OPTIONAL
+    assert reverted.generated is False
+
+
+# -- _adjust_office_work_feasibility (pure) ----------------------------------
+
+
+def _office_work_item(
+    *, required: bool = True, options: list[str] | None = None, value: str = "Yes"
+) -> ClassifiedField:
+    field = DiscoveredField(
+        label="This role requires working 5 days per week in the office. Are you comfortable with this arrangement?",
+        field_type="yesno",
+        required=required,
+        options=list(options or ["Yes", "No"]),
+    )
+    return ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=value,
+        fill=True,
+        kind=QuestionKind.OFFICE_WORK,
+    )
+
+
+def test_adjust_office_work_feasibility_reverts_generic_default_true_to_manual() -> None:
+    # `office_work.willing` defaults to True, indistinguishable here from a
+    # real candidate fact -- must never be trusted for a named on-site
+    # feasibility question without an explicit override.
+    profile = _profile()
+    item = _office_work_item()
+    adjusted = _adjust_office_work_feasibility(item, profile)
+    assert adjusted.fill is False
+    assert adjusted.classification is FieldClassification.UNKNOWN_REQUIRED
+
+
+def test_adjust_office_work_feasibility_keeps_explicit_decline() -> None:
+    profile = _profile(application_policy={"office_work": {"willing": False}})
+    item = _office_work_item(value="No")
+    adjusted = _adjust_office_work_feasibility(item, profile)
+    assert adjusted.fill is True
+    assert adjusted is item
+
+
+def test_adjust_office_work_feasibility_uses_explicit_question_override() -> None:
+    profile = _profile(
+        application_policy={
+            "question_overrides": [{"question_contains": ["days per week in the office"], "answer": True}],
+        }
+    )
+    item = _office_work_item()
+    adjusted = _adjust_office_work_feasibility(item, profile)
+    assert adjusted.fill is True
+    assert adjusted.value is True
+    assert adjusted.classification is FieldClassification.SUPPORTED_DETERMINISTIC
+
+
+def test_adjust_office_work_feasibility_ignores_non_office_work_kind() -> None:
+    field = DiscoveredField(label="Salary expectations", field_type="number")
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.UNKNOWN_OPTIONAL,
+        fill=False,
+        kind=QuestionKind.SALARY,
+    )
+    assert _adjust_office_work_feasibility(item, _profile()) is item
+
+
+def test_adjust_office_work_feasibility_leaves_unnamed_office_work_question_unchanged() -> None:
+    # The shared classifier's `QuestionKind.OFFICE_WORK` bucket is much
+    # broader than the one exact "requires working N days .../fully on-site"
+    # shape this adjuster is scoped to -- a bare "willing to work onsite?"
+    # question (a shape this module has never verified) must be left exactly
+    # as the shared classifier resolved it, never force-reverted to manual.
+    field = DiscoveredField(
+        label="Are you willing to work onsite?",
+        field_type="yesno",
+        required=True,
+        options=["Yes", "No"],
+    )
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value="Yes",
+        fill=True,
+        kind=QuestionKind.OFFICE_WORK,
+    )
+    assert _adjust_office_work_feasibility(item, _profile()) is item
+
+
+# -- _adjust_salary_applicability (pure) -------------------------------------
+
+
+def _salary_item(label: str, *, required: bool = True, fill: bool = True) -> ClassifiedField:
+    field = DiscoveredField(label=label, field_type="number", required=required)
+    return ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC if fill else FieldClassification.UNKNOWN_REQUIRED,
+        value="150000 USD" if fill else None,
+        fill=fill,
+        kind=QuestionKind.SALARY,
+    )
+
+
+def test_adjust_salary_applicability_local_currency_always_stays_manual() -> None:
+    profile = _profile(
+        employment={"salary_expectations": {"amount": 150000, "currency": "USD", "period": "annual", "fill_salary": True}}
+    )
+    item = _salary_item("Gross annual salary (local currency)")
+    adjusted = _adjust_salary_applicability(item, profile)
+    assert adjusted.fill is False
+    assert "local currency" in (adjusted.unresolved_reason or "")
+
+
+def test_adjust_salary_applicability_requires_explicit_currency() -> None:
+    profile = _profile(
+        employment={"salary_expectations": {"amount": 150000, "currency": None, "fill_salary": True}}
+    )
+    item = _salary_item("Salary expectations")
+    adjusted = _adjust_salary_applicability(item, profile)
+    assert adjusted.fill is False
+
+
+def test_adjust_salary_applicability_requires_matching_annual_period() -> None:
+    profile = _profile(
+        employment={
+            "salary_expectations": {
+                "amount": 150000,
+                "currency": "USD",
+                "period": "monthly",
+                "fill_salary": True,
+            }
+        }
+    )
+    item = _salary_item("Annual salary expectations")
+    adjusted = _adjust_salary_applicability(item, profile)
+    assert adjusted.fill is False
+
+
+def test_adjust_salary_applicability_keeps_a_fully_provable_annual_salary() -> None:
+    profile = _profile(
+        employment={
+            "salary_expectations": {
+                "amount": 150000,
+                "currency": "USD",
+                "period": "annual",
+                "fill_salary": True,
+            }
+        }
+    )
+    item = _salary_item("Annual salary expectations")
+    adjusted = _adjust_salary_applicability(item, profile)
+    assert adjusted.fill is True
+    assert adjusted is item
+
+
+def test_adjust_salary_applicability_keeps_a_plain_currency_only_salary() -> None:
+    profile = _profile(
+        employment={"salary_expectations": {"amount": 150000, "currency": "USD", "fill_salary": True}}
+    )
+    item = _salary_item("Salary expectations")
+    adjusted = _adjust_salary_applicability(item, profile)
+    assert adjusted.fill is True
+
+
+def test_adjust_salary_applicability_leaves_an_already_unresolved_field_alone() -> None:
+    item = _salary_item("Salary expectations", fill=False)
+    adjusted = _adjust_salary_applicability(item, _profile())
+    assert adjusted.fill is False
+
+
+# -- _adjust_application_source_checkbox_group (pure) ------------------------
+
+
+def _source_group_item(*, fill: bool = True) -> ClassifiedField:
+    field = DiscoveredField(
+        label="How did you hear about our company?",
+        field_type="checkbox_group",
+        options=["Company Website", "LinkedIn", "Employee Referral"],
+    )
+    return ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC if fill else FieldClassification.UNKNOWN_OPTIONAL,
+        value="Company Website" if fill else None,
+        fill=fill,
+        kind=QuestionKind.APPLICATION_SOURCE,
+    )
+
+
+def test_adjust_application_source_checkbox_group_keeps_verified_ashby_board() -> None:
+    item = _source_group_item()
+    adjusted = _adjust_application_source_checkbox_group(item, _vacancy())
+    assert adjusted is item
+
+
+def test_adjust_application_source_checkbox_group_reverts_unverified_url() -> None:
+    item = _source_group_item()
+    adjusted = _adjust_application_source_checkbox_group(
+        item, _vacancy(application_url="https://embed.example.com/perk/abc-123/application")
+    )
+    assert adjusted.fill is False
+
+
+def test_adjust_application_source_checkbox_group_reverts_a_non_target_company_source_even_with_canonical_url() -> None:
+    # A canonical-shaped Ashby board URL alone is never sufficient -- it can
+    # still reach here through an unrelated, non-target-company source (e.g.
+    # a generic job aggregator that also links to Ashby-hosted boards), which
+    # never proves the candidate found this posting directly on the
+    # company's own board.
+    item = _source_group_item()
+    adjusted = _adjust_application_source_checkbox_group(item, _vacancy(source="job_board:aggregator"))
+    assert adjusted.fill is False
+
+
+def test_adjust_application_source_checkbox_group_reverts_a_non_company_source_even_with_a_verified_board() -> None:
+    # When the group offers no "Company Website"/"Careers Website" option at
+    # all, the shared classifier's generic preference matching can still
+    # resolve a *different* present option (e.g. "LinkedIn") -- a verified
+    # direct board URL only proves the candidate found this posting directly
+    # on the company's own board, never that they came specifically via
+    # LinkedIn, so that resolution must still be reverted to manual.
+    field = DiscoveredField(
+        label="How did you hear about our company?",
+        field_type="checkbox_group",
+        options=["LinkedIn", "Other"],
+    )
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value="LinkedIn",
+        fill=True,
+        kind=QuestionKind.APPLICATION_SOURCE,
+    )
+    adjusted = _adjust_application_source_checkbox_group(item, _vacancy())
+    assert adjusted.fill is False
+
+
+def test_adjust_application_source_checkbox_group_keeps_careers_website() -> None:
+    field = DiscoveredField(
+        label="How did you hear about our company?",
+        field_type="checkbox_group",
+        options=["Careers Website", "LinkedIn"],
+    )
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value="Careers Website",
+        fill=True,
+        kind=QuestionKind.APPLICATION_SOURCE,
+    )
+    adjusted = _adjust_application_source_checkbox_group(item, _vacancy())
+    assert adjusted is item
+
+
+def test_adjust_application_source_checkbox_group_ignores_other_field_types() -> None:
+    field = DiscoveredField(
+        label="How did you hear about our company?",
+        field_type="checkbox",
+        options=["Company Website"],
+    )
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value="Company Website",
+        fill=True,
+        kind=QuestionKind.APPLICATION_SOURCE,
+    )
+    assert _adjust_application_source_checkbox_group(item, _vacancy()) is item
+
+
+# -- _adjust_optional_messaging_consent (pure) -------------------------------
+
+
+def test_adjust_optional_messaging_consent_declines_whatsapp_yesno() -> None:
+    field = DiscoveredField(
+        label="Can we contact you on WhatsApp about your application? (optional)",
+        field_type="yesno",
+        options=["Yes", "No"],
+    )
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    adjusted = _adjust_optional_messaging_consent(item)
+    assert adjusted.fill is True
+    assert adjusted.value is False
+
+
+def test_adjust_optional_messaging_consent_overrides_an_already_resolved_yes() -> None:
+    # A WhatsApp-worded question that the shared classifier already resolved
+    # to Yes (e.g. it also matched the shared `SMS_UPDATES` cues and an
+    # explicit `sms_interview_updates` opt-in fact) must still be forced back
+    # to No -- that fact answers a different, generic question, never this
+    # exact optional WhatsApp control, and opting in must never be automatic.
+    field = DiscoveredField(
+        label="Can we contact you on WhatsApp?", field_type="yesno", options=["Yes", "No"]
+    )
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=True,
+        fill=True,
+        kind=QuestionKind.SMS_UPDATES,
+    )
+    adjusted = _adjust_optional_messaging_consent(item)
+    assert adjusted.fill is True
+    assert adjusted.value is False
+
+
+def test_adjust_optional_messaging_consent_ignores_required_whatsapp_question() -> None:
+    # A required control is never eligible -- declining a mandatory question
+    # is not the same safe no-op as declining a clearly optional one, so it
+    # must stay exactly as the shared classifier resolved it.
+    field = DiscoveredField(
+        label="Can we contact you on WhatsApp?",
+        field_type="yesno",
+        required=True,
+        options=["Yes", "No"],
+    )
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.UNKNOWN_REQUIRED,
+        fill=False,
+        kind=QuestionKind.UNKNOWN,
+    )
+    assert _adjust_optional_messaging_consent(item) is item
+
+
+# -- _adjust_conjunctive_skill_experience (pure) -----------------------------
+
+
+def _skill_item(label: str) -> ClassifiedField:
+    field = DiscoveredField(label=label, field_type="yesno", options=["Yes", "No"])
+    return ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+
+
+def test_adjust_conjunctive_skill_experience_yes_when_every_technology_is_known() -> None:
+    profile = _profile(employment={"professional_tech_stack": ["Java", "Spring Boot"]})
+    item = _skill_item("Do you have recent hands-on working experience with Java and Spring Boot?")
+    adjusted = _adjust_conjunctive_skill_experience(item, profile)
+    assert adjusted.fill is True
+    assert adjusted.value is True
+
+
+def test_adjust_conjunctive_skill_experience_stays_manual_when_one_technology_is_missing() -> None:
+    profile = _profile(employment={"professional_tech_stack": ["Java"]})
+    item = _skill_item("Do you have recent hands-on working experience with Java and Spring Boot?")
+    adjusted = _adjust_conjunctive_skill_experience(item, profile)
+    assert adjusted.fill is False
+
+
+def test_adjust_conjunctive_skill_experience_stays_manual_with_no_configured_technologies() -> None:
+    item = _skill_item("Do you have recent hands-on working experience with Java and Spring Boot?")
+    adjusted = _adjust_conjunctive_skill_experience(item, _profile())
+    assert adjusted.fill is False
+
+
+# -- _adjust_notice_period (pure) --------------------------------------------
+
+
+def test_adjust_notice_period_fills_from_explicit_profile_value() -> None:
+    profile = _profile(employment={"notice_period": "4 weeks"})
+    field = DiscoveredField(label="Notice period / earliest start date", field_type="text")
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    adjusted = _adjust_notice_period(item, profile)
+    assert adjusted.fill is True
+    assert adjusted.value == "4 weeks"
+
+
+def test_adjust_notice_period_stays_manual_when_unset() -> None:
+    field = DiscoveredField(label="Notice period / earliest start date", field_type="text")
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    adjusted = _adjust_notice_period(item, _profile())
+    assert adjusted.fill is False
+
+
+def test_adjust_notice_period_ignores_unrelated_labels() -> None:
+    field = DiscoveredField(label="Salary expectations", field_type="text")
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    profile = _profile(employment={"notice_period": "4 weeks"})
+    assert _adjust_notice_period(item, profile) is item
+
+
+# -- _adjust_current_location_combobox (pure) --------------------------------
+
+
+def test_adjust_current_location_combobox_fills_unresolved_live_wording() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Berlin, Germany",
+        }
+    )
+    field = DiscoveredField(label="Where are you currently based?", field_type="combobox_location")
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    adjusted = _adjust_current_location_combobox(item, profile)
+    assert adjusted.fill is True
+    assert adjusted.value == "Berlin, Germany"
+    assert adjusted.kind is QuestionKind.LOCATION
+    assert adjusted.classification is FieldClassification.SUPPORTED_DETERMINISTIC
+
+
+def test_adjust_current_location_combobox_stays_manual_when_unset() -> None:
+    field = DiscoveredField(label="Where are you currently based?", field_type="combobox_location")
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    adjusted = _adjust_current_location_combobox(item, _profile())
+    assert adjusted.fill is False
+    assert adjusted is item
+
+
+def test_adjust_current_location_combobox_ignores_other_field_types() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Berlin, Germany",
+        }
+    )
+    field = DiscoveredField(label="Where are you currently based?", field_type="text")
+    item = ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_OPTIONAL, kind=QuestionKind.UNKNOWN)
+    assert _adjust_current_location_combobox(item, profile) is item
+
+
+def test_adjust_current_location_combobox_never_overrides_an_already_filled_item() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "current_location": "Berlin, Germany",
+        }
+    )
+    field = DiscoveredField(label="Current Location", field_type="combobox_location")
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value="Paris, France",
+        fill=True,
+        kind=QuestionKind.LOCATION,
+    )
+    assert _adjust_current_location_combobox(item, profile) is item
+
+
+# -- _looks_like_country_relative_work_auth_yesno / _single_vacancy_work_country (pure) --
+
+
+def test_looks_like_country_relative_work_auth_yesno_matches_observed_wording() -> None:
+    field = DiscoveredField(
+        label="Do you have legal authorisation to work in the country where this role is based?",
+        field_type="yesno",
+    )
+    assert _looks_like_country_relative_work_auth_yesno(field) is True
+
+
+def test_looks_like_country_relative_work_auth_yesno_rejects_sponsorship_question() -> None:
+    field = DiscoveredField(
+        label="Will you require sponsorship to work in the country where this role is based?",
+        field_type="yesno",
+    )
+    assert _looks_like_country_relative_work_auth_yesno(field) is False
+
+
+def test_looks_like_country_relative_work_auth_yesno_rejects_non_yesno_control() -> None:
+    field = DiscoveredField(
+        label="Do you have legal authorisation to work in the country where this role is based?",
+        field_type="radio",
+    )
+    assert _looks_like_country_relative_work_auth_yesno(field) is False
+
+
+def test_single_vacancy_work_country_requires_exactly_one_named_country() -> None:
+    assert _single_vacancy_work_country(_vacancy(location="Berlin, Germany")) == "germany"
+    assert _single_vacancy_work_country(_vacancy(location="Germany or Netherlands")) is None
+    assert _single_vacancy_work_country(_vacancy(location="Remote")) is None
+    assert _single_vacancy_work_country(_vacancy()) is None
+
+
+# -- _adjust_country_relative_work_authorization (pure) ----------------------
+
+
+def _work_auth_item() -> ClassifiedField:
+    field = DiscoveredField(
+        label="Do you have legal authorisation to work in the country where this role is based?",
+        field_type="yesno",
+        required=True,
+        options=["Yes", "No"],
+    )
+    return ClassifiedField(field=field, classification=FieldClassification.UNKNOWN_REQUIRED, kind=QuestionKind.UNKNOWN)
+
+
+def test_adjust_country_relative_work_authorization_resolves_explicit_country_fact() -> None:
+    profile = _profile(work_eligibility={"work_authorizations": [{"country": "Germany", "authorized": True}]})
+    item = _work_auth_item()
+    adjusted = _adjust_country_relative_work_authorization(item, profile, _vacancy(location="Berlin, Germany"))
+    assert adjusted.fill is True
+    assert adjusted.value is True
+    assert adjusted.kind is QuestionKind.WORK_AUTHORIZATION
+    assert adjusted.country == "germany"
+
+
+def test_adjust_country_relative_work_authorization_resolves_explicit_negative_fact() -> None:
+    profile = _profile(work_eligibility={"work_authorizations": [{"country": "Germany", "authorized": False}]})
+    item = _work_auth_item()
+    adjusted = _adjust_country_relative_work_authorization(item, profile, _vacancy(location="Berlin, Germany"))
+    assert adjusted.fill is True
+    assert adjusted.value is False
+
+
+def test_adjust_country_relative_work_authorization_stays_manual_without_a_matching_country_fact() -> None:
+    profile = _profile(work_eligibility={"work_authorizations": [{"country": "Germany", "authorized": True}]})
+    item = _work_auth_item()
+    adjusted = _adjust_country_relative_work_authorization(item, profile, _vacancy(location="Remote, Netherlands"))
+    assert adjusted.fill is False
+
+
+def test_adjust_country_relative_work_authorization_never_infers_from_citizenship_or_relocation() -> None:
+    # Citizenship and relocation willingness must never substitute for an
+    # explicit work_authorizations fact, even when both are set.
+    profile = _profile(
+        work_eligibility={"citizenship": ["Germany"]},
+        application_policy={"relocation": {"willing": True}},
+    )
+    item = _work_auth_item()
+    adjusted = _adjust_country_relative_work_authorization(item, profile, _vacancy(location="Berlin, Germany"))
+    assert adjusted.fill is False
+
+
+def test_adjust_country_relative_work_authorization_stays_manual_with_ambiguous_vacancy_country() -> None:
+    profile = _profile(work_eligibility={"work_authorizations": [{"country": "Germany", "authorized": True}]})
+    item = _work_auth_item()
+    adjusted = _adjust_country_relative_work_authorization(
+        item, profile, _vacancy(location="Germany or Netherlands (Remote)")
+    )
+    assert adjusted.fill is False
+
+
+def test_adjust_country_relative_work_authorization_recomputes_over_prior_resolution() -> None:
+    # A prior resolution (e.g. the shared classifier's own sole-explicit-fact
+    # fallback) must never be trusted as-is: this exact recognized wording is
+    # always re-derived from the vacancy country and a matching explicit
+    # fact, so a stale True here is overridden to the recomputed False.
+    field = DiscoveredField(
+        label="Do you have legal authorisation to work in the country where this role is based?",
+        field_type="yesno",
+    )
+    item = ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=True,
+        fill=True,
+        kind=QuestionKind.WORK_AUTHORIZATION,
+        country="germany",
+    )
+    profile = _profile(work_eligibility={"work_authorizations": [{"country": "Germany", "authorized": False}]})
+    adjusted = _adjust_country_relative_work_authorization(item, profile, _vacancy(location="Berlin, Germany"))
+    assert adjusted.fill is True
+    assert adjusted.value is False
+    assert adjusted.kind is QuestionKind.WORK_AUTHORIZATION
+    assert adjusted.country == "germany"
+
+
+def _sole_explicit_no_germany_item() -> ClassifiedField:
+    # Mirrors the shared classifier's own sole-explicit-negative-fact
+    # fallback for a generic country-relative phrase (see
+    # `questions._is_work_authorization`): it marks the field filled False
+    # from the candidate's only `work_authorizations` fact even though it
+    # never checked the vacancy's own work country against that fact's
+    # country. This adapter must never let that vacancy-blind answer stand.
+    field = DiscoveredField(
+        label="Do you have legal authorisation to work in the country where this role is based?",
+        field_type="yesno",
+        required=True,
+        options=["Yes", "No"],
+    )
+    return ClassifiedField(
+        field=field,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=False,
+        fill=True,
+        kind=QuestionKind.WORK_AUTHORIZATION,
+        country="germany",
+    )
+
+
+def test_adjust_country_relative_work_authorization_forces_manual_with_ambiguous_vacancy_country_despite_sole_no_fact() -> (
+    None
+):
+    profile = _profile(work_eligibility={"work_authorizations": [{"country": "Germany", "authorized": False}]})
+    item = _sole_explicit_no_germany_item()
+    adjusted = _adjust_country_relative_work_authorization(
+        item, profile, _vacancy(location="Germany or Netherlands (Remote)")
+    )
+    assert adjusted.fill is False
+
+
+def test_adjust_country_relative_work_authorization_forces_manual_with_mismatched_vacancy_country_despite_sole_no_fact() -> (
+    None
+):
+    profile = _profile(work_eligibility={"work_authorizations": [{"country": "Germany", "authorized": False}]})
+    item = _sole_explicit_no_germany_item()
+    adjusted = _adjust_country_relative_work_authorization(item, profile, _vacancy(location="Remote, Netherlands"))
+    assert adjusted.fill is False
+
+
+def test_adjust_country_relative_work_authorization_resolves_no_for_matching_vacancy_country() -> None:
+    profile = _profile(work_eligibility={"work_authorizations": [{"country": "Germany", "authorized": False}]})
+    item = _sole_explicit_no_germany_item()
+    adjusted = _adjust_country_relative_work_authorization(item, profile, _vacancy(location="Berlin, Germany"))
+    assert adjusted.fill is True
+    assert adjusted.value is False
+    assert adjusted.kind is QuestionKind.WORK_AUTHORIZATION
+    assert adjusted.country == "germany"

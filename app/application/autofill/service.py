@@ -245,6 +245,15 @@ class AutofillService:
 
         discovered = adapter.discover_fields(page)
         classified = [classify_field(item, profile) for item in discovered]
+        adjust_classified_field = getattr(adapter, "adjust_classified_field", None)
+        if adjust_classified_field is not None:
+            # Optional, provider-specific hook (currently only `AshbyAdapter`
+            # defines it) to narrowly adjust a `ClassifiedField` using the
+            # explicit profile and resolved vacancy -- never changes
+            # `classify_field` itself or any other provider.
+            classified = [
+                adjust_classified_field(item, profile=profile, vacancy=vacancy) for item in classified
+            ]
         cover_letter_text = _maybe_cover_letter(
             self._cover_letter_provider, classified, vacancy, profile
         )
@@ -903,6 +912,13 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
             QuestionKind.PROFESSIONAL_FREE_TEXT,
         }:
             return True
+    if item.field.field_type == "combobox_location":
+        # `_fill_combobox_location` (Ashby) only ever clicks one
+        # exact-normalized matching listbox option -- confirming the fill
+        # with the generic LOCATION substring rule below would let a
+        # readback of a merely related option (e.g. "Berlin" for a wanted
+        # "Berlin, Germany") falsely confirm a fill that never happened.
+        return match_option_exact_normalized(wanted, [actual]) is not None
     if item.kind in {QuestionKind.LOCATION, QuestionKind.COUNTRY}:
         if wanted.lower() in actual.lower() or actual.lower() in wanted.lower():
             return True

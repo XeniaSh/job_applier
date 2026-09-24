@@ -177,6 +177,64 @@ def test_service_fills_known_fields_and_never_submits() -> None:
     assert session.closed is True
 
 
+class _AdjustHookFakeAdapter(_FakeAdapter):
+    """Like `_FakeAdapter`, but also defines `adjust_classified_field` --
+    exercises the optional provider hook `AutofillService._fill_open_page`
+    calls (when present) right after `classify_field`, before
+    `_enrich_unresolved`. Flips the otherwise-unresolved "favorite IDE"
+    field to filled, and records the exact `profile`/`vacancy` it was
+    called with so the wiring itself (not just an adapter's own logic) is
+    under test.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, object]] = []
+
+    def adjust_classified_field(self, item: object, *, profile: object, vacancy: object) -> object:
+        self.calls.append((profile, vacancy))
+        if getattr(item, "field", None) is not None and item.field.name == "favorite_ide":
+            from dataclasses import replace
+
+            from app.application.autofill.models import FieldClassification
+
+            return replace(item, classification=FieldClassification.SUPPORTED_DETERMINISTIC, value="Vim", fill=True)
+        return item
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        if field.name == "first_name":
+            return "Ada"
+        if field.name == "favorite_ide":
+            return "Vim"
+        return None
+
+
+def test_service_calls_optional_adjust_classified_field_hook_when_present() -> None:
+    # Only an adapter that defines `adjust_classified_field` is affected --
+    # `_FakeAdapter` above (no such method) continues to leave "favorite
+    # IDE" unresolved, proving the hook is opt-in via `getattr`, not a
+    # required part of every adapter.
+    session = _FakeSession()
+    adapter = _AdjustHookFakeAdapter()
+    profile = _profile()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=lambda: profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any(item.label == "First Name" for item in result.filled_fields)
+    assert any("favorite IDE" in item.label for item in result.filled_fields)
+    assert not any("favorite IDE" in item.label for item in result.unresolved_required_fields)
+    assert len(adapter.calls) == 2  # one call per discovered field
+    for called_profile, called_vacancy in adapter.calls:
+        assert called_profile is profile
+        assert isinstance(called_vacancy, ResolvedVacancy)
+
+
 def test_service_calls_on_ready_before_keep_open_wait() -> None:
     session = _FakeSession()
     order: list[str] = []
@@ -478,6 +536,87 @@ def test_service_accepts_matching_years_readback_with_no_warning() -> None:
     assert result.status is AutofillStatus.READY_FOR_REVIEW
     assert any("kotlin" in item.label.lower() for item in result.filled_fields)
     assert all("kotlin" not in item.label.lower() for item in result.unresolved_required_fields)
+    assert not any("read-back failed" in warning.lower() for warning in result.warnings)
+
+
+def _profile_with_current_location() -> CandidateProfile:
+    return CandidateProfile.model_validate(
+        {
+            "identity": {
+                "first_name": "Ada",
+                "last_name": "Example",
+                "email": "ada.example@example.test",
+                "phone": "+15555550100",
+                "current_location": "Berlin, Germany",
+            },
+            "application_files": {"default_resume": "tests/fixtures/autofill/resume.txt"},
+        }
+    )
+
+
+class _ComboboxLocationAdapter(_FakeAdapter):
+    """fill_field reports success (as `_fill_combobox_location` only ever
+    does after clicking one exact-normalized matching listbox option), but
+    the configured read-back text may or may not match that same value.
+    """
+
+    def __init__(self, *, readback: str) -> None:
+        self._readback = readback
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(
+                label="Current Location",
+                name="current_location",
+                field_type="combobox_location",
+                required=True,
+            ),
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        return bool(getattr(classified, "fill", False))
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page, field
+        return self._readback
+
+
+def test_service_rejects_substring_matching_combobox_location_readback() -> None:
+    """`_fill_combobox_location` only ever clicks one exact-normalized
+    matching option, so a readback of a merely related, narrower value (e.g.
+    "Berlin" for a wanted "Berlin, Germany") must not confirm the fill --
+    even though the generic LOCATION rule alone would accept it as a
+    substring.
+    """
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile_with_current_location,
+        adapter=_ComboboxLocationAdapter(readback="Berlin"),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:ashby:example", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any("current location" in item.label.lower() for item in result.unresolved_required_fields)
+    assert any("read-back failed" in warning.lower() for warning in result.warnings)
+
+
+def test_service_accepts_exact_normalized_combobox_location_readback() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile_with_current_location,
+        adapter=_ComboboxLocationAdapter(readback="berlin, germany"),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:ashby:example", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any("current location" in item.label.lower() for item in result.filled_fields)
+    assert all("current location" not in item.label.lower() for item in result.unresolved_required_fields)
     assert not any("read-back failed" in warning.lower() for warning in result.warnings)
 
 

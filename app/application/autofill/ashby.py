@@ -1,25 +1,62 @@
 """Ashby-specific form discovery and filling. No submit capability.
 
 Bounded to the control shapes evidenced from a real Ashby `/application`
-page: plain `[data-field-path]`-wrapped text/email/url/number inputs (Name,
-Email, LinkedIn Profile, ...), the main resume file input, native radio
-groups, and Ashby's custom Yes/No button control
-(`.ashby-application-form-input-yesno-option[data-option]`). Three kinds of
-field are deliberately never auto-filled, even if a future change to the
-shared classifier/mapping would otherwise resolve them:
+page: plain `[data-field-path]`-wrapped text/email/url/number/tel inputs
+(Name, Email, Phone, LinkedIn Profile, ...), the main resume file input,
+native radio groups, and Ashby's custom Yes/No button control
+(`.ashby-application-form-input-yesno-option[data-option]`). A handful of
+narrowly-scoped extensions are layered on top, each bounded to an exact
+observed question shape and never guessing beyond it:
 
-- The "Where did you hear..." / "Current Location" autocomplete comboboxes
-  (`.ashby-application-form-input-autocomplete`) are discovered as an
-  unsupported control (never a plain text field) -- a snapshot only ever
-  shows the closed combo, never its listbox/options, so there is nothing to
-  safely match a typed value against.
-- The optional multi-option employee-relationship checkbox group is never
-  discovered at all: per-option semantics cannot be resolved generically, and
-  guessing which box to check would risk checking the wrong one.
+- A "Current Location"-worded autocomplete combobox
+  (`input[role="combobox"]`) is filled only via a safe generic ARIA
+  associated-listbox exact-option path (`_fill_combobox_location`): type the
+  explicit `identity.current_location` value, resolve the live listbox via
+  `aria-controls`/`aria-owns` (or the sole unambiguous visible listbox, via
+  the shared `react_controls` helpers Greenhouse's own combobox path already
+  relies on), click the one exact-normalized matching option, and require the
+  input to persist that exact text afterward. Any other autocomplete
+  (e.g. "Where did you hear...") stays an unsupported control (never a plain
+  text field, never typed into blindly, never a bare Enter) -- a snapshot
+  only shows the closed combo, never a resolvable listbox association, so
+  there is nothing safe to match a typed value against.
+- A "...hear about..."-worded multi-option checkbox group is discovered as a
+  single `checkbox_group` field (never as individual per-option checkboxes)
+  and may only ever check an exact "Company Website"/"Careers Website" option
+  (see `_adjust_application_source_checkbox_group`) -- the only claims a
+  verified direct public Ashby company board discovery
+  (`_is_verified_ashby_direct_source`: both a `target_company:ashby:` vacancy
+  source and the canonical Ashby board URL shape, never the URL shape alone)
+  can actually prove truthful -- gated on that verified discovery and never a
+  hardcoded company name; the shared classifier's own generic preference
+  matching resolving some *other* present option (e.g. "LinkedIn") is
+  reverted the same way an unverified discovery is.
+  Every other multi-option checkbox group (e.g. the optional
+  employee-relationship group) is never discovered at all: per-option
+  semantics cannot be resolved generically, and guessing which box to check
+  would risk checking the wrong one.
 - The recruiting-contact consent checkbox (`_systemfield_data_consent_ack`)
   is discovered (so it still surfaces for manual review) but `fill_field`
   refuses to write to it under any circumstances -- opting a candidate into
-  marketing contact must never be automatic.
+  marketing contact must never be automatic. A distinct, exact-worded
+  "WhatsApp"-style optional communications-consent Yes/No control is instead
+  always answered explicit No (never Yes/opt-in) via `adjust_classified_field`.
+
+`AshbyAdapter.adjust_classified_field` is an optional, Ashby-only hook
+`AutofillService` calls (when present) right after the shared
+`classifier.classify_field` pass, using the explicit profile and resolved
+vacancy to narrowly adjust a handful of Ashby-specific question shapes
+(named fully-on-site office feasibility, salary currency/period
+applicability, the conjunctive skill-experience Yes/No, notice period, the
+discovered "Current Location"-worded combobox above whenever its exact live
+wording (e.g. "Where are you currently based?") falls outside the shared
+classifier's own `_is_identity_location` coverage, the WhatsApp consent
+decline, the application-source checkbox group above, and a
+country-relative "legal authorisation to work" Yes/No resolved only from the
+single vacancy work country plus an explicit
+`work_eligibility.work_authorizations` fact -- never from citizenship,
+location, or relocation willingness) without touching the shared classifier
+or any other provider.
 
 `.ashby-application-form-submit-button` is recognition evidence only and is
 never queried for interaction anywhere in this module -- there is no submit
@@ -29,16 +66,28 @@ capability here, matching `GreenhouseAdapter`/`LeverAdapter`.
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
-from app.application.autofill.ashby_url import is_same_job_apply_url
+from app.application.autofill import react_controls
+from app.application.autofill.ashby_url import is_canonical_ashby_hosted_url, is_same_job_apply_url
 from app.application.autofill.classifier import ClassifiedField
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.options import match_option_exact_normalized, match_yes_no
+from app.application.autofill.models import FieldClassification
+from app.application.autofill.options import (
+    match_named_skill_set,
+    match_option_exact_normalized,
+    match_yes_no,
+    split_technology_scope_terms,
+)
+from app.application.autofill.questions import QuestionKind
+from app.application.autofill.resolver import TARGET_COMPANY_ASHBY_PREFIX, ResolvedVacancy
+from app.application.candidate_profile import CandidateProfile, countries_mentioned
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +111,36 @@ _ACTIVE_CAPTCHA_SELECTOR = (
     'div.g-recaptcha, div#hcaptcha, [class*="captcha-modal" i], [class*="challenge-modal" i]'
 )
 
+_LOCATION_AUTOCOMPLETE_LABEL_CUES = (
+    "current location",
+    "currently based",
+    "where are you based",
+    "where are you currently based",
+)
+_APPLICATION_SOURCE_GROUP_LABEL_CUES = (
+    "hear about",
+    "how did you find",
+    "how did you learn about",
+)
+_WHATSAPP_CONSENT_CUES = (
+    "contact you",
+    "message you",
+    "text you",
+    "reach you",
+    "reach out to you",
+    "may we",
+    "can we",
+)
+_TECH_EXPERIENCE_QUESTION_RE = re.compile(
+    r"experience\s+(?:with|in|using)\s+(.+?)\s*\??\s*$",
+    re.IGNORECASE,
+)
+_SALARY_LOCAL_CURRENCY_CUE = "local currency"
+_SALARY_ANNUAL_LABEL_TERMS = ("annual", "per year", "yearly", "/year")
+_SALARY_ANNUAL_PERIOD_VALUES = frozenset(
+    {"annual", "annually", "year", "yearly", "per year", "per annum"}
+)
+
 _BADGE_ANCESTOR_JS = "el => !!el.closest('.grecaptcha-badge')"
 
 _RADIO_OPTION_LABEL_JS = """el => {
@@ -82,6 +161,7 @@ _WRAPPER_INFO_JS = """el => {
     const fileInput = q('input[type="file"]');
     const comboInput = q('input[role="combobox"]');
     const hasAutocompleteClass = !!q('.ashby-application-form-input-autocomplete');
+    const comboInputId = comboInput ? (comboInput.id || '') : '';
     const yesnoEl = q('.ashby-application-form-input-yesno');
     const radios = Array.from(el.querySelectorAll('input[type="radio"]'));
     const checkboxes = Array.from(el.querySelectorAll('input[type="checkbox"]'));
@@ -102,6 +182,7 @@ _WRAPPER_INFO_JS = """el => {
         hasFileInput: !!fileInput,
         fileInputId: fileInput ? (fileInput.id || '') : '',
         isAutocomplete: !!comboInput || (hasAutocompleteClass && !yesnoEl),
+        comboInputId: comboInputId,
         hasYesno: !!yesnoEl,
         radioCount: radios.length,
         radioName: radios.length ? (radios[0].name || '') : '',
@@ -473,6 +554,10 @@ class AshbyAdapter:
                 return _fill_radio(page, field, classified.value)
             if field.field_type == "yesno":
                 return _fill_yesno(_field_locator(page, field), field, classified.value)
+            if field.field_type == "checkbox_group":
+                return _fill_checkbox_group(page, field, classified.value)
+            if field.field_type == "combobox_location":
+                return _fill_combobox_location(page, field, classified.value)
             if field.field_type in _TEXT_TYPES or field.field_type == "textarea":
                 return _fill_text(_field_locator(page, field), str(classified.value))
         except PlaywrightError:
@@ -512,11 +597,473 @@ class AshbyAdapter:
                 if (button.get_attribute("aria-pressed") or "").lower() == "true":
                     return " ".join((button.inner_text() or "").split())
             return None
+        if field.field_type == "checkbox_group":
+            checkboxes = _checkbox_group_locator(page, field)
+            labels = _checkbox_group_option_labels(checkboxes)
+            checked_labels = [
+                labels[index]
+                for index in range(checkboxes.count())
+                if _safe_is_checked(checkboxes.nth(index))
+            ]
+            if len(checked_labels) != 1:
+                # Never guess between an unchecked group and an ambiguous
+                # multi-checked state -- see `_fill_checkbox_group`.
+                return None
+            return checked_labels[0] or None
         try:
             value = _field_locator(page, field).input_value()
         except PlaywrightError:
             return None
         return value or None
+
+    def adjust_classified_field(
+        self,
+        item: ClassifiedField,
+        *,
+        profile: CandidateProfile,
+        vacancy: ResolvedVacancy,
+    ) -> ClassifiedField:
+        """Ashby-only narrow post-classification adjustments.
+
+        `AutofillService` calls this (when present -- other adapters do not
+        define it) right after the shared `classifier.classify_field` pass,
+        before `_enrich_unresolved`. Every adjustment here is a no-op unless
+        its own narrow, bounded condition is met; each targets a distinct
+        question kind/shape so the order between them does not matter. None
+        of this changes `classify_field`, `map_question`, or any other
+        provider -- see the module docstring.
+        """
+        item = _adjust_office_work_feasibility(item, profile)
+        item = _adjust_salary_applicability(item, profile)
+        item = _adjust_application_source_checkbox_group(item, vacancy)
+        item = _adjust_optional_messaging_consent(item)
+        item = _adjust_conjunctive_skill_experience(item, profile)
+        item = _adjust_notice_period(item, profile)
+        item = _adjust_current_location_combobox(item, profile)
+        item = _adjust_country_relative_work_authorization(item, profile, vacancy)
+        return item
+
+
+def _revert_to_manual(item: ClassifiedField, *, reason: str) -> ClassifiedField:
+    """Force `item` back to unresolved/manual, preserving the required-vs-
+    optional split `classify_field` itself uses. Never used to invent a
+    negative ("No") answer -- only to withdraw a fill that this module has
+    determined it cannot truthfully stand behind.
+    """
+    unresolved = (
+        FieldClassification.UNKNOWN_REQUIRED if item.field.required else FieldClassification.UNKNOWN_OPTIONAL
+    )
+    return replace(
+        item,
+        classification=unresolved,
+        value=None,
+        fill=False,
+        generated=False,
+        unresolved_reason=reason,
+    )
+
+
+_OFFICE_ATTENDANCE_FEASIBILITY_LABEL_CUES = (
+    "days per week in the office",
+    "days a week in the office",
+    "days per week at the office",
+    "days a week at the office",
+    "days per week from the office",
+    "full time in the office",
+    "full-time in the office",
+    "fully on-site",
+    "fully onsite",
+    "100% on-site",
+    "100% onsite",
+)
+
+
+def _looks_like_named_office_feasibility_question(label: str) -> bool:
+    """The one narrow, exact-worded "requires working <N> days ... in the
+    office"/"fully on-site" attendance-feasibility shape this adjuster is
+    scoped to (the shape evidenced on a real Ashby form) -- never every
+    question the shared classifier's much broader `QuestionKind.OFFICE_WORK`
+    bucket can match (e.g. a bare "are you willing to work onsite?" or a
+    generic hybrid-schedule question), which this module has never verified
+    the shape of and so leaves untouched.
+    """
+    lowered = " ".join(label.lower().split())
+    return any(cue in lowered for cue in _OFFICE_ATTENDANCE_FEASIBILITY_LABEL_CUES)
+
+
+def _adjust_office_work_feasibility(item: ClassifiedField, profile: CandidateProfile) -> ClassifiedField:
+    """Never auto-fills a named, site-specific fully-onsite/office-attendance
+    feasibility question (see `_looks_like_named_office_feasibility_question`)
+    from the shared `office_work` policy's generic default (its class default
+    is `willing=True`, indistinguishable here from a candidate who genuinely
+    configured it) -- only an explicit, unambiguous decline
+    (`office_work_answer() is False`, which can never be the class default)
+    or an explicit `application_policy.question_overrides` answer for this
+    exact question is trusted. Never derives this from relocation
+    willingness or any other generic policy. Every other `OFFICE_WORK`-kind
+    question (a shape this module has never verified) is left exactly as the
+    shared classifier resolved it.
+    """
+    if item.kind is not QuestionKind.OFFICE_WORK:
+        return item
+    if not _looks_like_named_office_feasibility_question(item.field.label):
+        return item
+    if profile.office_work_answer() is False:
+        return item
+    override = profile.question_override_answer(item.field.label)
+    if isinstance(override, bool):
+        return replace(
+            item,
+            classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+            value=override,
+            fill=True,
+            unresolved_reason=None,
+        )
+    if isinstance(override, str):
+        matched = (
+            match_option_exact_normalized(override, item.field.options) if item.field.options else override
+        )
+        if matched:
+            return replace(
+                item,
+                classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                value=matched,
+                fill=True,
+                unresolved_reason=None,
+            )
+    return _revert_to_manual(
+        item,
+        reason=(
+            "named office/on-site attendance feasibility requires an explicit "
+            "application_policy.question_overrides answer for this exact question; "
+            "the generic office_work willingness default is never used"
+        ),
+    )
+
+
+def _adjust_salary_applicability(item: ClassifiedField, profile: CandidateProfile) -> ClassifiedField:
+    """Fails closed on a salary question the shared classifier resolved
+    without a provable currency/period match to this exact question's own
+    wording. A "local currency" question can never be verified without
+    inferring which currency counts as local for the role, so it always
+    stays manual. Any other salary question requires an explicit configured
+    currency, and -- when the question itself says "annual" -- an explicit
+    configured annual period too. Never derives a value from years of
+    experience, current salary, or any other unrelated fact.
+    """
+    if item.kind is not QuestionKind.SALARY:
+        return item
+    label = " ".join(item.field.label.lower().split())
+    if _SALARY_LOCAL_CURRENCY_CUE in label:
+        return _revert_to_manual(
+            item,
+            reason=(
+                "salary question requires the applicant's local currency, which cannot be "
+                "verified from an explicit profile fact without inferring which currency "
+                "counts as local for this role"
+            ),
+        )
+    if not item.fill:
+        return item
+    expectations = profile.employment.salary_expectations
+    currency = (expectations.currency or "").strip() if expectations else ""
+    if not currency:
+        return _revert_to_manual(
+            item, reason="salary question requires an explicit configured currency"
+        )
+    if any(term in label for term in _SALARY_ANNUAL_LABEL_TERMS):
+        period = (expectations.period or "").strip().lower() if expectations else ""
+        if period not in _SALARY_ANNUAL_PERIOD_VALUES:
+            return _revert_to_manual(
+                item,
+                reason="annual salary question requires an explicit configured annual period",
+            )
+    return item
+
+
+_SOURCE_CHECKBOX_TRUTHFUL_LABELS = ("Company Website", "Careers Website")
+
+
+def _is_verified_ashby_direct_source(vacancy: ResolvedVacancy) -> bool:
+    """True only when the vacancy was both discovered directly through this
+    module's own Target Company Ashby pipeline (`vacancy.source` starts with
+    `target_company:ashby:`) and carries the canonical public Ashby board URL
+    shape. Neither signal alone proves the candidate could truthfully check
+    "Company Website"/"Careers Website": a canonical-shaped URL can still
+    reach here through an unrelated, non-target-company source (e.g. a
+    generic job aggregator that also links to Ashby-hosted boards), and the
+    URL shape itself is never inferred as sufficient on its own.
+    """
+    if not vacancy.source.startswith(TARGET_COMPANY_ASHBY_PREFIX):
+        return False
+    return is_canonical_ashby_hosted_url(vacancy.application_url)
+
+
+def _adjust_application_source_checkbox_group(
+    item: ClassifiedField, vacancy: ResolvedVacancy
+) -> ClassifiedField:
+    """The application-source checkbox group (see module docstring) may only
+    check an exact "Company Website" or "Careers Website" option -- the only
+    two claims a verified direct public Ashby company board discovery can
+    actually prove truthful (see `_is_verified_ashby_direct_source`). The
+    shared classifier's generic source-preference matching
+    (`options.match_application_source`) can otherwise resolve a *different*
+    option present in the group (e.g. "LinkedIn"), which a verified board
+    discovery does not make any more truthful than a guess; that resolution
+    is reverted here just like an unverified discovery is. Never trusted
+    merely because the field was discovered, and never a hardcoded company
+    name.
+    """
+    if item.kind is not QuestionKind.APPLICATION_SOURCE or item.field.field_type != "checkbox_group":
+        return item
+    if not item.fill:
+        return item
+    if not _is_verified_ashby_direct_source(vacancy):
+        return _revert_to_manual(
+            item,
+            reason=(
+                "application-source checkbox group requires a verified direct public Ashby "
+                "company board discovery -- both a target_company:ashby source and the "
+                "canonical Ashby board application URL -- never the URL shape alone"
+            ),
+        )
+    truthful = (
+        isinstance(item.value, str)
+        and match_option_exact_normalized(item.value, list(_SOURCE_CHECKBOX_TRUTHFUL_LABELS)) is not None
+    )
+    if not truthful:
+        return _revert_to_manual(
+            item,
+            reason=(
+                "application-source checkbox group only ever truthfully checks an exact "
+                "'Company Website' or 'Careers Website' option; a verified direct board URL "
+                "does not make any other resolved option truthful"
+            ),
+        )
+    return item
+
+
+def _looks_like_optional_whatsapp_consent(field: DiscoveredField) -> bool:
+    if field.field_type != "yesno" or field.required:
+        # A required control is never eligible: declining a mandatory
+        # question is not the same safe no-op as declining a clearly
+        # optional one, so this stays manual instead.
+        return False
+    label = " ".join(field.label.lower().split())
+    if "whatsapp" not in label:
+        return False
+    return any(cue in label for cue in _WHATSAPP_CONSENT_CUES)
+
+
+def _adjust_optional_messaging_consent(item: ClassifiedField) -> ClassifiedField:
+    """A distinct, exact-worded "can we contact/message/text you on
+    WhatsApp..." optional consent Yes/No control is always answered explicit
+    No -- opting a candidate into optional messaging contact must never be
+    automatic, regardless of any profile consent fact. This overrides the
+    shared classifier's own resolution whenever it already ran (e.g. a
+    WhatsApp-worded question that also happens to match the shared
+    `SMS_UPDATES` cues and so gets resolved to Yes from an explicit
+    `sms_interview_updates` opt-in fact): that fact answers a different,
+    generic SMS/interview-updates question, never this exact optional
+    WhatsApp control, so a prior Yes must still be forced back to No, never
+    left standing. Never touches the required application-privacy
+    acknowledgement or the separate recruiting-contact checkbox this module
+    already refuses to write to, and never touches a required or otherwise
+    ambiguous question -- see `_looks_like_optional_whatsapp_consent`.
+    """
+    if not _looks_like_optional_whatsapp_consent(item.field):
+        return item
+    return replace(
+        item,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=False,
+        fill=True,
+        kind=QuestionKind.SMS_UPDATES,
+        unresolved_reason=None,
+    )
+
+
+def _parse_conjunctive_tech_question(label: str) -> list[str] | None:
+    """Named technologies from a conjunctive "...experience with X and Y..."
+    question, or None when the question does not name at least two terms.
+    Never invents a technology name; only reads what the question itself
+    names, the same way `options.parse_years_experience_technology` does for
+    years-of-experience questions.
+    """
+    match = _TECH_EXPERIENCE_QUESTION_RE.search(label)
+    if not match:
+        return None
+    terms = split_technology_scope_terms(match.group(1))
+    return terms if len(terms) >= 2 else None
+
+
+def _adjust_conjunctive_skill_experience(item: ClassifiedField, profile: CandidateProfile) -> ClassifiedField:
+    """A Yes/No "...hands-on experience with X and Y..." question is answered
+    Yes only when every named technology exactly matches one of the
+    candidate's own explicitly configured technology names. When even one
+    named technology has no configured match, the question stays manual --
+    never answered No, since the absence of a configured entry is not
+    truthful evidence the candidate lacks that experience.
+    """
+    if item.fill or item.kind is not QuestionKind.UNKNOWN or item.field.field_type != "yesno":
+        return item
+    named = _parse_conjunctive_tech_question(item.field.label)
+    if not named:
+        return item
+    matches = match_named_skill_set(named, profile.known_technology_names())
+    if len(matches) != len(named):
+        return item
+    return replace(
+        item,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=True,
+        fill=True,
+        kind=QuestionKind.SKILL_SET_CHOICE,
+        unresolved_reason=None,
+    )
+
+
+def _adjust_notice_period(item: ClassifiedField, profile: CandidateProfile) -> ClassifiedField:
+    """A plain text/textarea "...notice period..." question is filled only
+    from the explicit `employment.notice_period` fact. There is no generic
+    shared mapping for this key (see module docstring); this is Ashby-only.
+    """
+    if item.fill or item.kind is not QuestionKind.UNKNOWN:
+        return item
+    if item.field.field_type not in _TEXT_TYPES and item.field.field_type != "textarea":
+        return item
+    label = " ".join(item.field.label.lower().split())
+    if "notice period" not in label:
+        return item
+    value = profile.employment.notice_period
+    if not value:
+        return item
+    return replace(
+        item,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=value,
+        fill=True,
+        unresolved_reason=None,
+    )
+
+
+def _adjust_current_location_combobox(item: ClassifiedField, profile: CandidateProfile) -> ClassifiedField:
+    """The Ashby-discovered `combobox_location` field type already recognizes
+    live wordings the shared classifier's own `_is_identity_location` was
+    never taught -- e.g. the observed "Where are you currently based?",
+    which contains neither "current location" nor a bare "location"/"city"
+    substring, so `classify_field` leaves it `UNKNOWN` even though discovery
+    itself already resolved the control shape (see
+    `_looks_like_current_location_label`). This is narrower Ashby-only
+    coverage for the one control shape this adapter itself discovers -- it
+    never broadens the shared `_is_identity_location` semantics Greenhouse
+    and Lever still rely on. Fills only the explicit
+    `profile.identity.current_location` fact, and only when it is
+    non-empty; an absent fact stays manual, same as the shared classifier's
+    own LOCATION path would leave it.
+    """
+    if item.fill or item.kind is not QuestionKind.UNKNOWN or item.field.field_type != "combobox_location":
+        return item
+    value = profile.identity.current_location
+    if not value:
+        return item
+    return replace(
+        item,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=value,
+        fill=True,
+        kind=QuestionKind.LOCATION,
+        unresolved_reason=None,
+    )
+
+
+def _looks_like_country_relative_work_auth_yesno(field: DiscoveredField) -> bool:
+    """The observed Ashby wording "Do you have legal authorisation to work in
+    the country where this role is based?" -- distinct from (and narrower
+    than) the shared classifier's own work-authorization patterns, which this
+    exact phrasing does not match (see
+    `test_legal_authorization_yesno_stays_unresolved_by_default`). Never a
+    sponsorship question, which asks something else entirely.
+    """
+    if field.field_type != "yesno":
+        return False
+    label = " ".join(field.label.lower().split())
+    if "sponsor" in label:
+        return False
+    if not ("authoris" in label or "authoriz" in label):
+        return False
+    return "work in" in label and "country" in label
+
+
+def _single_vacancy_work_country(vacancy: ResolvedVacancy) -> str | None:
+    """The vacancy's work country, only when exactly one is deterministically
+    named in its structured location. Ambiguous or missing locations fail
+    closed (None), never guessing a country. Duplicates
+    `service._single_vacancy_work_country`'s exact rule rather than importing
+    it -- `service` itself imports this module, so importing back would be
+    circular.
+    """
+    normalized = vacancy.vacancy
+    location = normalized.location if normalized else None
+    if not location:
+        return None
+    countries = countries_mentioned(location)
+    if len(countries) != 1:
+        return None
+    return countries[0]
+
+
+def _adjust_country_relative_work_authorization(
+    item: ClassifiedField, profile: CandidateProfile, vacancy: ResolvedVacancy
+) -> ClassifiedField:
+    """Resolves the observed country-relative "legal authorisation to work"
+    Yes/No only when the vacancy names exactly one deterministic work country
+    and the candidate has an explicit `work_eligibility.work_authorizations`
+    fact for that exact country. Never infers authorization from citizenship,
+    current location, or relocation willingness.
+
+    Always recomputes from scratch for this exact recognized wording,
+    regardless of whatever `item.fill`/`item.kind` the shared
+    `questions.map_question` already produced -- that shared classifier has
+    its own sole-explicit-fact fallback (see
+    `_is_generic_country_relative_work_auth_phrase`) that can answer a
+    generic country-relative control straight from the candidate's only
+    `work_authorizations` fact even when the vacancy's own work country is
+    absent, ambiguous, or a different country than that fact names. That
+    fallback exists for ATSes that never surface a resolvable vacancy
+    country to the classifier at all, but Ashby's discovered field always
+    carries a `ResolvedVacancy`, so this exact control is instead always
+    re-derived here from the vacancy country and a matching explicit fact,
+    never trusting a prior resolution keyed on an unrelated country. When
+    the vacancy country or a matching explicit fact is unavailable, the
+    field is forced back to manual -- `_enrich_work_authorization` in
+    `service` applies this identical vacancy-country-plus-matching-fact rule
+    on top of a manual item, so it can never resurrect the sole-unrelated-
+    country answer this function just withdrew.
+    """
+    if not _looks_like_country_relative_work_auth_yesno(item.field):
+        return item
+    country = _single_vacancy_work_country(vacancy)
+    if country is not None:
+        answer = profile.work_authorization_for(country)
+        if answer is not None:
+            return replace(
+                item,
+                classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                value=answer,
+                fill=True,
+                kind=QuestionKind.WORK_AUTHORIZATION,
+                country=country,
+                unresolved_reason=None,
+            )
+    return _revert_to_manual(
+        item,
+        reason=(
+            "country-relative work authorization requires exactly one deterministic "
+            "vacancy work country and an explicit work_eligibility.work_authorizations "
+            "fact for that exact country -- never a fact for an unrelated country"
+        ),
+    )
 
 
 def _discover_wrapper(wrapper: Locator, seen_radio_names: set[str]) -> DiscoveredField | None:
@@ -532,6 +1079,19 @@ def _discover_wrapper(wrapper: Locator, seen_radio_names: set[str]) -> Discovere
     required = bool(info.get("required"))
 
     if info.get("isAutocomplete"):
+        if _looks_like_current_location_label(label) and data_field_path:
+            # The live combobox input has no stable id on every observed
+            # Ashby form -- its wrapper's `data-field-path` is the only
+            # reliable handle, so discovery (and `_field_locator` below)
+            # never depend on an id being present.
+            combo_input_id = str(info.get("comboInputId") or "")
+            return DiscoveredField(
+                label=label,
+                field_type="combobox_location",
+                required=required,
+                element_id=combo_input_id or None,
+                context=data_field_path,
+            )
         # Fail-closed regardless of what the shared classifier would
         # otherwise resolve -- see module docstring.
         return DiscoveredField(
@@ -576,6 +1136,16 @@ def _discover_wrapper(wrapper: Locator, seen_radio_names: set[str]) -> Discovere
 
     checkbox_count = int(info.get("checkboxCount") or 0)
     if checkbox_count > 1:
+        if _looks_like_application_source_group_label(label):
+            source_options = _checkbox_options_in_wrapper(wrapper)
+            if len(source_options) >= 2:
+                return DiscoveredField(
+                    label=label,
+                    field_type="checkbox_group",
+                    required=required,
+                    options=source_options,
+                    context=data_field_path,
+                )
         # An optional multi-option checkbox group (e.g. employee
         # relationship) has no safe, generic per-option semantic this
         # adapter can resolve -- left undiscovered so it is never guessed
@@ -611,6 +1181,27 @@ def _discover_wrapper(wrapper: Locator, seen_radio_names: set[str]) -> Discovere
         )
 
     return None
+
+
+def _looks_like_current_location_label(label: str) -> bool:
+    lowered = " ".join(label.lower().split())
+    return any(cue in lowered for cue in _LOCATION_AUTOCOMPLETE_LABEL_CUES)
+
+
+def _looks_like_application_source_group_label(label: str) -> bool:
+    lowered = " ".join(label.lower().split())
+    return any(cue in lowered for cue in _APPLICATION_SOURCE_GROUP_LABEL_CUES)
+
+
+def _checkbox_options_in_wrapper(wrapper: Locator) -> list[str]:
+    checkboxes = wrapper.locator('input[type="checkbox"]')
+    options: list[str] = []
+    for index in range(checkboxes.count()):
+        checkbox = checkboxes.nth(index)
+        value = _radio_option_label(checkbox) or checkbox.get_attribute("value")
+        if value:
+            options.append(str(value).strip())
+    return options
 
 
 def _yesno_options(wrapper: Locator) -> list[str]:
@@ -662,6 +1253,11 @@ def _field_locator(page: Page, field: DiscoveredField) -> Locator:
     """
     if field.field_type == "yesno":
         return page.locator(f'[data-field-path="{field.context}"] .{_YESNO_OPTION_CLASS}')
+    if field.field_type == "combobox_location":
+        # Scoped to the unique `data-field-path` wrapper rather than an id --
+        # the live input has no stable id on every observed Ashby form (see
+        # `_discover_wrapper`).
+        return page.locator(f'[data-field-path="{field.context}"] input[role="combobox"]')
     if field.element_id:
         return page.locator(f'[id="{field.element_id}"]')
     if field.name:
@@ -790,6 +1386,88 @@ def _safe_is_checked(locator: Locator) -> bool | None:
         return locator.is_checked()
     except PlaywrightError:
         return None
+
+
+def _checkbox_group_locator(page: Page, field: DiscoveredField) -> Locator:
+    return page.locator(f'[data-field-path="{field.context}"] input[type="checkbox"]')
+
+
+def _checkbox_group_option_labels(checkboxes: Locator) -> list[str]:
+    labels: list[str] = []
+    for index in range(checkboxes.count()):
+        box = checkboxes.nth(index)
+        labels.append(_radio_option_label(box) or (box.get_attribute("value") or "").strip())
+    return labels
+
+
+def _fill_checkbox_group(page: Page, field: DiscoveredField, value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    checkboxes = _checkbox_group_locator(page, field)
+    labels = _checkbox_group_option_labels(checkboxes)
+    matches = [
+        index
+        for index, label in enumerate(labels)
+        if label and match_option_exact_normalized(value, [label]) is not None
+    ]
+    if len(matches) != 1:
+        # No match, or an ambiguous match against more than one live option --
+        # never guess which box the candidate meant, and never check any
+        # option this module was not explicitly told to check.
+        return False
+    target = checkboxes.nth(matches[0])
+    try:
+        target.check(timeout=3_000)
+    except PlaywrightError:
+        return False
+    return _safe_is_checked(target) is True
+
+
+def _fill_combobox_location(page: Page, field: DiscoveredField, value: object) -> bool:
+    """Type `value` into the autocomplete input, resolve its live listbox via
+    the shared `react_controls` ARIA-association helpers (the same generic
+    path Greenhouse's own combobox fill already relies on), and click the one
+    exact-normalized matching option. Fails closed -- returns False without
+    clicking anything -- when the listbox cannot be safely associated, or has
+    no exact match; never presses Enter or accepts a bare typed value.
+    """
+    wanted = str(value or "").strip()
+    if not wanted:
+        return False
+    locator = _field_locator(page, field)
+    try:
+        locator.click(timeout=3_000)
+    except PlaywrightError:
+        try:
+            locator.click(force=True, timeout=3_000)
+        except PlaywrightError:
+            return False
+    try:
+        locator.fill(wanted, timeout=5_000)
+        locator.evaluate(
+            """el => {
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }"""
+        )
+    except PlaywrightError:
+        return False
+    try:
+        page.locator("[role='option']").first.wait_for(state="visible", timeout=2_500)
+    except PlaywrightTimeoutError:
+        pass
+    option = react_controls.scoped_matching_option_exact_normalized(page, locator, wanted)
+    if option is None:
+        return False
+    try:
+        option.click(timeout=3_000)
+    except PlaywrightError:
+        return False
+    try:
+        actual = locator.input_value()
+    except PlaywrightError:
+        return False
+    return match_option_exact_normalized(wanted, [actual]) is not None
 
 
 def _file_names(page: Page, field: DiscoveredField) -> list[str]:
