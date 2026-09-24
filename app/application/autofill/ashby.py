@@ -30,10 +30,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import Locator, Page
+from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
+from app.application.autofill.ashby_url import is_same_job_apply_url
 from app.application.autofill.classifier import ClassifiedField
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import match_option_exact_normalized, match_yes_no
@@ -49,6 +51,11 @@ _APPLICATION_PANEL_SELECTOR = (
 _FIELD_WRAPPER_SELECTOR = "[data-field-path]"
 _YESNO_OPTION_CLASS = "ashby-application-form-input-yesno-option"
 _CONSENT_FIELD_NAME = "_systemfield_data_consent_ack"
+_GENERIC_FORM_CONTAINER_SELECTOR = ".ashby-application-form-container"
+_SUBMIT_BUTTON_SELECTOR = "button.ashby-application-form-submit-button"
+_NAME_FIELD_SELECTOR = '[data-field-path="_systemfield_name"]'
+_EMAIL_FIELD_SELECTOR = '[data-field-path="_systemfield_email"]'
+_TAB_SELECTOR = '[role="tab"]'
 _ACTIVE_CAPTCHA_SELECTOR = (
     'iframe[src*="recaptcha" i], iframe[title*="recaptcha" i], '
     'iframe[src*="hcaptcha" i], iframe[title*="hcaptcha" i], '
@@ -148,6 +155,112 @@ def is_ashby_application_page(page: Page) -> bool:
     return matched
 
 
+def _safe_host(url: object) -> str:
+    """Netloc only -- never the path, query, or fragment, which could carry PII or raw content."""
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        return urlparse(url).netloc.lower()
+    except ValueError:
+        return ""
+
+
+def _safe_host_path(url: object) -> str:
+    """Hostname + path only -- never userinfo, query, or fragment."""
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        return f"{parsed.hostname or ''}{parsed.path}"
+    except ValueError:
+        return ""
+
+
+def _final_page_state(page: Page) -> dict[str, object]:
+    """Compact, bounded snapshot of page structure taken only when the
+    form-readiness wait fails to produce the strict panel -- distinguishes a
+    still-loading pre-hydration shell (nothing present) from a rendered page
+    whose form is structurally different (some pieces present, panel still
+    absent). Deliberately just booleans/counts and a sanitized host+path --
+    never the full DOM, a candidate's values, or the URL's query/fragment.
+    """
+
+    def _present(selector: str) -> bool:
+        try:
+            return page.locator(selector).count() > 0
+        except PlaywrightError:
+            return False
+
+    return {
+        "strict_panel": _present(_APPLICATION_PANEL_SELECTOR),
+        "generic_form_container": _present(_GENERIC_FORM_CONTAINER_SELECTOR),
+        "name_field": _present(_NAME_FIELD_SELECTOR),
+        "email_field": _present(_EMAIL_FIELD_SELECTOR),
+        "submit_button": _present(_SUBMIT_BUTTON_SELECTOR),
+        "tab_or_apply_action": _present(_TAB_SELECTOR) or _same_posting_apply_action(page) is not None,
+        "host_path": _safe_host_path(page.url),
+    }
+
+
+def _log_final_page_state(page: Page) -> None:
+    state = _final_page_state(page)
+    logger.warning(
+        "ashby_prepare stage=final_page_state strict_panel=%s generic_form_container=%s "
+        "name_field=%s email_field=%s submit_button=%s tab_or_apply_action=%s host_path=%s",
+        state["strict_panel"],
+        state["generic_form_container"],
+        state["name_field"],
+        state["email_field"],
+        state["submit_button"],
+        state["tab_or_apply_action"],
+        state["host_path"],
+    )
+
+
+def _same_posting_apply_action(page: Page, anchors: Locator | None = None) -> Locator | None:
+    """An anchor whose resolved href is exactly this exact posting's own
+    verified `/application` link, or None.
+
+    The resolver (`AshbyTargetVacancyResolver`) always navigates straight to
+    that link, so this only ever matters if Ashby's own routing instead
+    lands on the job-detail page for this same posting (an "Apply" action,
+    not yet the rendered form). Matching is done on the anchor's
+    browser-resolved absolute URL (`el.href`) against `page.url` via
+    `ashby_url.is_same_job_apply_url` -- never on text/class/styling -- so
+    this can never click an unrelated button, a different job's apply link,
+    or an external URL that merely looks like one.
+    """
+    if anchors is None:
+        anchors = page.locator("a[href]")
+    count = anchors.count()
+    for index in range(count):
+        anchor = anchors.nth(index)
+        try:
+            href = anchor.evaluate("el => el.href")
+        except PlaywrightError:
+            continue
+        if isinstance(href, str) and is_same_job_apply_url(page.url, href):
+            return anchor
+    return None
+
+
+def is_ashby_job_detail_page(page: Page) -> bool:
+    """True for an Ashby hosted job-detail page (not yet the application
+    form) that carries an Apply link to this exact posting's own
+    `/application` page. False once the strict application panel is
+    already recognized, or when no such same-posting apply anchor is
+    structurally present -- including the brief pre-hydration loading shell,
+    which has no anchors at all yet and so is never mistaken for the
+    job-detail page. `_same_posting_apply_action` only ever matches when
+    `page.url` is itself a canonical Ashby job-detail URL (that is what
+    `ashby_url.is_same_job_apply_url` requires of it), so no separate host
+    check is needed here.
+    """
+    if is_ashby_application_page(page):
+        return False
+    return _same_posting_apply_action(page) is not None
+
+
 def _has_visible_active_captcha(page: Page) -> bool:
     """True only for a CAPTCHA that is actually presented to the user right
     now (a visible challenge iframe/modal) -- never the passive reCAPTCHA
@@ -213,6 +326,102 @@ class AshbyAdapter:
 
     def detect_challenge(self, page: Page) -> str | None:
         return detect_security_challenge(page)
+
+    def prepare_page(self, page: Page) -> None:
+        """Wait until the application form is usable.
+
+        The resolver always navigates straight to this exact posting's
+        verified `/application` URL, so the ordinary case is only the brief
+        pre-hydration loading shell -- a bounded wait for the strict
+        application panel selector to appear once React finishes rendering
+        the form. There is no bare-host/bare-field fallback: recognition
+        stays exactly `_APPLICATION_PANEL_SELECTOR`.
+
+        If Ashby instead lands on the job-detail page for this same posting
+        (an Apply action but no rendered form yet), take the one click that
+        is structurally guaranteed to be this exact posting's own
+        `/application` link (`is_ashby_job_detail_page` /
+        `_same_posting_apply_action`) -- `_navigate_from_job_detail` itself
+        owns the one bounded form-readiness wait for that path, so this
+        method never waits a second time on top of it (that would let a
+        single `prepare_page` call block for the sum of both timeouts
+        instead of just one). A page that is already the recognized form is
+        never redundantly clicked. If neither path produces the strict form,
+        a compact diagnostic snapshot of the resulting page is logged and
+        `recognize()` will then be False, so the caller reports
+        UNSUPPORTED_FORM rather than guessing at an unfamiliar page. Local
+        fixtures skip the extra settle.
+        """
+        is_job_detail = is_ashby_job_detail_page(page)
+        logger.warning(
+            "ashby_prepare stage=detail_detection is_job_detail=%s page_host=%s",
+            is_job_detail,
+            _safe_host(page.url),
+        )
+        if is_job_detail:
+            self._navigate_from_job_detail(page)
+        else:
+            timeout = 2_000 if page.url.startswith("file:") else 30_000
+            try:
+                page.wait_for_selector(_APPLICATION_PANEL_SELECTOR, timeout=timeout)
+            except PlaywrightTimeoutError:
+                _log_final_page_state(page)
+                return
+        if not is_ashby_application_page(page):
+            _log_final_page_state(page)
+            return
+        if page.url.startswith("file:"):
+            return
+        page.wait_for_timeout(500)
+
+    def _navigate_from_job_detail(self, page: Page) -> None:
+        """Attempt the job-detail -> application-form transition and always
+        log a navigation-stage record at the end, even when no same-posting
+        apply action exists or the click raises, so a single run identifies
+        every failure stage. Never dismisses cookie overlays or other page
+        chrome -- if one blocks the click, the click raises, the stage is
+        logged, and the page fails closed via the caller's normal
+        `recognize()` check.
+        """
+        pre_url = page.url
+        action = _same_posting_apply_action(page)
+        apply_locator_count = 1 if action is not None else 0
+        logger.warning(
+            "ashby_prepare stage=apply_action apply_locator_count=%s",
+            apply_locator_count,
+        )
+        click_attempted = False
+        click_raised: str | None = None
+        form_ready_selector_found = False
+        if action is not None:
+            click_attempted = True
+            try:
+                action.click(timeout=5_000)
+            except PlaywrightError as exc:
+                click_raised = type(exc).__name__
+            logger.warning(
+                "ashby_prepare stage=apply_action click_attempted=%s click_raised=%s",
+                click_attempted,
+                click_raised,
+            )
+            if click_raised is None:
+                timeout = 2_000 if page.url.startswith("file:") else 15_000
+                try:
+                    page.wait_for_selector(_APPLICATION_PANEL_SELECTOR, timeout=timeout)
+                    form_ready_selector_found = True
+                except PlaywrightTimeoutError:
+                    form_ready_selector_found = False
+        post_url = page.url
+        logger.warning(
+            "ashby_prepare stage=navigation pre=%s post=%s url_changed=%s "
+            "click_attempted=%s click_raised=%s form_ready_selector_found=%s",
+            _safe_host_path(pre_url),
+            _safe_host_path(post_url),
+            pre_url != post_url,
+            click_attempted,
+            click_raised,
+            form_ready_selector_found,
+        )
 
     def discover_fields(self, page: Page) -> list[DiscoveredField]:
         if not self.recognize(page):

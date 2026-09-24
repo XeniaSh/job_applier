@@ -790,6 +790,93 @@ def test_service_lever_source_dispatches_and_logs_unsupported_form_diagnostics(c
     assert not any("utm_source" in m or "#top" in m for m in messages)
 
 
+class _AshbyFakeLocator:
+    def count(self) -> int:
+        return 0
+
+    @property
+    def first(self) -> "_AshbyFakeLocator":
+        return self
+
+    def inner_text(self) -> str:
+        return ""
+
+
+class _AshbyFakePage:
+    """Minimal double for the same prepare_page -> recognize path the real
+    Telegram-triggered runtime drives, without Chromium or network access.
+    Models a live Ashby `/application` URL whose pre-hydration loading shell
+    never gains the strict application panel, so `wait_for_selector` always
+    times out -- the same shape a real GET of that URL returns before React
+    hydrates.
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    def locator(self, selector: str) -> _AshbyFakeLocator:
+        _ = selector
+        return _AshbyFakeLocator()
+
+    def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:
+        _ = selector, timeout
+        raise PlaywrightTimeoutError("no application form present")
+
+    def title(self) -> str:
+        return ""
+
+
+class _AshbyJobDetailResolver:
+    """Resolves to Ashby's own verified same-posting `/application` URL, the
+    exact shape `AshbyTargetVacancyResolver` returns.
+    """
+
+    def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
+        url = "https://jobs.ashbyhq.com/perk/5f6e7d8c-1234-5678-9abc-def012345678/application"
+        return ResolvedVacancy(
+            source=source,
+            external_id=external_id,
+            title="Backend Engineer",
+            company="Perk",
+            url=url,
+            application_url=url,
+        )
+
+
+def test_service_ashby_source_dispatches_and_logs_unsupported_form_diagnostics(caplog) -> None:
+    """Exercises the same source-aware dispatch -> AshbyAdapter.prepare_page ->
+    recognize path the real Telegram Prepare runtime uses, ending in the
+    generic UNSUPPORTED_FORM failure when hydration never completes within
+    the bounded wait. Confirms every diagnostic stage appears at warning
+    level.
+    """
+    session = _FakeSession()
+    session.page = _AshbyFakePage(
+        url="https://jobs.ashbyhq.com/perk/5f6e7d8c-1234-5678-9abc-def012345678/application"
+    )
+    service = AutofillService(
+        resolver=_AshbyJobDetailResolver(),
+        profile_loader=_profile,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    with caplog.at_level(logging.WARNING):
+        result = service.run("target_company:ashby:perk", "5f6e7d8c-1234-5678-9abc-def012345678", keep_open=False)
+
+    assert result.status is AutofillStatus.FAILED
+    assert result.failure_reason is AutofillFailureReason.UNSUPPORTED_FORM
+
+    messages = [r.getMessage() for r in caplog.records]
+    dispatch_log = next(m for m in messages if m.startswith("autofill_adapter_dispatch"))
+    assert "adapter=AshbyAdapter" in dispatch_log
+    detail_log = next(m for m in messages if "stage=detail_detection" in m)
+    assert "is_job_detail=False" in detail_log
+    form_recognition_log = next(m for m in messages if "stage=form_recognition" in m)
+    assert "result=False" in form_recognition_log
+    assert "reason=no_match" in form_recognition_log
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+
+
 class _RequiredSensitiveAndUnsupportedAdapter(_FakeAdapter):
     """A required demographic field with no decline option, plus a required
     unsupported (signature) control -- neither is fillable, and both must
