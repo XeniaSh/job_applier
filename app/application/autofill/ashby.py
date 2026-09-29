@@ -14,8 +14,15 @@ observed question shape and never guessing beyond it:
   explicit `identity.current_location` value, resolve the live listbox via
   `aria-controls`/`aria-owns` (or the sole unambiguous visible listbox, via
   the shared `react_controls` helpers Greenhouse's own combobox path already
-  relies on), click the one exact-normalized matching option, and require the
-  input to persist that exact text afterward. Any other autocomplete
+  relies on) -- waiting, with a bounded timeout, for that exact listbox's own
+  async suggestions to actually populate rather than trusting whatever is
+  present the instant it is typed into -- click the one exact-normalized
+  matching option, then blur the input and only trust the value it persists
+  after that blur/reset as the committed selection: a bare post-click read
+  could still show an uncommitted typed query the control has not reset yet.
+  `read_back` applies that identical blur-before-read rule so a failed fill's
+  leftover typed text is never reported back as if it were a real selection.
+  Any other autocomplete
   (e.g. "Where did you hear...") stays an unsupported control (never a plain
   text field, never typed into blindly, never a bare Enter) -- a snapshot
   only shows the closed combo, never a resolvable listbox association, so
@@ -77,6 +84,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
@@ -686,6 +694,8 @@ class AshbyAdapter:
                 # multi-checked state -- see `_fill_checkbox_group`.
                 return None
             return checked_labels[0] or None
+        if field.field_type == "combobox_location":
+            return _read_back_combobox_location(page, field)
         try:
             value = _field_locator(page, field).input_value()
         except PlaywrightError:
@@ -1663,13 +1673,94 @@ def _fill_checkbox_group(page: Page, field: DiscoveredField, value: object) -> b
     return _safe_is_checked(target) is True
 
 
+_LOCATION_LISTBOX_WAIT_MS = 3_000
+_LOCATION_LISTBOX_POLL_MS = 150
+
+
+def _listbox_option_count(listbox: Locator | None) -> int:
+    if listbox is None:
+        return 0
+    try:
+        return listbox.locator("[role='option']").count()
+    except PlaywrightError:
+        return 0
+
+
+def _wait_for_location_listbox_options(
+    page: Page, locator: Locator, timeout_ms: int = _LOCATION_LISTBOX_WAIT_MS
+) -> bool:
+    """Bounded wait for this exact combobox's own associated listbox to
+    report at least one option -- never the page-wide `[role="option"]` wait
+    the prior implementation used, which could resolve before this control's
+    own popup attaches at all, or against an unrelated control's options.
+    Ashby's own autocomplete fires its remote suggestion fetch on a debounce
+    after typing, so the associated listbox can legitimately still be empty
+    for a short window; this re-resolves that exact association fresh on
+    every poll (the popup is portaled and may not exist in the DOM until
+    results are ready) rather than caching a possibly-stale reference. A
+    single bounded wait, never a broader retry of the fill attempt itself --
+    when no option ever appears within the bound, the caller fails closed
+    exactly as if the listbox had stayed empty from the start.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        listbox = react_controls.resolve_combobox_listbox(page, locator)
+        if _listbox_option_count(listbox) > 0:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            page.wait_for_timeout(_LOCATION_LISTBOX_POLL_MS)
+        except PlaywrightError:
+            return False
+
+
+def _blurred_combobox_location_value(locator: Locator) -> str | None:
+    """Blur `locator` and return whatever value persists afterward.
+
+    The live control only resets its visible input text to the actual
+    committed selection on blur; immediately after a click the display can
+    still be showing an uncommitted typed query. Used both to confirm a
+    just-clicked option genuinely committed and, independently, by
+    `read_back` later -- so a failed selection's leftover typed text is
+    never mistaken for a real value either time.
+
+    If `blur` itself fails, the reset this whole function exists to wait for
+    is not known to have happened, so this fails closed (`None`) rather than
+    falling through to a raw `input_value()` read that could still be
+    showing that uncommitted typed query. No further bounded wait is added
+    after a successful blur: a blur event's handler runs synchronously
+    within `Locator.blur`'s own dispatch, so by the time it returns the
+    control's onBlur-driven reset (modeled synchronously by the fake DOM
+    here) has already applied -- there is no known async gap between blur
+    and the committed display settling to poll for.
+    """
+    try:
+        locator.blur(timeout=2_000)
+    except PlaywrightError:
+        return None
+    try:
+        return locator.input_value() or None
+    except PlaywrightError:
+        return None
+
+
+def _read_back_combobox_location(page: Page, field: DiscoveredField) -> str | None:
+    return _blurred_combobox_location_value(_field_locator(page, field))
+
+
 def _fill_combobox_location(page: Page, field: DiscoveredField, value: object) -> bool:
-    """Type `value` into the autocomplete input, resolve its live listbox via
+    """Type `value` into the autocomplete input, wait (bounded) for its own
+    associated listbox to actually populate, resolve that same listbox via
     the shared `react_controls` ARIA-association helpers (the same generic
     path Greenhouse's own combobox fill already relies on), and click the one
-    exact-normalized matching option. Fails closed -- returns False without
-    clicking anything -- when the listbox cannot be safely associated, or has
-    no exact match; never presses Enter or accepts a bare typed value.
+    exact-normalized matching option found there. Confirms the click by
+    blurring the input and checking only the value that persists afterward --
+    never the raw post-click value, which can still be an uncommitted typed
+    query the control has not reset yet. Fails closed -- returns False
+    without clicking anything -- when the listbox cannot be safely
+    associated, never populates within the bound, or has no exact match;
+    never presses Enter or accepts a bare typed value.
     """
     wanted = str(value or "").strip()
     if not wanted:
@@ -1693,21 +1784,43 @@ def _fill_combobox_location(page: Page, field: DiscoveredField, value: object) -
     except PlaywrightError:
         return False
     try:
-        page.locator("[role='option']").first.wait_for(state="visible", timeout=2_500)
-    except PlaywrightTimeoutError:
-        pass
+        post_fill_nonempty = bool(locator.input_value())
+    except PlaywrightError:
+        post_fill_nonempty = False
+    listbox_ready = _wait_for_location_listbox_options(page, locator)
+    option_count = _listbox_option_count(react_controls.resolve_combobox_listbox(page, locator))
     option = react_controls.scoped_matching_option_exact_normalized(page, locator, wanted)
-    if option is None:
-        return False
-    try:
-        option.click(timeout=3_000)
-    except PlaywrightError:
-        return False
-    try:
-        actual = locator.input_value()
-    except PlaywrightError:
-        return False
-    return match_option_exact_normalized(wanted, [actual]) is not None
+    exact_found = option is not None
+    click_success = False
+    committed = False
+    post_blur_nonempty = False
+    if option is not None:
+        try:
+            option.click(timeout=3_000)
+            click_success = True
+        except PlaywrightError:
+            click_success = False
+    if click_success:
+        post_blur_value = _blurred_combobox_location_value(locator)
+        post_blur_nonempty = post_blur_value is not None
+        committed = post_blur_value is not None and (
+            match_option_exact_normalized(wanted, [post_blur_value]) is not None
+        )
+    # Privacy-safe stage diagnostic -- every field here is a boolean/count,
+    # never the typed query, an option's label, or the resolved value
+    # itself, so this can freely log at this volume (see module docstring).
+    logger.warning(
+        "ashby_location stage=fill_attempt post_fill_nonempty=%s listbox_ready=%s option_count=%s "
+        "exact_found=%s click_success=%s post_blur_nonempty=%s committed=%s",
+        post_fill_nonempty,
+        listbox_ready,
+        option_count,
+        exact_found,
+        click_success,
+        post_blur_nonempty,
+        committed,
+    )
+    return committed
 
 
 def _file_names(page: Page, field: DiscoveredField) -> list[str]:
