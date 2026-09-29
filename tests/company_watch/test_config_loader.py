@@ -96,7 +96,7 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
     config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
 
     ashby_companies = [company for company in config.companies if company.watcher_type == "ashby"]
-    assert len(ashby_companies) == 8
+    assert len(ashby_companies) == 14
 
     expected_name_to_slug = {
         "TravelPerk / Perk": "Perk",
@@ -107,6 +107,12 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
         "Trigger.dev": "triggerdev",
         "Moss": "moss",
         "Sentry": "sentry",
+        "Kayak": "kayak",
+        "Coder": "coder",
+        "incident.io": "incident",
+        "Taktile": "taktile",
+        "n8n": "n8n",
+        "Lovable": "lovable",
     }
     assert {company.name for company in ashby_companies} == set(expected_name_to_slug)
 
@@ -123,13 +129,13 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
         assert company.job_board_url == f"https://jobs.ashbyhq.com/{expected_slug}"
 
     # TravelPerk / Perk is a pre-existing, hand-verified entry with its own
-    # confirmed_role_based/legacy role_keywords metadata; only the seven
+    # confirmed_role_based/legacy role_keywords metadata; only the thirteen
     # newly added Ashby companies use the shared mixed_check_per_role/
     # remote_global + standard role_title_keywords metadata.
     newly_added_ashby_companies = [
         company for company in ashby_companies if company.name != "TravelPerk / Perk"
     ]
-    assert len(newly_added_ashby_companies) == 7
+    assert len(newly_added_ashby_companies) == 13
     for company in newly_added_ashby_companies:
         assert company.relocation_status in {"mixed_check_per_role", "remote_global"}
         assert company.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS

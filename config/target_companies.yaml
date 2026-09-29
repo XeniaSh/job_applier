@@ -760,3 +760,123 @@ companies:
     notes:
       - Verified public Ashby job board (slug sentry); title filter matched a subset of open roles across Vienna/Toronto/US offices.
       - Relocation/visa sponsorship is not confirmed company-wide; check per role.
+
+  - name: Kayak
+    priority: A
+    category: travel_metasearch
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Europe]
+    remote: limited
+    java_backend_relevance: high
+    role_keywords: [backend, platform, travel, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/kayak
+    job_board_url: https://jobs.ashbyhq.com/kayak
+    notes:
+      - Verified public Ashby job board (slug kayak); title filter matched a subset of roughly 40 open roles. Observed Europe-based Java/software postings list a Hybrid workplace; some postings do not declare one.
+      - Hybrid is only verified at the role level for the postings reviewed, not as company-wide policy. Relocation/visa sponsorship not confirmed company-wide; check per role.
+
+  - name: Coder
+    priority: A
+    category: developer_tools
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_region_limited]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Europe]
+    remote: region_limited
+    java_backend_relevance: low
+    role_keywords: [backend, platform, developer tools, cloud, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/coder
+    job_board_url: https://jobs.ashbyhq.com/coder
+    notes:
+      - Verified public Ashby job board (slug coder); title filter matched a subset of roughly 30 open roles. Observed Europe-based backend/software engineer postings list a Remote (region-limited) workplace.
+      - Region-limited remote is only verified at the role level for the postings reviewed, not as company-wide policy. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
+
+  - name: incident.io
+    priority: A
+    category: developer_tools_incident_management
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [London, UK]
+    remote: limited
+    java_backend_relevance: low
+    role_keywords: [backend, platform, incident management, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/incident
+    job_board_url: https://jobs.ashbyhq.com/incident
+    notes:
+      - Verified public Ashby job board (slug incident); title filter matched a subset of roughly 32 open roles. Observed London-based Platform Engineer posting lists a Hybrid workplace.
+      - Hybrid is only verified at the role level for the posting reviewed, not as company-wide policy. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
+
+  - name: Taktile
+    priority: A
+    category: fintech_decisioning_ai
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Berlin, Germany]
+    remote: limited
+    java_backend_relevance: low
+    role_keywords: [backend, platform, fintech, decisioning, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/taktile
+    job_board_url: https://jobs.ashbyhq.com/taktile
+    notes:
+      - Verified public Ashby job board (slug taktile); title filter matched a subset of roughly 41 open roles. Observed Berlin-based Senior Backend posting lists a Hybrid workplace.
+      - Hybrid is only verified at the role level for the posting reviewed, not as company-wide policy. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
+
+  - name: n8n
+    priority: A
+    category: developer_tools_workflow
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_region_limited]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Berlin, Germany]
+    remote: region_limited
+    java_backend_relevance: low
+    role_keywords: [backend, platform, workflow automation, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/n8n
+    job_board_url: https://jobs.ashbyhq.com/n8n
+    notes:
+      - Verified public Ashby job board (slug n8n); title filter matched a subset of roughly 35 open roles. Observed Berlin-based Agentic Engineering Platform Engineer posting lists a Remote (region-limited) workplace.
+      - Region-limited remote is only verified at the role level for the posting reviewed, not as company-wide policy. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
+
+  - name: Lovable
+    priority: A
+    category: ai_developer_tools
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [on_site]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Stockholm, Sweden, London, UK]
+    remote: none
+    java_backend_relevance: low
+    role_keywords: [backend, platform, software engineering, ai, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/lovable
+    job_board_url: https://jobs.ashbyhq.com/lovable
+    notes:
+      - Verified public Ashby job board (slug lovable); title filter matched a subset of roughly 79 open roles. Observed Stockholm/London-based platform/software engineering postings list an OnSite workplace, not remote.
+      - OnSite is only verified at the role level for the postings reviewed, not as company-wide policy. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
