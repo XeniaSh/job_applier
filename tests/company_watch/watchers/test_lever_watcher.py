@@ -187,3 +187,64 @@ def test_source_and_external_id_are_stable() -> None:
     assert [item.external_id for item in first.vacancies] == [
         item.external_id for item in second.vacancies
     ]
+
+
+@respx.mock
+def test_eu_hosted_board_fetches_eu_endpoint_only() -> None:
+    eu_endpoint = lever_postings_endpoint("pnlfin", region="eu")
+    global_endpoint = lever_postings_endpoint("pnlfin", region="global")
+    respx.get(eu_endpoint).mock(
+        return_value=httpx.Response(
+            status_code=200,
+            json=[
+                _job(
+                    job_id="eu-1",
+                    title="Java Backend Engineer",
+                    url="https://jobs.eu.lever.co/pnlfin/eu-1",
+                )
+            ],
+        )
+    )
+    company = _company(
+        name="Finom",
+        job_board_url="https://jobs.eu.lever.co/pnlfin",
+        role_keywords=["java", "backend"],
+    )
+
+    result = _watcher().watch(company)
+
+    assert [call.request.url for call in respx.calls] == [httpx.URL(eu_endpoint)]
+    assert global_endpoint not in [str(call.request.url) for call in respx.calls]
+    assert len(result.vacancies) == 1
+    vacancy = result.vacancies[0]
+    assert vacancy.source == "target_company:lever:pnlfin"
+    assert vacancy.external_id == "eu-1"
+    assert vacancy.url == "https://jobs.eu.lever.co/pnlfin/eu-1"
+    assert result.errors == []
+
+
+@respx.mock
+def test_eu_host_404_is_isolated_per_company_error() -> None:
+    respx.get(lever_postings_endpoint("pnlfin", region="eu")).mock(
+        return_value=httpx.Response(status_code=404)
+    )
+    respx.get(lever_postings_endpoint("qonto")).mock(
+        return_value=httpx.Response(status_code=200, json=[_job(title="Java Backend Engineer")])
+    )
+    companies = [
+        _company(
+            name="Finom",
+            job_board_url="https://jobs.eu.lever.co/pnlfin",
+            role_keywords=["java"],
+        ),
+        _company(name="Qonto", job_board_url="https://jobs.lever.co/qonto", role_keywords=["java"]),
+    ]
+
+    result = _watcher().watch(companies)
+
+    assert [item.company for item in result.vacancies] == ["Qonto"]
+    assert len(result.errors) == 1
+    assert result.errors[0].company_name == "Finom"
+    assert result.errors[0].status_code == 404
+    assert result.errors[0].slug == "pnlfin"
+    assert result.errors[0].endpoint == lever_postings_endpoint("pnlfin", region="eu")

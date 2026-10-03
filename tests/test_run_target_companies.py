@@ -130,6 +130,7 @@ def _lever_vacancy(
     external_id: str = "501",
     title: str = "Java Backend Engineer",
     description: str = "Java backend services",
+    url: str | None = None,
 ) -> NormalizedVacancy:
     site = slug or company.lower()
     return NormalizedVacancy(
@@ -140,7 +141,7 @@ def _lever_vacancy(
         location="Bangkok",
         employment="Full-time",
         description=description,
-        url=f"https://jobs.lever.co/{site}/{external_id}",
+        url=url or f"https://jobs.lever.co/{site}/{external_id}",
         published_at="2026-09-05T10:00:00Z",
     )
 
@@ -1334,6 +1335,35 @@ def test_provider_funnel_counts_greenhouse_and_lever_combined(monkeypatch, tmp_p
     assert "sent=1" in lv_lines[0]
     # Existing aggregate log line remains unchanged and present.
     assert any("Target companies: watched=" in line for line in out.splitlines())
+
+
+def test_eu_hosted_lever_vacancy_clears_the_unsupported_form_gate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A Lever posting recovered from the EU API host (`jobs.eu.lever.co`)
+    must clear `_has_unconfirmed_application_form` the same way a global
+    `jobs.lever.co` posting does, so EU-hosted boards like Finom reach the
+    post-gate funnel stage instead of being dropped as an unsupported form.
+    """
+    eu_vacancy = _lever_vacancy(
+        company="Finom",
+        slug="pnlfin",
+        external_id="eu-1",
+        url="https://jobs.eu.lever.co/pnlfin/eu-1",
+    )
+    result, _analyzer, _telegram, _deliveries = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        lever_vacancies=[eu_vacancy],
+        include_lever_company=True,
+    )
+
+    lv = result.provider_funnels["lever"]
+    assert lv.raw_fetched == 1
+    assert lv.title_prefilter_pass == 1
+    assert lv.watcher_errors == 0
+    assert lv.post_gate_candidates == 1
 
 
 def test_provider_funnel_counts_ashby(monkeypatch, tmp_path: Path, capsys) -> None:

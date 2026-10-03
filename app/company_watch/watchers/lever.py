@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 _SOURCE_PREFIX = "target_company:lever"
 _RESPONSE_SNIPPET_LIMIT = 400
 
+LEVER_REGION_GLOBAL = "global"
+LEVER_REGION_EU = "eu"
+
+_GLOBAL_API_HOST = "https://api.lever.co"
+_EU_API_HOST = "https://api.eu.lever.co"
+_EU_HOST_EXACT = "eu.lever.co"
+_EU_HOST_SUFFIX = ".eu.lever.co"
+
 
 @dataclass(frozen=True)
 class LeverCompanyError:
@@ -113,8 +121,9 @@ class LeverTargetWatcher:
         client: httpx.Client,
     ) -> tuple[list[NormalizedVacancy], int]:
         slug = resolve_lever_slug(company)
+        region = resolve_lever_region(company)
         source = f"{_SOURCE_PREFIX}:{slug}"
-        jobs = fetch_lever_postings(slug, client=client)
+        jobs = fetch_lever_postings(slug, client=client, region=region)
         collected: list[NormalizedVacancy] = []
         raw_fetched = 0
         for item in jobs:
@@ -134,8 +143,25 @@ def is_lever_target(company: TargetCompany) -> bool:
     return watcher_type == "lever" or ats == "lever"
 
 
-def lever_postings_endpoint(slug: str) -> str:
-    return f"https://api.lever.co/v0/postings/{slug}?mode=json"
+def lever_postings_endpoint(slug: str, *, region: str = LEVER_REGION_GLOBAL) -> str:
+    host = _EU_API_HOST if region == LEVER_REGION_EU else _GLOBAL_API_HOST
+    return f"{host}/v0/postings/{slug}?mode=json"
+
+
+def resolve_lever_region(company: TargetCompany) -> str:
+    """Lever runs distinct global/EU postings API hosts for boards hosted on
+    `jobs.lever.co` vs `jobs.eu.lever.co` (same slug derivation, different
+    host). Mirrors the host precedence in `resolve_lever_slug`.
+    """
+    for raw in (company.job_board_url, company.career_url):
+        if not raw:
+            continue
+        host = urlparse(raw.strip()).netloc.lower()
+        if host == _EU_HOST_EXACT or host.endswith(_EU_HOST_SUFFIX):
+            return LEVER_REGION_EU
+        if host.endswith("lever.co"):
+            return LEVER_REGION_GLOBAL
+    return LEVER_REGION_GLOBAL
 
 
 def resolve_lever_slug(company: TargetCompany) -> str:
@@ -156,8 +182,10 @@ def resolve_lever_slug(company: TargetCompany) -> str:
     return slug
 
 
-def fetch_lever_postings(slug: str, *, client: httpx.Client) -> list[object]:
-    endpoint = lever_postings_endpoint(slug)
+def fetch_lever_postings(
+    slug: str, *, client: httpx.Client, region: str = LEVER_REGION_GLOBAL
+) -> list[object]:
+    endpoint = lever_postings_endpoint(slug, region=region)
     response: httpx.Response | None = None
     try:
         response = client.get(endpoint)

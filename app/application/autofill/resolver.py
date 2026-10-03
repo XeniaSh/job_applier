@@ -22,6 +22,8 @@ from app.company_watch.watchers.ashby import (
     fetch_ashby_jobs,
 )
 from app.company_watch.watchers.lever import (
+    LEVER_REGION_EU,
+    LEVER_REGION_GLOBAL,
     LeverCollectionError,
     build_lever_http_client,
     fetch_lever_postings,
@@ -127,6 +129,23 @@ def parse_target_company_lever_source(source: str) -> str:
     return slug.lower()
 
 
+def _fetch_lever_postings_with_eu_fallback(
+    slug: str, *, client: httpx.Client
+) -> list[object]:
+    """Lever's postings API has distinct global/EU hosts for the same slug
+    shape (`resolve_lever_region` picks the right one from config at watch
+    time, but a resolve call only has the slug). A 404 on the global host is
+    the signal that this board lives on the EU host instead; any other error
+    is surfaced as-is rather than silently retried against an unrelated host.
+    """
+    try:
+        return fetch_lever_postings(slug, client=client, region=LEVER_REGION_GLOBAL)
+    except LeverCollectionError as exc:
+        if exc.status_code != 404:
+            raise
+        return fetch_lever_postings(slug, client=client, region=LEVER_REGION_EU)
+
+
 class LeverTargetVacancyResolver:
     def __init__(
         self,
@@ -148,7 +167,7 @@ class LeverTargetVacancyResolver:
                 timeout_seconds=self._timeout_seconds,
                 user_agent=self._user_agent,
             ) as client:
-                jobs = fetch_lever_postings(slug, client=client)
+                jobs = _fetch_lever_postings_with_eu_fallback(slug, client=client)
         except LeverCollectionError as exc:
             raise VacancyResolveError(str(exc)) from exc
         except httpx.HTTPError as exc:
