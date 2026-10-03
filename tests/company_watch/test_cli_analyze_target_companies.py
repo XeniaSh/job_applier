@@ -51,6 +51,7 @@ def _vacancy(
     company: str = "Agoda",
     location: str = "Bangkok",
     description: str = "Java backend services",
+    published_at: str | None = "2026-09-05T10:00:00Z",
 ) -> NormalizedVacancy:
     return NormalizedVacancy(
         source=f"target_company:greenhouse:{company.lower()}",
@@ -61,7 +62,7 @@ def _vacancy(
         employment="Full-time",
         description=description,
         url=f"https://job-boards.greenhouse.io/{company.lower()}/jobs/{external_id}",
-        published_at="2026-09-05T10:00:00Z",
+        published_at=published_at,
     )
 
 
@@ -1205,6 +1206,48 @@ def test_relevance_ties_keep_source_order(tmp_path: Path, monkeypatch) -> None:
         _vacancy(external_id="101", company="Elastic", title="Java Engineer Amsterdam"),
         _vacancy(external_id="102", company="Elastic", title="Java Engineer Canada"),
         _vacancy(external_id="103", company="Elastic", title="Java Engineer London"),
+    ]
+    captured = _patch_runtime(
+        monkeypatch,
+        watch_result=GreenhouseWatchResult(vacancies=vacancies, errors=[], raw_fetched=3),
+        evaluation=_evaluation(),
+    )
+
+    result = _invoke(config_file, "--analyze-limit-per-company", "2")
+
+    assert result.exit_code == 0
+    assert len(captured["texts"]) == 2
+    assert "Java Engineer Amsterdam" in result.output
+    assert "Java Engineer Canada" in result.output
+    assert "Java Engineer London" not in result.output
+
+
+def test_relevance_ties_keep_source_order_despite_differing_published_at(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The standalone CLI must not use the runtime cycle's freshness tiebreak:
+    # with equal title scores, source order wins even when the newest
+    # vacancy was collected last.
+    config_file = _write_config(tmp_path)
+    vacancies = [
+        _vacancy(
+            external_id="101",
+            company="Elastic",
+            title="Java Engineer Amsterdam",
+            published_at="2026-09-01T00:00:00Z",
+        ),
+        _vacancy(
+            external_id="102",
+            company="Elastic",
+            title="Java Engineer Canada",
+            published_at="2026-09-03T00:00:00Z",
+        ),
+        _vacancy(
+            external_id="103",
+            company="Elastic",
+            title="Java Engineer London",
+            published_at="2026-09-05T00:00:00Z",
+        ),
     ]
     captured = _patch_runtime(
         monkeypatch,

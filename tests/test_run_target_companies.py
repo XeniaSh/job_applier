@@ -107,6 +107,7 @@ def _vacancy(
     external_id: str = "101",
     title: str = "Java Backend Engineer",
     description: str = "Java backend services",
+    published_at: str | None = "2026-09-05T10:00:00Z",
 ) -> NormalizedVacancy:
     slug = board or company.lower()
     return NormalizedVacancy(
@@ -118,7 +119,7 @@ def _vacancy(
         employment="Full-time",
         description=description,
         url=f"https://job-boards.greenhouse.io/{slug}/jobs/{external_id}",
-        published_at="2026-09-05T10:00:00Z",
+        published_at=published_at,
     )
 
 
@@ -152,6 +153,7 @@ def _ashby_vacancy(
     title: str = "Java Backend Engineer",
     description: str = "Java backend services",
     url: str | None = None,
+    published_at: str | None = "2026-09-05T10:00:00Z",
 ) -> NormalizedVacancy:
     site = slug or "Perk"
     return NormalizedVacancy(
@@ -163,7 +165,7 @@ def _ashby_vacancy(
         employment="Full-time",
         description=description,
         url=url or f"https://jobs.ashbyhq.com/{site}/{external_id}",
-        published_at="2026-09-05T10:00:00Z",
+        published_at=published_at,
     )
 
 
@@ -1742,3 +1744,146 @@ def test_outcome_counts_line_has_no_private_values(monkeypatch, tmp_path: Path, 
         sent_vacancy.url,
         ignored_vacancy.url,
     )
+
+
+# --- Provider-fair, freshness-aware runtime selection -----------------------
+
+
+def test_provider_fair_round_robin_does_not_starve_small_provider_under_full_budget() -> None:
+    # A large Greenhouse backlog spread across many distinct companies used
+    # to fill the whole budget in company insertion order (Greenhouse
+    # collected first) before Ashby's two candidates ever got a turn.
+    greenhouse_vacancies = [
+        _vacancy(company=f"GH{i}", board=f"gh{i}", external_id=f"gh-{i}")
+        for i in range(12)
+    ]
+    ashby_vacancies = [
+        _ashby_vacancy(company=f"AB{i}", slug=f"ab{i}", external_id=f"ab-{i}")
+        for i in range(2)
+    ]
+
+    selected = cli_module._select_target_company_analysis_vacancies(
+        [*greenhouse_vacancies, *ashby_vacancies],
+        analyze_limit=10,
+        analyze_limit_per_company=10,
+        selection_order="relevance",
+    )
+
+    providers = [cli_module._target_company_form_provider(v.source) for v in selected]
+    # Both Ashby candidates make it in despite 12 competing Greenhouse
+    # companies, and Greenhouse's unused Ashby-sized gap flows back to it so
+    # the full budget is still spent (capacity reuse, no rigid quota).
+    assert providers.count("ashby") == 2
+    assert len(selected) == 10
+
+
+def test_provider_fair_round_robin_preserves_per_company_cap() -> None:
+    greenhouse_vacancies = [
+        _vacancy(company="Agoda", external_id=f"gh-{i}") for i in range(5)
+    ]
+    ashby_vacancies = [_ashby_vacancy(external_id="ab-0")]
+
+    selected = cli_module._select_target_company_analysis_vacancies(
+        [*greenhouse_vacancies, *ashby_vacancies],
+        analyze_limit=10,
+        analyze_limit_per_company=2,
+        selection_order="relevance",
+    )
+
+    agoda_selected = [v for v in selected if v.company == "Agoda"]
+    assert len(agoda_selected) == 2
+    assert any(cli_module._target_company_form_provider(v.source) == "ashby" for v in selected)
+
+
+def test_freshness_breaks_relevance_ties_within_company() -> None:
+    oldest = _vacancy(
+        company="Elastic", external_id="1", title="Java Engineer", published_at="2026-09-01T00:00:00Z"
+    )
+    middle = _vacancy(
+        company="Elastic", external_id="2", title="Java Engineer", published_at="2026-09-03T00:00:00Z"
+    )
+    newest = _vacancy(
+        company="Elastic", external_id="3", title="Java Engineer", published_at="2026-09-05T00:00:00Z"
+    )
+
+    selected = cli_module._select_target_company_analysis_vacancies(
+        [oldest, middle, newest],
+        analyze_limit=2,
+        analyze_limit_per_company=2,
+        selection_order="relevance",
+        prefer_freshness=True,
+    )
+
+    # Same title means the same relevance score, so freshness decides which
+    # two of the three survive the per-company cap: the newest two.
+    assert [v.external_id for v in selected] == ["3", "2"]
+
+
+def test_missing_or_malformed_published_at_sorts_after_valid_dates() -> None:
+    missing = _vacancy(
+        company="Elastic", external_id="2", title="Java Engineer", published_at=None
+    )
+    malformed = _vacancy(
+        company="Elastic", external_id="3", title="Java Engineer", published_at="not-a-date"
+    )
+    valid = _vacancy(
+        company="Elastic", external_id="1", title="Java Engineer", published_at="2026-09-05T00:00:00Z"
+    )
+
+    selected = cli_module._select_target_company_analysis_vacancies(
+        [missing, malformed, valid],
+        analyze_limit=3,
+        analyze_limit_per_company=3,
+        selection_order="relevance",
+        prefer_freshness=True,
+    )
+
+    # A missing or unparseable date must not crash the sort or outrank a
+    # known-fresh posting; among themselves, missing/malformed dates fall
+    # back to the stable source-order tiebreak.
+    assert [v.external_id for v in selected] == ["1", "2", "3"]
+
+
+def test_uncached_preference_and_provider_fairness_both_hold_under_cap() -> None:
+    cached_agoda = _vacancy(company="Agoda", external_id="gh-cached", title="Java Backend Engineer")
+    uncached_agoda = _vacancy(company="Agoda", external_id="gh-uncached", title="Java Backend Engineer")
+    uncached_ashby = _ashby_vacancy(external_id="ab-1", title="Java Backend Engineer")
+
+    selected = cli_module._select_target_company_analysis_vacancies(
+        [cached_agoda, uncached_agoda, uncached_ashby],
+        analyze_limit=2,
+        analyze_limit_per_company=1,
+        selection_order="relevance",
+        deprioritize=lambda vacancy: vacancy is cached_agoda,
+    )
+
+    # Agoda's per-company cap of 1 still goes to the never-analyzed vacancy
+    # over the cached one (deprioritize tier, decided inside the company's
+    # own ranking), and that doesn't cost Ashby its round-robin turn for the
+    # second slot -- both preferences hold at once under the nested design.
+    assert {v.external_id for v in selected} == {"gh-uncached", "ab-1"}
+
+
+def test_run_cycle_provider_fair_selection_does_not_starve_ashby(monkeypatch, tmp_path: Path) -> None:
+    greenhouse_vacancies = [
+        _vacancy(company=f"GH{i}", board=f"gh{i}", external_id=f"gh-{i}")
+        for i in range(6)
+    ]
+    ashby_vacancy = _ashby_vacancy(external_id="701", title="Go Backend Engineer")
+
+    result, analyzer, telegram, deliveries = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=greenhouse_vacancies,
+        ashby_vacancies=[ashby_vacancy],
+        include_ashby_company=True,
+        analyze_limit=4,
+        analyze_limit_per_company=10,
+    )
+
+    # End-to-end through the real cycle (gates, cache, provider funnels): six
+    # Greenhouse companies must not consume the whole budget before Ashby's
+    # single candidate gets a turn.
+    assert result.provider_funnels["ashby"].selected == 1
+    assert result.provider_funnels["greenhouse"].selected == 3
+    assert result.selected == 4

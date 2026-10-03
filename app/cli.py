@@ -1562,6 +1562,7 @@ def _run_target_companies_cycle(
         analyze_limit_per_company=analyze_limit_per_company,
         selection_order=selection_order,
         deprioritize=lambda vacancy: _has_unchanged_cached_analysis(vacancy, analysis_cache),
+        prefer_freshness=True,
     )
     for vacancy in to_analyze:
         provider_funnels[_target_company_form_provider(vacancy.source)].selected += 1
@@ -1979,6 +1980,20 @@ def _format_analysis_score(value: float | None) -> str:
     return f"{value:.1f}"
 
 
+def _target_company_vacancy_freshness_rank(vacancy: NormalizedVacancy) -> tuple[int, float]:
+    """Sortable freshness key: newer `published_at` sorts first.
+
+    A missing or malformed date is treated as oldest (sorts last) rather than
+    freshest, so a vacancy with no date can't jump ahead of ones with a known
+    recent date -- it only loses ties against other dateless vacancies, which
+    still fall back to the stable index tiebreak.
+    """
+    parsed = _parse_action_timestamp(vacancy.published_at)
+    if parsed is None:
+        return (1, 0.0)
+    return (0, -parsed.timestamp())
+
+
 def _select_target_company_analysis_vacancies(
     vacancies: list[NormalizedVacancy],
     *,
@@ -1986,6 +2001,7 @@ def _select_target_company_analysis_vacancies(
     analyze_limit_per_company: int | None,
     selection_order: str = "source",
     deprioritize: Callable[[NormalizedVacancy], bool] | None = None,
+    prefer_freshness: bool = False,
 ) -> list[NormalizedVacancy]:
     """Pick vacancies to analyze under the global and per-company caps.
 
@@ -1993,6 +2009,21 @@ def _select_target_company_analysis_vacancies(
     unchanged cached analysis behind never-analyzed ones) never excludes a
     vacancy — it only breaks ties so fresh candidates drain first within the
     cap; deprioritized vacancies remain selectable once slots remain.
+
+    `prefer_freshness` adds `published_at` as a relevance tiebreaker, ahead of
+    source order, within a company's candidates. It's opt-in (used by the
+    runtime cycle only) because the standalone analyze-target-companies
+    CLI documents and tests that relevance ties keep source order.
+
+    Selection is provider-fair: candidates are grouped by ATS provider (via
+    `_target_company_form_provider`) before being grouped by company, and the
+    final pick round-robins across providers in alphabetical order (not
+    collection order, so a large Greenhouse backlog collected first can't
+    consistently claim the budget ahead of Lever/Ashby/future providers) and,
+    within each provider's turn, across its companies -- same as the
+    per-company round-robin below. A provider with no more candidates in a
+    round is simply skipped, so its unused turns flow to the remaining
+    providers without any fixed per-provider quota.
     """
     if analyze_limit_per_company is None:
         if deprioritize is None:
@@ -2002,51 +2033,60 @@ def _select_target_company_analysis_vacancies(
             key=lambda pair: (bool(deprioritize(pair[1])), pair[0]),
         )
         return [vacancy for _, vacancy in ranked][:analyze_limit]
-    grouped: dict[str, list[tuple[int, NormalizedVacancy]]] = {}
+    grouped_by_provider: dict[str, dict[str, list[tuple[int, NormalizedVacancy]]]] = {}
     for index, vacancy in enumerate(vacancies):
-        name = vacancy.company or "unknown"
-        grouped.setdefault(name, []).append((index, vacancy))
-    ranked_by_company: list[list[NormalizedVacancy]] = []
-    for items in grouped.values():
-        if selection_order == "relevance":
-            ranked = sorted(
-                items,
-                key=lambda pair: (
-                    bool(deprioritize(pair[1])) if deprioritize else False,
-                    -rank_title_for_analysis(pair[1].title).score,
-                    pair[0],
-                ),
-            )
-        else:
-            ranked = sorted(
-                items,
-                key=lambda pair: (
-                    bool(deprioritize(pair[1])) if deprioritize else False,
-                    pair[0],
-                ),
-            )
-        ranked_by_company.append([vacancy for _, vacancy in ranked][:analyze_limit_per_company])
-    selected = _interleave_by_company(ranked_by_company)
+        provider = _target_company_form_provider(vacancy.source)
+        company_name = vacancy.company or "unknown"
+        grouped_by_provider.setdefault(provider, {}).setdefault(company_name, []).append((index, vacancy))
+
+    provider_queues: list[list[NormalizedVacancy]] = []
+    for provider in sorted(grouped_by_provider):
+        ranked_by_company: list[list[NormalizedVacancy]] = []
+        for items in grouped_by_provider[provider].values():
+            if selection_order == "relevance":
+                ranked = sorted(
+                    items,
+                    key=lambda pair: (
+                        bool(deprioritize(pair[1])) if deprioritize else False,
+                        -rank_title_for_analysis(pair[1].title).score,
+                        _target_company_vacancy_freshness_rank(pair[1]) if prefer_freshness else 0,
+                        pair[0],
+                    ),
+                )
+            else:
+                ranked = sorted(
+                    items,
+                    key=lambda pair: (
+                        bool(deprioritize(pair[1])) if deprioritize else False,
+                        pair[0],
+                    ),
+                )
+            ranked_by_company.append([vacancy for _, vacancy in ranked][:analyze_limit_per_company])
+        provider_queues.append(_round_robin_interleave(ranked_by_company))
+
+    selected = _round_robin_interleave(provider_queues)
     return selected[:analyze_limit]
 
 
-def _interleave_by_company(
-    ranked_by_company: list[list[NormalizedVacancy]],
+def _round_robin_interleave(
+    ranked_queues: list[list[NormalizedVacancy]],
 ) -> list[NormalizedVacancy]:
-    """Round-robin across companies so no single company exhausts the cap.
+    """Round-robin merge so no single queue exhausts the budget.
 
-    Each company's ranked list is already capped at the per-company limit and
-    ordered by selection_order; this only decides the pick order across
-    companies, taking one candidate per company per round in configured/
-    source order until every company's list is exhausted.
+    Each queue is already ranked/capped by the caller; this only decides the
+    pick order across queues, taking one candidate per queue per round in the
+    order given until every queue is exhausted. A queue with nothing left in
+    a round is skipped, so its turn flows to the remaining queues. Used both
+    to interleave companies within a provider and, nested, to interleave
+    providers themselves.
     """
     selected: list[NormalizedVacancy] = []
     round_index = 0
     while True:
         added_this_round = False
-        for company_items in ranked_by_company:
-            if round_index < len(company_items):
-                selected.append(company_items[round_index])
+        for queue in ranked_queues:
+            if round_index < len(queue):
+                selected.append(queue[round_index])
                 added_this_round = True
         if not added_this_round:
             return selected
