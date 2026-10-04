@@ -412,6 +412,77 @@ def test_archived_formatter_and_undo_button() -> None:
     assert buttons[1][0].text == "🔗 Open vacancy"
 
 
+def test_ashby_clickhouse_uuid_undo_callback_fits_limit_and_round_trips() -> None:
+    # Public ClickHouse Ashby API exposes 36-char canonical UUID posting ids.
+    # "undo:tca.clickhouse:<36-char uuid>:<8-char action id>" is 65 bytes raw
+    # -- over Telegram's 64-byte callback_data limit -- so the uuid must be
+    # compacted on build and expanded back to the exact original on parse.
+    external_id = "01234567-89ab-cdef-0123-456789abcdef"
+    action_id = "abcd1234"
+    buttons = build_archived_buttons(
+        "https://jobs.ashbyhq.com/clickhouse/01234567-89ab-cdef-0123-456789abcdef",
+        source="target_company:ashby:clickhouse",
+        external_id=external_id,
+        action_id=action_id,
+    )
+    undo_data = buttons[0][0].callback_data
+    assert undo_data is not None
+    assert len(undo_data.encode("utf-8")) <= 64
+    assert undo_data != f"undo:tca.clickhouse:{external_id}:{action_id}"
+    assert parse_callback_data(undo_data) == (
+        "undo",
+        "target_company:ashby:clickhouse",
+        external_id,
+        action_id,
+    )
+
+
+def test_ordinary_clickhouse_uuid_callbacks_stay_raw() -> None:
+    # Shorter (no action_id) callbacks for the same uuid already fit, so they
+    # must stay in the plain, human-readable form -- no unnecessary compaction.
+    from app.telegram.client import build_action_buttons
+
+    external_id = "01234567-89ab-cdef-0123-456789abcdef"
+    buttons = build_action_buttons(
+        "target_company:ashby:clickhouse",
+        external_id,
+        "https://jobs.ashbyhq.com/clickhouse/01234567-89ab-cdef-0123-456789abcdef",
+    )
+    applied_button = next(
+        button
+        for row in buttons
+        for button in row
+        if button.callback_data and button.callback_data.startswith("applied:")
+    )
+    assert applied_button.callback_data == f"applied:tca.clickhouse:{external_id}"
+
+
+def test_legacy_uuid_undo_callback_without_compaction_still_parses() -> None:
+    # A callback persisted before this fix (or from a source short enough to
+    # never need compaction) must keep parsing to the identical external id.
+    external_id = "01234567-89ab-cdef-0123-456789abcdef"
+    legacy_data = f"undo:li:{external_id}:abcd1234"
+    assert parse_callback_data(legacy_data) == ("undo", "linkedin-email", external_id, "abcd1234")
+
+
+def test_overlong_non_uuid_external_id_fails_closed() -> None:
+    # A non-UUID external id has no reversible compact encoding, so an
+    # overlong payload must still raise rather than silently truncating.
+    external_id = "x" * 40
+    with pytest.raises(ValueError, match="exceeds Telegram limit"):
+        build_archived_buttons(
+            "https://jobs.ashbyhq.com/clickhouse/x",
+            source="target_company:ashby:clickhouse",
+            external_id=external_id,
+            action_id="abcd1234",
+        )
+
+
+def test_malformed_compact_uuid_token_fails_closed() -> None:
+    with pytest.raises(ValueError, match="Invalid compact external id"):
+        parse_callback_data("undo:li:~not-valid-base64:abcd1234")
+
+
 def test_apply_terminal_action_storage_fields(tmp_path: Path) -> None:
     storage = TelegramDeliveryStorage(db_path=tmp_path / "jobs.db")
     _seed_sent(storage)

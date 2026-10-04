@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import re
 import httpx
 import threading
 from pathlib import Path
@@ -594,6 +596,11 @@ def parse_callback_data(value: str) -> tuple[str, str, str, str | None]:
     Formats:
     - action:source:external_id
     - undo:source:external_id:action_id
+
+    `external_id` may be the raw id (legacy/short callbacks) or, when the raw
+    id would have made the payload exceed Telegram's 64-byte callback_data
+    limit, a `_COMPACT_UUID_PREFIX`-marked compact encoding produced by
+    `_compact_external_id` -- decoded back here to the exact original UUID.
     """
     parts = value.split(":")
     if len(parts) == 3:
@@ -607,10 +614,47 @@ def parse_callback_data(value: str) -> tuple[str, str, str, str | None]:
         raise ValueError("Unsupported callback action.")
     if not external_id.strip():
         raise ValueError("Invalid external id in callback data.")
+    if external_id.startswith(_COMPACT_UUID_PREFIX):
+        external_id = _expand_compact_external_id(external_id)
     if action == "undo" and (not action_id or not action_id.strip()):
         raise ValueError("Invalid undo action id.")
     source = map_code_to_source(source_code)
     return action, source, external_id, action_id
+
+
+_CANONICAL_UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+_COMPACT_UUID_PREFIX = "~"
+
+
+def _compact_external_id(external_id: str) -> str | None:
+    """Reversibly compact a canonical lowercase UUID external id.
+
+    Returns `None` when `external_id` is not a canonical UUID: callers must
+    treat that as "cannot be compacted" rather than silently truncating.
+    """
+    if not _CANONICAL_UUID_PATTERN.match(external_id):
+        return None
+    raw = bytes.fromhex(external_id.replace("-", ""))
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return f"{_COMPACT_UUID_PREFIX}{encoded}"
+
+
+def _expand_compact_external_id(value: str) -> str:
+    body = value[len(_COMPACT_UUID_PREFIX) :]
+    padded = body + "=" * (-len(body) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded)
+    except ValueError as exc:
+        raise ValueError("Invalid compact external id in callback data.") from exc
+    if len(raw) != 16:
+        raise ValueError("Invalid compact external id in callback data.")
+    hex_value = raw.hex()
+    return (
+        f"{hex_value[0:8]}-{hex_value[8:12]}-{hex_value[12:16]}-"
+        f"{hex_value[16:20]}-{hex_value[20:32]}"
+    )
 
 
 def validate_linkedin_job_url(url: str) -> str:
@@ -631,13 +675,27 @@ def _callback_data(
     *,
     action_id: str | None = None,
 ) -> str:
+    value = _render_callback_data(action, source_code, external_id, action_id=action_id)
+    if len(value.encode("utf-8")) <= 64:
+        return value
+    compact_external_id = _compact_external_id(external_id)
+    if compact_external_id is not None:
+        compact_value = _render_callback_data(action, source_code, compact_external_id, action_id=action_id)
+        if len(compact_value.encode("utf-8")) <= 64:
+            return compact_value
+    raise ValueError("callback_data exceeds Telegram limit.")
+
+
+def _render_callback_data(
+    action: str,
+    source_code: str,
+    external_id: str,
+    *,
+    action_id: str | None = None,
+) -> str:
     if action_id:
-        value = f"{action}:{source_code}:{external_id}:{action_id}"
-    else:
-        value = f"{action}:{source_code}:{external_id}"
-    if len(value.encode("utf-8")) > 64:
-        raise ValueError("callback_data exceeds Telegram limit.")
-    return value
+        return f"{action}:{source_code}:{external_id}:{action_id}"
+    return f"{action}:{source_code}:{external_id}"
 
 
 def _serialize_buttons(buttons: list[list[TelegramInlineButton]]) -> list[list[dict[str, str]]]:
