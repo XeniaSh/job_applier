@@ -303,8 +303,23 @@ class AutofillService:
                 if item.field.required:
                     unresolved_required.append(record)
                 continue
-            if item.kind is QuestionKind.RESUME and item.fill:
-                resume_items.append(item)
+            if item.field.field_type == "file":
+                # A file control is never driven through the generic fill
+                # path below: a misclassified or LLM/cover-letter-enriched
+                # item's `.value` is prose, not a filesystem path, and
+                # handing that to `set_input_files` raises (observed: OSError
+                # [Errno 63] File name too long on a resume field
+                # misclassified as COVER_LETTER). Only the resume control --
+                # resolved deterministically as `item.kind is RESUME` -- is
+                # ever uploaded, and only via `upload_resume`'s own validated
+                # `resume_path`, never `item.value`. Every other file control
+                # (and a resume control that failed to resolve `fill`) stays
+                # manual -- the observed semantic `kind` is never trusted
+                # enough on its own to bypass this.
+                if item.kind is QuestionKind.RESUME and item.fill:
+                    resume_items.append(item)
+                else:
+                    _append_unresolved(item, record, unresolved_required, unresolved_optional)
                 continue
             if (
                 item.kind is QuestionKind.SANCTIONS_RESIDENCE_CONFIRMATION

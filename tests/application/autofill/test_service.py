@@ -10,10 +10,11 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from app.application.autofill.ashby import AshbyAdapter
 from app.application.autofill.browser import BrowserNavigationError, BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.classifier import classify_field
+from app.application.autofill.classifier import ClassifiedField, classify_field
 from app.application.autofill.greenhouse import GreenhouseAdapter
 from app.application.autofill.lever import LeverAdapter
 from app.application.autofill.models import AutofillFailureReason, AutofillStatus, FieldClassification
+from app.application.autofill.questions import QuestionKind
 from app.application.autofill.resolver import ResolvedVacancy, VacancyResolveError
 from app.application.autofill.service import AutofillService, _enrich_unresolved, default_adapter_for_source
 from app.application.candidate_profile import CandidateProfile
@@ -175,6 +176,210 @@ def test_service_fills_known_fields_and_never_submits() -> None:
     assert any("favorite IDE" in item.label for item in result.unresolved_required_fields)
     assert waited == [True]
     assert session.closed is True
+
+
+_GENERATED_COVER_LETTER_PROSE = (
+    "I am a Java Backend Engineer with around seven years of experience developing services."
+)
+
+
+class _FakeCoverLetterProvider:
+    def generate(self, vacancy: object, profile: object) -> str | None:
+        _ = vacancy, profile
+        return _GENERATED_COVER_LETTER_PROSE
+
+
+class _KayakMisclassifiedResumeAdapter(_FakeAdapter):
+    """Reproduces the real Ashby "Kayak" discovery/fill shape that raised
+    `OSError: [Errno 63] File name too long`: a single `_systemfield_resume`
+    file control whose own live label text also reads as a cover-letter
+    question (e.g. "Resume/CV (optionally include a cover letter)"), which
+    `questions.map_question` resolves to `QuestionKind.COVER_LETTER` instead
+    of `RESUME` -- `_is_cover_letter` runs before `_is_resume` and both read
+    the same label text. Once misclassified, `_enrich_unresolved` fills it
+    with the generated cover-letter prose below; `observe_final_fill_plan`
+    captures that exact post-enrichment item so the test can prove the prose
+    really reached the classified fill plan, not just that nothing crashed.
+    `fill_field` stands in for the adapter's own `locator.set_input_files`
+    call; this test asserts it is never invoked for a file-type field, so
+    that prose can never reach a real `set_input_files`.
+    """
+
+    def __init__(self) -> None:
+        self.fill_field_calls: list[object] = []
+        self.final_fill_plan: list[ClassifiedField] = []
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(
+                label="Resume/CV (optionally include a cover letter)",
+                field_type="file",
+                required=True,
+                context="_systemfield_resume",
+            ),
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        self.fill_field_calls.append(classified)
+        return bool(getattr(classified, "fill", False))
+
+    def upload_resume(self, page: object, resume_path: object, field: object) -> bool:
+        _ = page, resume_path, field
+        return False
+
+    def observe_final_fill_plan(self, item: ClassifiedField) -> None:
+        self.final_fill_plan.append(item)
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page, field
+        return None
+
+
+def test_ashby_resume_file_field_never_receives_generated_prose() -> None:
+    session = _FakeSession()
+    adapter = _KayakMisclassifiedResumeAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        cover_letter_provider=_FakeCoverLetterProvider(),
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+
+    # The field really was misclassified as COVER_LETTER and really did
+    # receive the generated prose in its final classified fill plan -- this
+    # is what proves the test reproduces the original failure path, not just
+    # that `fill_field` happened not to be called for some unrelated reason.
+    assert len(adapter.final_fill_plan) == 1
+    plan_item = adapter.final_fill_plan[0]
+    assert plan_item.kind is QuestionKind.COVER_LETTER
+    assert plan_item.field.field_type == "file"
+    assert plan_item.generated is True
+    assert plan_item.value == _GENERATED_COVER_LETTER_PROSE
+
+    # Yet the real file-input write (`fill_field`) is never called at all for
+    # a file-type field, so that prose can never reach a real
+    # `set_input_files`.
+    assert adapter.fill_field_calls == []
+
+    # The misclassified, cover-letter-worded resume control stays manual
+    # rather than being auto-filled with the generated prose.
+    unresolved_labels = [item.label for item in result.unresolved_required_fields]
+    assert "Resume/CV (optionally include a cover letter)" in unresolved_labels
+
+
+class _KayakGenuineResumeAdapter(_FakeAdapter):
+    """A single, correctly-worded Kayak-shaped `_systemfield_resume` file
+    control (no "cover letter" wording), proving the real upload path
+    (`upload_resume`, with the resolved `resume_path`, never `fill_field`)
+    still works once the file-type gate in `_fill_open_page` is in place.
+    """
+
+    def __init__(self) -> None:
+        self.fill_field_calls: list[object] = []
+        self.upload_resume_calls: list[object] = []
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(
+                label="Resume/CV",
+                field_type="file",
+                required=True,
+                context="_systemfield_resume",
+            ),
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        self.fill_field_calls.append(classified)
+        return bool(getattr(classified, "fill", False))
+
+    def upload_resume(self, page: object, resume_path: object, field: object) -> bool:
+        _ = page
+        self.upload_resume_calls.append((resume_path, field))
+        return True
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page, field
+        return None
+
+
+def test_ashby_genuine_resume_file_field_uploads_via_upload_resume_path() -> None:
+    session = _FakeSession()
+    adapter = _KayakGenuineResumeAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+
+    assert adapter.fill_field_calls == []
+    assert len(adapter.upload_resume_calls) == 1
+    resume_path, field = adapter.upload_resume_calls[0]
+    assert field.context == "_systemfield_resume"
+    assert str(resume_path) == "tests/fixtures/autofill/resume.txt"
+    assert any(item.label == "Resume/CV" for item in result.filled_fields)
+
+
+class _ExplodingFileLocator:
+    def set_input_files(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("set_input_files must never be invoked for a file-type field")
+
+
+class _LocatorReturningPage:
+    def __init__(self) -> None:
+        self.locator_calls: list[str] = []
+
+    def locator(self, selector: str) -> _ExplodingFileLocator:
+        self.locator_calls.append(selector)
+        return _ExplodingFileLocator()
+
+    def get_by_label(self, label: str) -> _ExplodingFileLocator:
+        self.locator_calls.append(label)
+        return _ExplodingFileLocator()
+
+
+def test_ashby_adapter_fill_field_never_touches_locator_for_classified_file_field_with_prose() -> None:
+    """Direct, browser-free unit test of `AshbyAdapter.fill_field` itself
+    (not the service layer): even handed a classified file-type field whose
+    `.value` is generated prose and `.fill` is True -- the exact shape a
+    misclassified resume/cover-letter field reaches it in -- it must return
+    `False` without ever resolving a locator. `_ExplodingFileLocator` proves
+    this isn't incidental: if `fill_field` ever did reach for a real
+    `set_input_files` call here, this fake would raise instead of silently
+    succeeding.
+    """
+    adapter = AshbyAdapter()
+    page = _LocatorReturningPage()
+    field = DiscoveredField(
+        label="Resume/CV (optionally include a cover letter)",
+        field_type="file",
+        required=True,
+        context="_systemfield_resume",
+    )
+    classified = ClassifiedField(
+        field=field,
+        classification=FieldClassification.UNKNOWN_REQUIRED,
+        value=_GENERATED_COVER_LETTER_PROSE,
+        fill=True,
+        kind=QuestionKind.COVER_LETTER,
+        generated=True,
+    )
+
+    result = adapter.fill_field(page, classified)
+
+    assert result is False
+    assert page.locator_calls == []
 
 
 class _AdjustHookFakeAdapter(_FakeAdapter):

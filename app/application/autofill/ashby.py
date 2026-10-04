@@ -613,9 +613,14 @@ class AshbyAdapter:
         field = classified.field
         try:
             if field.field_type == "file":
-                locator = _field_locator(page, field)
-                locator.set_input_files(str(classified.value), timeout=5_000)
-                return True
+                # Never a generic fill: a file control's only legitimate
+                # write is a real resume path via `upload_resume`, never
+                # whatever `classified.value` happens to hold (e.g.
+                # LLM/cover-letter-generated prose) -- see
+                # `AutofillService._fill_open_page`'s own file-type gate,
+                # which this mirrors so `fill_field` fails closed even if
+                # ever called directly.
+                return False
             if field.field_type == "checkbox":
                 locator = _field_locator(page, field)
                 checked = _checkbox_should_check(classified.value)
