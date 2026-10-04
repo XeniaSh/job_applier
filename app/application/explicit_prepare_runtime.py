@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from app.application.autofill.models import AutofillResult
 from app.application.prepare_application import ApplicationLifecycleLookup, PrepareApplicationService
@@ -35,6 +36,7 @@ def build_prepare_application_service(
     from app.application.autofill.service import AutofillService
 
     llm_client = _optional_llm_client()
+    candidate_name, cover_letter_language, cover_letter_pdf_font_path = _cover_letter_document_settings()
     autofill_kwargs: dict[str, object] = {}
     if wait_for_review is not None:
         autofill_kwargs["wait_for_review"] = wait_for_review
@@ -44,6 +46,9 @@ def build_prepare_application_service(
         answer_generator=ApplicationAnswerGenerator(llm_client) if llm_client else None,
         cover_letter_provider=AutofillCoverLetterProvider(llm_client) if llm_client else None,
         auto_submit_enabled=_auto_submit_enabled(),
+        candidate_name=candidate_name,
+        cover_letter_language=cover_letter_language,
+        cover_letter_pdf_font_path=cover_letter_pdf_font_path,
         **autofill_kwargs,
     )
     return PrepareApplicationService(autofill, lifecycle)
@@ -73,3 +78,19 @@ def _auto_submit_enabled() -> bool:
         return Settings().auto_submit_enabled
     except Exception:
         return False
+
+
+def _cover_letter_document_settings() -> tuple[str, str, Path | None]:
+    """The existing configured candidate name, preferred language, and
+    Unicode PDF font path -- reused as-is from `app.config.Settings` for the
+    Ashby cover-letter file upload's PDF rendering, never a new config
+    surface. Defaults to the same empty/English fallback as every other
+    caller whenever settings cannot be loaded.
+    """
+    try:
+        from app.config import Settings
+
+        settings = Settings()
+        return settings.candidate_name, settings.candidate_preferred_language, settings.cover_letter_pdf_font_path
+    except Exception:
+        return "", "en", None

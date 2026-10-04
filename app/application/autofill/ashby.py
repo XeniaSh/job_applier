@@ -78,6 +78,17 @@ or any other provider.
 `.ashby-application-form-submit-button` is recognition evidence only and is
 never queried for interaction anywhere in this module -- there is no submit
 capability here, matching `GreenhouseAdapter`/`LeverAdapter`.
+
+`upload_cover_letter_file` is an optional, Ashby-only hook `AutofillService`
+calls (when present) for a file-type control discovered as
+`QuestionKind.COVER_LETTER` -- a distinct optional Cover Letter file input
+some Ashby forms render alongside the main resume file control. It is only
+ever given a service-generated, vacancy-specific cover-letter document path,
+never the raw generated prose and never the resume path; `_fill_open_page`'s
+own file-type gate guarantees that before this is ever called. Shares its
+write-and-verify mechanics with `upload_resume` (`_upload_file_to_field`),
+but is resolved against this field's own locator, so the two file controls
+can never be confused with one another.
 """
 
 from __future__ import annotations
@@ -644,14 +655,17 @@ class AshbyAdapter:
         return False
 
     def upload_resume(self, page: Page, resume_path: Path, field: DiscoveredField) -> bool:
-        if field.field_type != "file":
-            return False
-        locator = _field_locator(page, field)
-        try:
-            locator.set_input_files(str(resume_path), timeout=5_000)
-        except PlaywrightError:
-            return False
-        return _resume_is_attached(page, field, resume_path.name)
+        return _upload_file_to_field(page, resume_path, field)
+
+    def upload_cover_letter_file(self, page: Page, file_path: Path, field: DiscoveredField) -> bool:
+        """Distinct from `upload_resume` only in which `DiscoveredField` the
+        caller resolved (the separate, optional Cover Letter file control,
+        never the resume control) and in which file it writes (a
+        service-generated, vacancy-specific cover-letter document path,
+        never a candidate's resume) -- the underlying write-and-verify
+        mechanics are identical, so both share `_upload_file_to_field`.
+        """
+        return _upload_file_to_field(page, file_path, field)
 
     def read_back(self, page: Page, field: DiscoveredField) -> str | None:
         value = self._read_back_value(page, field)
@@ -1846,10 +1860,27 @@ def _file_names(page: Page, field: DiscoveredField) -> list[str]:
     return [str(item) for item in found]
 
 
-def _resume_is_attached(page: Page, field: DiscoveredField, filename: str | None) -> bool:
+def _file_is_attached(page: Page, field: DiscoveredField, filename: str | None) -> bool:
     names = _file_names(page, field)
     if filename and filename in names:
         return True
     if filename is None:
         return bool(names)
     return False
+
+
+def _upload_file_to_field(page: Page, file_path: Path, field: DiscoveredField) -> bool:
+    """Shared write-and-verify mechanics for both `upload_resume` and
+    `upload_cover_letter_file`: a real `set_input_files` against this exact
+    field's own locator, then a readback that confirms the platform itself
+    now reports that exact filename attached -- never trusted merely because
+    `set_input_files` did not raise.
+    """
+    if field.field_type != "file":
+        return False
+    locator = _field_locator(page, field)
+    try:
+        locator.set_input_files(str(file_path), timeout=5_000)
+    except PlaywrightError:
+        return False
+    return _file_is_attached(page, field, file_path.name)

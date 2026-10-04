@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 import logging
+import tempfile
 import time
 
 from app.application.autofill.answers import ApplicationAnswerGenerator
@@ -46,6 +47,7 @@ from app.application.autofill.submit import (
 )
 from app.application.candidate_profile import CandidateProfile, countries_mentioned, normalize_country_name
 from app.application.candidate_profile_loader import CandidateProfileLoadError, load_structured_candidate_profile
+from app.cover_letter_documents import generate_cover_letter_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,12 @@ class AutofillAdapter(Protocol):
     def fill_field(self, page: object, classified: ClassifiedField) -> bool: ...
     def upload_resume(self, page: object, resume_path: Path, field: object) -> bool: ...
     def read_back(self, page: object, field: object) -> str | None: ...
+
+    # `upload_cover_letter_file` is a further optional hook, like
+    # `prepare_page`/`adjust_classified_field`/`observe_final_fill_plan`
+    # below -- not every adapter defines it (currently only `AshbyAdapter`
+    # does), so it is deliberately left out of this Protocol and always
+    # resolved via `getattr(adapter, "upload_cover_letter_file", None)`.
 
 
 def default_adapter_for_source(source: str) -> AutofillAdapter:
@@ -105,6 +113,9 @@ class AutofillService:
         auto_submit_enabled: bool = False,
         submit_adapter: SubmitAdapter | None = None,
         submit_adapter_for_source: Callable[[str], SubmitAdapter] = default_submit_adapter_for_source,
+        candidate_name: str = "",
+        cover_letter_language: str = "en",
+        cover_letter_pdf_font_path: Path | None = None,
     ) -> None:
         self._resolver = resolver
         self._profile_loader = profile_loader
@@ -118,6 +129,9 @@ class AutofillService:
         self._auto_submit_enabled = auto_submit_enabled
         self._explicit_submit_adapter = submit_adapter
         self._submit_adapter_for_source = submit_adapter_for_source
+        self._candidate_name = candidate_name
+        self._cover_letter_language = cover_letter_language
+        self._cover_letter_pdf_font_path = cover_letter_pdf_font_path
 
     def run(self, source: str, external_id: str, *, keep_open: bool = True) -> AutofillResult:
         session: BrowserSession | None = None
@@ -269,6 +283,7 @@ class AutofillService:
             elif generation_error is None:
                 generation_error = "generation returned no text"
             logger.warning("Cover letter text unavailable: %s", generation_error)
+        cover_letter_file_items: list[ClassifiedField] = []
         filled: list[AutofillFieldResult] = []
         unresolved_required: list[AutofillFieldResult] = []
         unresolved_optional: list[AutofillFieldResult] = []
@@ -312,12 +327,27 @@ class AutofillService:
                 # misclassified as COVER_LETTER). Only the resume control --
                 # resolved deterministically as `item.kind is RESUME` -- is
                 # ever uploaded, and only via `upload_resume`'s own validated
-                # `resume_path`, never `item.value`. Every other file control
-                # (and a resume control that failed to resolve `fill`) stays
-                # manual -- the observed semantic `kind` is never trusted
-                # enough on its own to bypass this.
+                # `resume_path`, never `item.value`. The distinct optional
+                # Cover Letter file control (`item.kind is COVER_LETTER`) is
+                # instead uploaded below via a freshly generated document
+                # path (see `_upload_cover_letter_file`), also never
+                # `item.value`. Every other file control (and a resume/cover
+                # letter control that failed to resolve `fill`) stays manual
+                # -- the observed semantic `kind` is never trusted enough on
+                # its own to bypass this.
                 if item.kind is QuestionKind.RESUME and item.fill:
                     resume_items.append(item)
+                elif item.kind is QuestionKind.COVER_LETTER and item.fill:
+                    # `item.fill` is only ever set True here by
+                    # `_enrich_unresolved`'s own `cover_letter_text` branch
+                    # below -- `classify_field` always maps a cover-letter
+                    # control to `fillable=False` -- so generation genuinely
+                    # succeeded. The distinct optional Cover Letter file
+                    # control (never the resume control) is uploaded via its
+                    # own generated document in the dedicated loop below,
+                    # never through this generic fill path and never with
+                    # the raw generated prose in `item.value`.
+                    cover_letter_file_items.append(item)
                 else:
                     _append_unresolved(item, record, unresolved_required, unresolved_optional)
                 continue
@@ -392,6 +422,28 @@ class AutofillService:
                 unresolved_required.append(record) if item.field.required else unresolved_optional.append(record)
                 warnings.append(f"Resume was not attached for '{item.field.label}'.")
 
+        for item in cover_letter_file_items:
+            record = _field_result(item)
+            text = cover_letter_text if isinstance(cover_letter_text, str) and cover_letter_text else None
+            cover_letter_file_uploaded = text is not None and _upload_cover_letter_file(
+                adapter,
+                page,
+                item.field,
+                cover_letter_text=text,
+                vacancy=vacancy,
+                candidate_name=self._candidate_name,
+                language=self._cover_letter_language,
+                font_path=self._cover_letter_pdf_font_path,
+            )
+            if cover_letter_file_uploaded:
+                filled.append(record)
+                cover_letter_filled = True
+                if item.generated:
+                    generated.append(record)
+            else:
+                unresolved_required.append(record) if item.field.required else unresolved_optional.append(record)
+                warnings.append(f"Cover letter file was not attached for '{item.field.label}'.")
+
         privacy_trace = _build_privacy_acknowledgement_trace(classified, adapter, filled)
         if privacy_trace is not None:
             privacy_report = format_privacy_acknowledgement_report(privacy_trace)
@@ -415,6 +467,68 @@ class AutofillService:
             cover_letter_filled=cover_letter_filled,
             submit_performed=False,
         )
+
+
+def _upload_cover_letter_file(
+    adapter: AutofillAdapter,
+    page: object,
+    field: object,
+    *,
+    cover_letter_text: str,
+    vacancy: ResolvedVacancy,
+    candidate_name: str,
+    language: str,
+    font_path: Path | None,
+) -> bool:
+    """Renders the generated `cover_letter_text` into a vacancy-specific PDF
+    (via the established `cover_letter_documents.generate_cover_letter_artifacts`
+    generator -- never a new rendering system) in its own temporary
+    directory, uploads only that file *path* to the distinct cover-letter
+    file control via the adapter's own optional `upload_cover_letter_file`
+    hook, and always removes the temporary directory afterward regardless of
+    outcome. The temporary directory is never the durable prepared-artifacts
+    tree and is never a resume path, so cleanup here can never delete a
+    resume or a durable prepared artifact. Fails closed (returns False)
+    whenever the adapter has no such hook, PDF generation fails (e.g. no
+    configured Unicode font for non-ASCII text), or the upload/readback
+    itself fails -- the caller then leaves the field unfilled for manual
+    review rather than ever uploading raw prose or crashing Prepare. Any
+    other unexpected exception from temp-directory creation, rendering, or
+    the upload hook (not just the `PlaywrightError` the hook itself already
+    narrows to) is likewise caught here and fails closed, so a surprise like
+    a full disk during `mkdir`/`write_text` leaves this optional field for
+    manual review instead of failing the whole Prepare run.
+    """
+    upload = getattr(adapter, "upload_cover_letter_file", None)
+    if upload is None:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="autofill_cover_letter_") as temp_dir:
+            artifacts = generate_cover_letter_artifacts(
+                base_dir=Path(temp_dir),
+                source=vacancy.source,
+                external_id=vacancy.external_id,
+                candidate_name=candidate_name,
+                language=language,
+                cover_letter_text=cover_letter_text,
+                font_path=font_path,
+            )
+            if artifacts.pdf_path is None:
+                logger.warning(
+                    "Cover letter file upload skipped: PDF generation failed: %s",
+                    artifacts.pdf_error,
+                )
+                return False
+            uploaded = upload(page, artifacts.pdf_path, field)
+            if not uploaded:
+                uploaded = upload(page, artifacts.pdf_path, field)
+            return bool(uploaded)
+    except Exception as exc:  # noqa: BLE001 - optional best-effort upload must never fail Prepare
+        logger.error(
+            "Cover letter file upload skipped: unexpected %s during generation/upload.",
+            type(exc).__name__,
+        )
+        return False
 
 
 def _maybe_cover_letter(

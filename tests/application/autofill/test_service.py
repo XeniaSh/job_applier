@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -329,6 +330,296 @@ def test_ashby_genuine_resume_file_field_uploads_via_upload_resume_path() -> Non
     assert field.context == "_systemfield_resume"
     assert str(resume_path) == "tests/fixtures/autofill/resume.txt"
     assert any(item.label == "Resume/CV" for item in result.filled_fields)
+
+
+class _AshbyCoverLetterFileAdapter(_FakeAdapter):
+    """A Kayak-shaped form with two *separate* file controls: the resume
+    (`_systemfield_resume`, no "cover letter" wording) and a distinct
+    optional Cover Letter file input. Models the real `upload_resume` /
+    `upload_cover_letter_file` split: each call is recorded against its own
+    field so a test can prove the two controls are never confused.
+    """
+
+    def __init__(self, *, cover_letter_upload_result: bool = True) -> None:
+        self.fill_field_calls: list[object] = []
+        self.upload_resume_calls: list[object] = []
+        self.upload_cover_letter_calls: list[tuple[object, object, bool]] = []
+        self._cover_letter_upload_result = cover_letter_upload_result
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(
+                label="Resume/CV",
+                field_type="file",
+                required=True,
+                context="_systemfield_resume",
+            ),
+            DiscoveredField(
+                label="Cover Letter",
+                field_type="file",
+                required=False,
+                context="_systemfield_cover_letter",
+            ),
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        self.fill_field_calls.append(classified)
+        return bool(getattr(classified, "fill", False))
+
+    def upload_resume(self, page: object, resume_path: object, field: object) -> bool:
+        _ = page
+        self.upload_resume_calls.append((resume_path, field))
+        return True
+
+    def upload_cover_letter_file(self, page: object, file_path: object, field: object) -> bool:
+        _ = page
+        existed_when_called = file_path.exists()
+        self.upload_cover_letter_calls.append((file_path, field, existed_when_called))
+        return self._cover_letter_upload_result
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page, field
+        return None
+
+
+class _AshbyCoverLetterAlwaysFailsAdapter(_AshbyCoverLetterFileAdapter):
+    """The cover-letter file control's own upload/readback never succeeds --
+    e.g. a real `set_input_files` that raises, or a readback that never
+    reports the filename attached -- so the retry in
+    `service._upload_cover_letter_file` is exhausted both times.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(cover_letter_upload_result=False)
+
+
+class _AshbyCoverLetterRaisingUploadAdapter(_AshbyCoverLetterFileAdapter):
+    """The adapter's own `upload_cover_letter_file` hook raises a non-
+    `PlaywrightError` exception -- e.g. an unexpected `RuntimeError` deep in
+    the real hook that `_upload_file_to_field`'s own narrow `except
+    PlaywrightError` never catches. `service._upload_cover_letter_file` must
+    still fail closed rather than let it escape and fail the whole Prepare
+    run.
+    """
+
+    def upload_cover_letter_file(self, page: object, file_path: object, field: object) -> bool:
+        _ = page, file_path, field
+        raise RuntimeError("unexpected adapter failure")
+
+
+def test_ashby_cover_letter_file_stays_manual_when_upload_hook_raises() -> None:
+    """A non-Playwright exception raised by the adapter's own
+    `upload_cover_letter_file` hook must be caught by
+    `_upload_cover_letter_file`, leaving the field unresolved optional
+    rather than failing the whole Prepare run. Resume upload is unaffected.
+    """
+    session = _FakeSession()
+    adapter = _AshbyCoverLetterRaisingUploadAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        cover_letter_provider=_FakeCoverLetterProvider(),
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert result.resume_uploaded is True
+    assert any(item.label == "Resume/CV" for item in result.filled_fields)
+
+    assert result.cover_letter_filled is False
+    assert any(item.label == "Cover Letter" for item in result.unresolved_optional_fields)
+    assert any("Cover letter file was not attached" in warning for warning in result.warnings)
+
+
+def test_ashby_cover_letter_file_uploaded_via_generated_pdf_on_generation_success() -> None:
+    """When cover-letter generation succeeds, the distinct optional Cover
+    Letter file control is uploaded via a freshly generated, vacancy-specific
+    PDF document -- never the raw generated prose, never the resume path --
+    and the temporary document is cleaned up once the run completes.
+    """
+    session = _FakeSession()
+    adapter = _AshbyCoverLetterFileAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        cover_letter_provider=_FakeCoverLetterProvider(),
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+
+    # Resume and cover letter each went through their own distinct upload
+    # path, keyed on their own distinct field -- never crossed.
+    assert len(adapter.upload_resume_calls) == 1
+    assert adapter.upload_resume_calls[0][1].context == "_systemfield_resume"
+    assert len(adapter.upload_cover_letter_calls) == 1
+    uploaded_path, uploaded_field, existed_when_called = adapter.upload_cover_letter_calls[0]
+    assert uploaded_field.context == "_systemfield_cover_letter"
+    assert uploaded_path.name == "cover_letter.pdf"
+    # A real, freshly rendered file really was on disk at upload time --
+    # never a bare path string standing in for one.
+    assert existed_when_called is True
+    # Never the raw generated prose string, and never a resume-fixture path.
+    assert str(uploaded_path) != _GENERATED_COVER_LETTER_PROSE
+    assert "resume" not in str(uploaded_path).lower()
+
+    assert result.cover_letter_filled is True
+    assert any(item.label == "Cover Letter" for item in result.filled_fields)
+    assert any(item.label == "Resume/CV" for item in result.filled_fields)
+    # The file upload came from freshly generated cover-letter text, same as
+    # a generated inline-text cover letter field -- `generated_fields` tracks
+    # both consistently.
+    assert any(item.label == "Cover Letter" for item in result.generated_fields)
+
+    # The temporary document is cleaned up once the run completes -- it was
+    # never written into the durable prepared-artifacts tree, and cleanup
+    # here can never reach a resume file.
+    assert not uploaded_path.exists()
+
+
+def test_ashby_cover_letter_file_stays_manual_when_generation_fails() -> None:
+    """No cover-letter provider (or one that fails to produce text) must
+    never cause a PDF upload attempt, a crash, or a false
+    `cover_letter_filled` -- the optional field is simply left for manual
+    review, same as the field starts out before 27b0272/this feature.
+    """
+    session = _FakeSession()
+    adapter = _AshbyCoverLetterFileAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        cover_letter_provider=None,
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+
+    assert adapter.upload_cover_letter_calls == []
+    assert result.cover_letter_filled is False
+    assert any(item.label == "Cover Letter" for item in result.unresolved_optional_fields)
+    assert any(item.label == "Resume/CV" for item in result.filled_fields)
+
+
+def test_ashby_cover_letter_file_stays_manual_when_pdf_generation_fails() -> None:
+    """Non-ASCII generated cover-letter text with no configured Unicode font
+    makes `generate_cover_letter_artifacts` fail closed (`pdf_path is None`)
+    -- the upload hook must never be called with a nonexistent/invalid path,
+    the field stays manual, and the run still completes without crashing.
+    """
+    session = _FakeSession()
+    adapter = _AshbyCoverLetterFileAdapter()
+
+    class _NonAsciiCoverLetterProvider:
+        def generate(self, vacancy: object, profile: object) -> str | None:
+            _ = vacancy, profile
+            return "Привет, это сопроводительное письмо без настроенного юникод-шрифта."
+
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        cover_letter_provider=_NonAsciiCoverLetterProvider(),
+        cover_letter_pdf_font_path=None,
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+
+    assert adapter.upload_cover_letter_calls == []
+    assert result.cover_letter_filled is False
+    assert any(item.label == "Cover Letter" for item in result.unresolved_optional_fields)
+
+
+def test_ashby_cover_letter_file_stays_manual_when_artifact_generation_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected exception from `generate_cover_letter_artifacts` itself
+    (e.g. an `OSError` from `mkdir`/`write_text`, distinct from the
+    fail-closed `pdf_path is None` it normally returns for a PDF rendering
+    failure) must still be caught by `_upload_cover_letter_file` -- never
+    escape it and fail the whole Prepare run. The resume upload must be
+    unaffected, the cover letter stays unresolved optional with no upload
+    attempt, and the temporary directory is still cleaned up.
+    """
+    session = _FakeSession()
+    adapter = _AshbyCoverLetterFileAdapter()
+    captured_dirs: list[Path] = []
+
+    def _raising_generate_cover_letter_artifacts(*, base_dir: Path, **kwargs: object) -> object:
+        captured_dirs.append(base_dir)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "app.application.autofill.service.generate_cover_letter_artifacts",
+        _raising_generate_cover_letter_artifacts,
+    )
+
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        cover_letter_provider=_FakeCoverLetterProvider(),
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert result.resume_uploaded is True
+    assert any(item.label == "Resume/CV" for item in result.filled_fields)
+
+    assert adapter.upload_cover_letter_calls == []
+    assert result.cover_letter_filled is False
+    assert any(item.label == "Cover Letter" for item in result.unresolved_optional_fields)
+    assert any("Cover letter file was not attached" in warning for warning in result.warnings)
+
+    # The temporary directory it was writing into when the exception struck
+    # is still cleaned up -- never left behind.
+    assert len(captured_dirs) == 1
+    assert not captured_dirs[0].exists()
+
+
+def test_ashby_cover_letter_file_stays_manual_when_upload_readback_fails() -> None:
+    """A cover-letter file control whose upload/readback never succeeds (both
+    attempts) must be left for manual review -- never a false
+    `cover_letter_filled`, never a crash -- and the generated temporary
+    document is still cleaned up even though the upload failed.
+    """
+    session = _FakeSession()
+    adapter = _AshbyCoverLetterAlwaysFailsAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        cover_letter_provider=_FakeCoverLetterProvider(),
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+
+    # Retried once, exactly like the resume upload path -- both attempts
+    # recorded, both against the real generated document.
+    assert len(adapter.upload_cover_letter_calls) == 2
+    uploaded_path = adapter.upload_cover_letter_calls[0][0]
+    assert adapter.upload_cover_letter_calls[1][0] == uploaded_path
+
+    assert result.cover_letter_filled is False
+    assert any(item.label == "Cover Letter" for item in result.unresolved_optional_fields)
+    assert any("Cover letter file was not attached" in warning for warning in result.warnings)
+
+    # Cleaned up even on failure -- never left behind.
+    assert not uploaded_path.exists()
 
 
 class _ExplodingFileLocator:

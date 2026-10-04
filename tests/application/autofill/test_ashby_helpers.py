@@ -10,9 +10,13 @@ Playwright API the function actually calls.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from app.application.autofill.ashby import (
     _ACTIVE_CAPTCHA_SELECTOR,
     _APPLICATION_PANEL_SELECTOR,
+    AshbyAdapter,
     _adjust_application_source_checkbox_group,
     _adjust_conjunctive_skill_experience,
     _adjust_country_relative_work_authorization,
@@ -1459,3 +1463,103 @@ def test_adjust_country_relative_work_authorization_resolves_no_for_matching_vac
     assert adjusted.value is False
     assert adjusted.kind is QuestionKind.WORK_AUTHORIZATION
     assert adjusted.country == "germany"
+
+
+# -- upload_resume / upload_cover_letter_file (real AshbyAdapter methods) ---
+#
+# `test_service.py`'s cover-letter-file-input coverage only ever drives a
+# fake adapter double, never these real methods together against two
+# distinct file controls -- this exercises `_field_locator`/`_file_names`'s
+# own id-scoped selector resolution through `_upload_file_to_field` instead,
+# via a minimal page/locator double standing in for Playwright.
+
+
+class _FakeFileInputLocator:
+    """Stands in for the single `[id="..."]` locator `_field_locator`
+    resolves a file control to -- just the `set_input_files` surface
+    `_upload_file_to_field` actually calls on it."""
+
+    def __init__(self, page: "_FakeFileUploadPage", element_id: str) -> None:
+        self._page = page
+        self._element_id = element_id
+
+    def set_input_files(self, path: str, timeout: int | None = None) -> None:
+        self._page.attach(self._element_id, Path(path).name)
+
+
+class _FakeFileUploadPage:
+    """Duck-types just `.locator(selector)` / `.evaluate(script, arg)` --
+    the only `Page` surface `_field_locator` and `_file_names` touch for a
+    file control. Tracks the attached filename per element id, keyed the
+    same way `_file_names`'s own readback re-derives the `[id="..."]`
+    selector, so a wrong element id can never read back another control's
+    file."""
+
+    def __init__(self) -> None:
+        self._attached: dict[str, list[str]] = {}
+
+    def attach(self, element_id: str, filename: str) -> None:
+        self._attached[element_id] = [filename]
+
+    def locator(self, selector: str) -> _FakeFileInputLocator:
+        match = re.search(r'\[id="([^"]+)"\]', selector)
+        assert match, f"unexpected file-control selector: {selector}"
+        return _FakeFileInputLocator(self, match.group(1))
+
+    def evaluate(self, script: str, arg: str) -> list[str]:
+        match = re.search(r'\[id="([^"]+)"\]', arg)
+        assert match, f"unexpected file-control readback selector: {arg}"
+        return list(self._attached.get(match.group(1), []))
+
+
+def test_upload_resume_and_upload_cover_letter_file_target_distinct_controls_via_real_adapter_methods() -> None:
+    page = _FakeFileUploadPage()
+    adapter = AshbyAdapter()
+    resume_field = DiscoveredField(
+        label="Resume",
+        field_type="file",
+        element_id="resume-input-id",
+        context="_systemfield_resume",
+    )
+    cover_letter_field = DiscoveredField(
+        label="Cover Letter",
+        field_type="file",
+        element_id="cover-letter-input-id",
+        context="cover-letter-uuid",
+    )
+    resume_path = Path("/tmp/ada-example-resume.txt")
+    cover_letter_path = Path("/tmp/ada-example-cover-letter.pdf")
+
+    assert adapter.upload_resume(page, resume_path, resume_field) is True
+    assert adapter.upload_cover_letter_file(page, cover_letter_path, cover_letter_field) is True
+
+    # Each control only ever received its own file, under its own element id
+    # -- never the other control's file, and never raw prose text.
+    assert page._attached["resume-input-id"] == ["ada-example-resume.txt"]
+    assert page._attached["cover-letter-input-id"] == ["ada-example-cover-letter.pdf"]
+    assert "ada-example-cover-letter.pdf" not in page._attached["resume-input-id"]
+    assert "ada-example-resume.txt" not in page._attached["cover-letter-input-id"]
+
+    assert adapter.read_back(page, resume_field) == "ada-example-resume.txt"
+    assert adapter.read_back(page, cover_letter_field) == "ada-example-cover-letter.pdf"
+
+
+def test_upload_resume_returns_false_before_readback_confirms_the_filename() -> None:
+    # `_upload_file_to_field` must only ever return True once the page's own
+    # readback confirms the exact filename attached -- a `set_input_files`
+    # call that silently attaches nothing (modeled here by a page that never
+    # records the attachment) must stay False, never trusted merely because
+    # the call itself did not raise.
+    class _SilentFileUploadPage(_FakeFileUploadPage):
+        def attach(self, element_id: str, filename: str) -> None:
+            return None
+
+    page = _SilentFileUploadPage()
+    adapter = AshbyAdapter()
+    resume_field = DiscoveredField(
+        label="Resume",
+        field_type="file",
+        element_id="resume-input-id",
+        context="_systemfield_resume",
+    )
+    assert adapter.upload_resume(page, Path("/tmp/ada-example-resume.txt"), resume_field) is False

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import typer
 
@@ -35,12 +36,16 @@ def register_autofill_command(app: typer.Typer) -> None:
 
         try:
             llm_client = _optional_llm_client()
+            candidate_name, cover_letter_language, cover_letter_pdf_font_path = _cover_letter_document_settings()
             service = AutofillService(
                 resolver=DefaultVacancyResolver(),
                 on_ready=_show,
                 answer_generator=ApplicationAnswerGenerator(llm_client) if llm_client else None,
                 cover_letter_provider=AutofillCoverLetterProvider(llm_client) if llm_client else None,
                 auto_submit_enabled=_auto_submit_enabled(),
+                candidate_name=candidate_name,
+                cover_letter_language=cover_letter_language,
+                cover_letter_pdf_font_path=cover_letter_pdf_font_path,
             )
             result = service.run(source, external_id, keep_open=keep_open)
         except VacancyResolveError as exc:
@@ -69,6 +74,22 @@ def _optional_llm_client():
     except Exception:
         logger.info("Autofill LLM client unavailable; generated answers and cover letter skipped.")
         return None
+
+
+def _cover_letter_document_settings() -> tuple[str, str, Path | None]:
+    """The existing configured candidate name, preferred language, and
+    Unicode PDF font path -- reused as-is from `app.config.Settings` for the
+    Ashby cover-letter file upload's PDF rendering, never a new config
+    surface. Defaults to the same empty/English fallback as every other
+    caller whenever settings cannot be loaded.
+    """
+    try:
+        from app.config import Settings
+
+        settings = Settings()
+        return settings.candidate_name, settings.candidate_preferred_language, settings.cover_letter_pdf_font_path
+    except Exception:
+        return "", "en", None
 
 
 def _auto_submit_enabled() -> bool:
