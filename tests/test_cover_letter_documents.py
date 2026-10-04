@@ -17,7 +17,9 @@ def test_generate_cover_letter_artifacts_writes_txt_and_pdf(tmp_path: Path) -> N
     assert result.pdf_path is not None
     assert result.pdf_error is None
     assert result.txt_path.read_text(encoding="utf-8").strip() == "I can help with backend delivery."
-    assert result.pdf_path.read_bytes().startswith(b"%PDF")
+    pdf_bytes = result.pdf_path.read_bytes()
+    assert pdf_bytes.startswith(b"%PDF")
+    assert pdf_bytes.rstrip().endswith(b"%%EOF")
 
 
 def test_generate_cover_letter_artifacts_generates_pdf_when_name_missing(tmp_path: Path) -> None:

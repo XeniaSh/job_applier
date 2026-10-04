@@ -85,10 +85,36 @@ calls (when present) for a file-type control discovered as
 some Ashby forms render alongside the main resume file control. It is only
 ever given a service-generated, vacancy-specific cover-letter document path,
 never the raw generated prose and never the resume path; `_fill_open_page`'s
-own file-type gate guarantees that before this is ever called. Shares its
-write-and-verify mechanics with `upload_resume` (`_upload_file_to_field`),
-but is resolved against this field's own locator, so the two file controls
-can never be confused with one another.
+own file-type gate guarantees that before this is ever called. It is
+resolved against this field's own locator, so the two file controls can
+never be confused with one another.
+
+Unlike `upload_resume` (`_upload_file_to_field`), it cannot trust a readback
+taken right after `set_input_files`: Ashby's cover-letter control reflects
+the raw browser `FileList` synchronously, but its real value commits
+asynchronously (upload-handle request -> presigned-URL POST -> Ashby's own
+`ApiSetFormValueToFile` GraphQL mutation), and a failure anywhere in that
+chain reverts the field to empty *after* the `FileList` already showed the
+filename -- the "cover_letter.pdf failed to upload" symptom this module has
+observed live. `_upload_cover_letter_file_to_field` instead waits (via
+`page.expect_response`, bounded) for the network response to that exact
+commit mutation -- matched on `operationName` and on `variables.path`
+equal to this field's own `data-field-path`, so another field's commit is
+never mistaken for this one's -- trusts only an HTTP-successful response
+whose body carries a non-null `data.setFormValueToFile` and no `errors`,
+and then polls (bounded) for this field's own file item to actually render
+in the UI (`.ashby-application-form-input-file-item-name` matching the
+filename, with `.ashby-application-form-input-file-item-delete` visible
+once no longer loading). The server acknowledgement alone is not enough.
+
+It deliberately does not also require the raw `FileList` to still show the
+filename after that acknowledgement: React Dropzone can clear/reset the
+native input once the upload commits even though the file keeps rendering
+in the UI, so re-checking the `FileList` would false-negative an otherwise
+successful upload. The caller (`service._upload_cover_letter_file`) keeps
+the PDF's temp directory alive for the whole call and makes only one
+bounded attempt -- never a retry, which could mistake a first attempt's
+late commit response for a second attempt's acknowledgement.
 """
 
 from __future__ import annotations
@@ -658,14 +684,14 @@ class AshbyAdapter:
         return _upload_file_to_field(page, resume_path, field)
 
     def upload_cover_letter_file(self, page: Page, file_path: Path, field: DiscoveredField) -> bool:
-        """Distinct from `upload_resume` only in which `DiscoveredField` the
-        caller resolved (the separate, optional Cover Letter file control,
-        never the resume control) and in which file it writes (a
-        service-generated, vacancy-specific cover-letter document path,
-        never a candidate's resume) -- the underlying write-and-verify
-        mechanics are identical, so both share `_upload_file_to_field`.
+        """Distinct from `upload_resume` in which field it targets (the
+        separate, optional Cover Letter control) and in how it verifies
+        success: the cover-letter control commits asynchronously and can
+        revert after the raw `FileList` already shows the filename (see
+        module docstring), so this uses `_upload_cover_letter_file_to_field`
+        rather than `upload_resume`'s immediate-readback `_upload_file_to_field`.
         """
-        return _upload_file_to_field(page, file_path, field)
+        return _upload_cover_letter_file_to_field(page, file_path, field)
 
     def read_back(self, page: Page, field: DiscoveredField) -> str | None:
         value = self._read_back_value(page, field)
@@ -1870,11 +1896,12 @@ def _file_is_attached(page: Page, field: DiscoveredField, filename: str | None) 
 
 
 def _upload_file_to_field(page: Page, file_path: Path, field: DiscoveredField) -> bool:
-    """Shared write-and-verify mechanics for both `upload_resume` and
-    `upload_cover_letter_file`: a real `set_input_files` against this exact
-    field's own locator, then a readback that confirms the platform itself
-    now reports that exact filename attached -- never trusted merely because
-    `set_input_files` did not raise.
+    """Write-and-verify mechanics for `upload_resume`: `set_input_files`
+    against this field's own locator, then a readback confirming the
+    platform reports that exact filename attached -- never trusted merely
+    because `set_input_files` did not raise. `upload_cover_letter_file`
+    uses `_upload_cover_letter_file_to_field` instead; see module docstring
+    for why an immediate readback is not trustworthy proof there.
     """
     if field.field_type != "file":
         return False
@@ -1884,3 +1911,193 @@ def _upload_file_to_field(page: Page, file_path: Path, field: DiscoveredField) -
     except PlaywrightError:
         return False
     return _file_is_attached(page, field, file_path.name)
+
+
+# Bounded wait for Ashby's async cover-letter commit (upload-handle request
+# -> presigned-URL POST -> `ApiSetFormValueToFile` mutation) to produce a
+# network response, chosen to outlast a real round trip without blocking
+# Prepare indefinitely on a stalled upload.
+_COVER_LETTER_COMMIT_MUTATION_OPERATION_NAME = "ApiSetFormValueToFile"
+_COVER_LETTER_COMMIT_RESPONSE_TIMEOUT_MS = 10_000
+
+
+def _is_cover_letter_commit_response(response: object, field_path: str) -> bool:
+    """True only for the network response to *this field's* own
+    `ApiSetFormValueToFile` commit mutation -- matched on `operationName`
+    and on `variables.path` equal to this field's `data-field-path`, never
+    on URL/host alone (every Ashby GraphQL operation shares one endpoint)
+    nor on operation name alone (another field's commit must never match).
+    """
+    try:
+        post_data = response.request.post_data_json
+    except PlaywrightError:
+        return False
+    if not isinstance(post_data, dict):
+        return False
+    if post_data.get("operationName") != _COVER_LETTER_COMMIT_MUTATION_OPERATION_NAME:
+        return False
+    variables = post_data.get("variables")
+    if not isinstance(variables, dict):
+        return False
+    return bool(field_path) and variables.get("path") == field_path
+
+
+def _cover_letter_commit_response_succeeded(response: object) -> bool:
+    """True only for an HTTP-successful response whose GraphQL body carries
+    a non-null `data.setFormValueToFile` and no `errors` -- never merely
+    because a matching response arrived. A missing upload handle or a
+    failed presigned-URL POST means Ashby's frontend never calls this
+    mutation at all, so those cases never reach this function -- they
+    instead show up as no matching response within the caller's bounded
+    wait (a timeout). This function only has to distinguish the mutation
+    actually completing with a GraphQL error/null result from it
+    completing successfully. An unparseable body (`.json()` raises
+    `ValueError`/`JSONDecodeError`, not `PlaywrightError`) is treated the
+    same as any other unsuccessful response -- a failure, never a crash.
+    """
+    try:
+        if not response.ok:
+            return False
+        payload = response.json()
+    except (PlaywrightError, ValueError):
+        return False
+    if not isinstance(payload, dict) or payload.get("errors"):
+        return False
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return False
+    return data.get("setFormValueToFile") is not None
+
+
+_COVER_LETTER_FILE_ITEM_NAME_CLASS = "ashby-application-form-input-file-item-name"
+_COVER_LETTER_FILE_ITEM_DELETE_CLASS = "ashby-application-form-input-file-item-delete"
+_COVER_LETTER_UI_FILE_ITEM_WAIT_MS = 5_000
+_COVER_LETTER_UI_FILE_ITEM_POLL_MS = 150
+
+
+def _cover_letter_ui_file_item_visible(page: Page, field: DiscoveredField, filename: str) -> bool:
+    """True only when this field's own `[data-field-path]` wrapper actually
+    shows (via `is_visible()`, never mere DOM presence) a file item named
+    `filename` that is no longer loading.
+
+    The name match is scoped to this field's own wrapper, never a
+    page-wide class lookup that could match another file control's item
+    (e.g. the resume's). A file item still mid-upload renders without the
+    `...-file-item-delete` control (replaced by a spinner while loading),
+    so that control's visibility is the only signal that loading finished.
+    `count()`/`inner_text()` alone prove a node exists in the DOM but not
+    that it's shown to the user (e.g. mid-transition, behind an inactive
+    tab), so both the name item and the delete control must independently
+    report `is_visible() == True`.
+    """
+    if not field.context:
+        return False
+    wrapper_selector = f'[data-field-path="{field.context}"]'
+    try:
+        name_items = page.locator(f"{wrapper_selector} .{_COVER_LETTER_FILE_ITEM_NAME_CLASS}")
+        count = name_items.count()
+    except PlaywrightError:
+        return False
+    matched_item: Locator | None = None
+    for index in range(count):
+        item = name_items.nth(index)
+        try:
+            text = " ".join((item.inner_text() or "").split())
+        except PlaywrightError:
+            continue
+        if text != filename:
+            continue
+        try:
+            if item.is_visible():
+                matched_item = item
+                break
+        except PlaywrightError:
+            continue
+    if matched_item is None:
+        return False
+    delete_control = page.locator(f"{wrapper_selector} .{_COVER_LETTER_FILE_ITEM_DELETE_CLASS}")
+    try:
+        if delete_control.count() == 0:
+            return False
+        return delete_control.first.is_visible()
+    except PlaywrightError:
+        return False
+
+
+def _wait_for_cover_letter_ui_file_item(page: Page, field: DiscoveredField, filename: str) -> bool:
+    """Bounded poll for `_cover_letter_ui_file_item_visible` to become true.
+
+    A successful commit-mutation response is necessary but not sufficient
+    proof the UI reflects the upload; rendering can lag slightly behind
+    the response resolving, so this polls rather than checking once.
+    """
+    deadline = time.monotonic() + _COVER_LETTER_UI_FILE_ITEM_WAIT_MS / 1000
+    while True:
+        if _cover_letter_ui_file_item_visible(page, field, filename):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            page.wait_for_timeout(_COVER_LETTER_UI_FILE_ITEM_POLL_MS)
+        except PlaywrightError:
+            return False
+
+
+def _upload_cover_letter_file_to_field(page: Page, file_path: Path, field: DiscoveredField) -> bool:
+    """Write-and-verify mechanics for `upload_cover_letter_file`.
+
+    Writing the native `<input type="file">` never itself commits the
+    field's real value the way it effectively does for the resume control:
+    Ashby's React layer reacts to the `FileList` change by asynchronously
+    requesting an upload handle, POSTing to a presigned URL, and only then
+    calling its own `ApiSetFormValueToFile` commit mutation. A failure
+    anywhere in that chain reverts the control to empty after the
+    `FileList` already showed the filename, which is why a bare
+    post-`set_input_files` readback (`_upload_file_to_field`'s approach) is
+    not trustworthy proof here.
+
+    This instead wraps `set_input_files` in `page.expect_response`,
+    waiting up to the bounded timeout for this field's own commit mutation
+    (`_is_cover_letter_commit_response`), and trusts only a response that
+    is itself HTTP- and GraphQL-successful
+    (`_cover_letter_commit_response_succeeded`). It deliberately does not
+    also require the raw `FileList` readback to still show the filename
+    afterward: React Dropzone can clear/reset the native input once the
+    upload commits even though the file keeps rendering in the UI, so
+    re-checking the `FileList` would false-negative a successful upload.
+    Final proof comes from a bounded poll
+    (`_wait_for_cover_letter_ui_file_item`) confirming the field's own
+    wrapper actually renders the committed file item. The caller
+    (`service._upload_cover_letter_file`) keeps the PDF's temp directory
+    open for this whole call, so the file being waited on is never deleted
+    out from under an in-flight upload.
+    """
+    if field.field_type != "file":
+        return False
+    locator = _field_locator(page, field)
+    try:
+        with page.expect_response(
+            lambda response: _is_cover_letter_commit_response(response, field.context),
+            timeout=_COVER_LETTER_COMMIT_RESPONSE_TIMEOUT_MS,
+        ) as response_info:
+            locator.set_input_files(str(file_path), timeout=5_000)
+        response = response_info.value
+    except PlaywrightError:
+        logger.warning(
+            "Cover letter upload: no commit-mutation response observed for field %r within %dms.",
+            field.context,
+            _COVER_LETTER_COMMIT_RESPONSE_TIMEOUT_MS,
+        )
+        return False
+    if not _cover_letter_commit_response_succeeded(response):
+        logger.warning(
+            "Cover letter upload: commit mutation for field %r did not succeed.", field.context
+        )
+        return False
+    if not _wait_for_cover_letter_ui_file_item(page, field, file_path.name):
+        logger.warning(
+            "Cover letter upload: committed file item never became visible for field %r.",
+            field.context,
+        )
+        return False
+    return True

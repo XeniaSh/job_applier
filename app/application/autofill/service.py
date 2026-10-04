@@ -498,6 +498,15 @@ def _upload_cover_letter_file(
     narrows to) is likewise caught here and fails closed, so a surprise like
     a full disk during `mkdir`/`write_text` leaves this optional field for
     manual review instead of failing the whole Prepare run.
+
+    Only ever one bounded attempt -- never a retry, unlike the resume
+    control's own retry loop in `AutofillService._fill_open_page`: Ashby's
+    commit wait (`ashby._upload_cover_letter_file_to_field`) already blocks
+    on the network response for this file's own commit mutation, so a
+    retry risks a second `set_input_files` racing the first upload's
+    still-in-flight commit and reading that first commit's response as the
+    second attempt's acknowledgement -- a false success right as the temp
+    PDF directory is about to be deleted.
     """
     upload = getattr(adapter, "upload_cover_letter_file", None)
     if upload is None:
@@ -519,10 +528,7 @@ def _upload_cover_letter_file(
                     artifacts.pdf_error,
                 )
                 return False
-            uploaded = upload(page, artifacts.pdf_path, field)
-            if not uploaded:
-                uploaded = upload(page, artifacts.pdf_path, field)
-            return bool(uploaded)
+            return bool(upload(page, artifacts.pdf_path, field))
     except Exception as exc:  # noqa: BLE001 - optional best-effort upload must never fail Prepare
         logger.error(
             "Cover letter file upload skipped: unexpected %s during generation/upload.",

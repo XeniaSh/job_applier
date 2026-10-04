@@ -590,10 +590,21 @@ def test_ashby_cover_letter_file_stays_manual_when_artifact_generation_raises(
 
 
 def test_ashby_cover_letter_file_stays_manual_when_upload_readback_fails() -> None:
-    """A cover-letter file control whose upload/readback never succeeds (both
-    attempts) must be left for manual review -- never a false
-    `cover_letter_filled`, never a crash -- and the generated temporary
-    document is still cleaned up even though the upload failed.
+    """A cover-letter file control whose upload/readback never succeeds must
+    be left for manual review -- never a false `cover_letter_filled`, never
+    a crash -- and the generated temporary document is still cleaned up
+    even though the upload failed.
+
+    Unlike the resume upload path, this is only ever one bounded attempt,
+    never retried: `ashby._upload_cover_letter_file_to_field` already waits
+    its own bounded timeout for the exact network response to this file's
+    own commit mutation, so a reported failure can still mean that first
+    attempt's commit is merely slow rather than truly failed. A second
+    `upload_cover_letter_file` call reusing the same temp file could then
+    have its own `set_input_files` race the first attempt's still-in-flight
+    commit, and that first commit's own response could be mistaken for the
+    second attempt's acknowledgement -- a false success reported just as
+    the temporary PDF directory is being deleted.
     """
     session = _FakeSession()
     adapter = _AshbyCoverLetterAlwaysFailsAdapter()
@@ -608,11 +619,8 @@ def test_ashby_cover_letter_file_stays_manual_when_upload_readback_fails() -> No
     result = service.run("target_company:ashby:kayak", "1", keep_open=False)
     assert result.status is AutofillStatus.READY_FOR_REVIEW
 
-    # Retried once, exactly like the resume upload path -- both attempts
-    # recorded, both against the real generated document.
-    assert len(adapter.upload_cover_letter_calls) == 2
+    assert len(adapter.upload_cover_letter_calls) == 1
     uploaded_path = adapter.upload_cover_letter_calls[0][0]
-    assert adapter.upload_cover_letter_calls[1][0] == uploaded_path
 
     assert result.cover_letter_filled is False
     assert any(item.label == "Cover Letter" for item in result.unresolved_optional_fields)

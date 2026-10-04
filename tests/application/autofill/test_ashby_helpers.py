@@ -13,6 +13,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+from app.application.autofill import ashby as ashby_module
 from app.application.autofill.ashby import (
     _ACTIVE_CAPTCHA_SELECTOR,
     _APPLICATION_PANEL_SELECTOR,
@@ -26,6 +30,7 @@ from app.application.autofill.ashby import (
     _adjust_optional_messaging_consent,
     _adjust_salary_applicability,
     _classify_application_page,
+    _cover_letter_ui_file_item_visible,
     _discover_wrapper,
     _has_visible_active_captcha,
     _is_yes_no_control,
@@ -1487,33 +1492,173 @@ class _FakeFileInputLocator:
         self._page.attach(self._element_id, Path(path).name)
 
 
-class _FakeFileUploadPage:
-    """Duck-types just `.locator(selector)` / `.evaluate(script, arg)` --
-    the only `Page` surface `_field_locator` and `_file_names` touch for a
-    file control. Tracks the attached filename per element id, keyed the
-    same way `_file_names`'s own readback re-derives the `[id="..."]`
-    selector, so a wrong element id can never read back another control's
-    file."""
+class _FakeGraphQLRequest:
+    """Stands in for `Response.request`'s `post_data_json` property (a real
+    Playwright one is a property, not a method)."""
 
+    def __init__(self, post_data: dict | None) -> None:
+        self._post_data = post_data
+
+    @property
+    def post_data_json(self) -> dict | None:
+        return self._post_data
+
+
+class _FakeGraphQLResponse:
+    """Stands in for a Playwright `Response` -- just `.ok`, `.json()`, and
+    `.request`."""
+
+    def __init__(self, *, post_data: dict | None, ok: bool = True, body: object = None) -> None:
+        self.request = _FakeGraphQLRequest(post_data)
+        self.ok = ok
+        self._body = body if body is not None else {}
+
+    def json(self) -> object:
+        return self._body
+
+
+def _commit_mutation_post_data(field_path: str) -> dict:
+    return {"operationName": "ApiSetFormValueToFile", "variables": {"path": field_path}}
+
+
+def _successful_commit_response(field_path: str) -> _FakeGraphQLResponse:
+    return _FakeGraphQLResponse(
+        post_data=_commit_mutation_post_data(field_path),
+        ok=True,
+        body={"data": {"setFormValueToFile": {"path": field_path}}},
+    )
+
+
+def _graphql_error_commit_response(field_path: str) -> _FakeGraphQLResponse:
+    return _FakeGraphQLResponse(
+        post_data=_commit_mutation_post_data(field_path),
+        ok=True,
+        body={"errors": [{"message": "upload failed"}]},
+    )
+
+
+class _FakeResponseInfo:
     def __init__(self) -> None:
+        self.value: object = None
+
+
+class _FakeExpectResponseContext:
+    """Stands in for Playwright's `expect_response` context manager:
+    resolves, at `__exit__` (after the `with`-block body, here
+    `set_input_files`, already ran), to the first queued response the real
+    predicate matches. Raises `PlaywrightTimeoutError` when none match,
+    exactly like a real timed-out wait, exercising the adapter's own
+    `except PlaywrightError` handling.
+    """
+
+    def __init__(self, page: "_FakeFileUploadPage", predicate, timeout_ms: int) -> None:
+        self._page = page
+        self._predicate = predicate
+        self._timeout_ms = timeout_ms
+        self._info = _FakeResponseInfo()
+
+    def __enter__(self) -> _FakeResponseInfo:
+        return self._info
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        if exc_type is not None:
+            return False
+        for response in self._page._queued_responses:
+            if self._predicate(response):
+                self._info.value = response
+                if self._page._watched_path is not None:
+                    self._page.watched_path_existed_at_commit = self._page._watched_path.exists()
+                return False
+        raise PlaywrightTimeoutError(f"Timeout {self._timeout_ms}ms exceeded waiting for response")
+
+
+class _FakeUiFileItemLocator:
+    """Stands in for the two class-scoped locators
+    `_cover_letter_ui_file_item_visible` reads: `.count()` /
+    `.nth(index).inner_text()` / `.nth(index).is_visible()` for the name
+    item, `.count()` / `.first.is_visible()` for the delete control."""
+
+    def __init__(self, count: int, text: str = "", visible: bool = True) -> None:
+        self._count = count
+        self._text = text
+        self._visible = visible
+
+    def count(self) -> int:
+        return self._count
+
+    def nth(self, index: int) -> "_FakeUiFileItemLocator":
+        return _FakeUiFileItemLocator(1, self._text, self._visible)
+
+    @property
+    def first(self) -> "_FakeUiFileItemLocator":
+        return self.nth(0)
+
+    def inner_text(self) -> str:
+        return self._text
+
+    def is_visible(self) -> bool:
+        return self._visible
+
+
+class _FakeFileUploadPage:
+    """Duck-types `.locator(selector)` / `.evaluate(script, arg)` /
+    `.expect_response(predicate, timeout=...)` / `.wait_for_timeout(ms)` --
+    the full `Page` surface the resume and cover-letter upload/verify paths
+    touch. Tracks the attached filename per element id, keyed the same way
+    `_file_names`'s readback re-derives the `[id="..."]` selector.
+    `_queued_responses` models the network responses `expect_response`'s
+    predicate would see; an empty queue models a bounded wait that times
+    out with no matching response. `ui_file_item_visible` (True by default,
+    so pre-existing success/error/no-response tests pass unmodified) models
+    whether the frontend has rendered the committed file item for the
+    last-attached filename in a no-longer-loading state; a dedicated test
+    below sets it False to reproduce an acknowledged-but-not-yet-rendered
+    commit."""
+
+    def __init__(
+        self,
+        *,
+        queued_responses: list[_FakeGraphQLResponse] | None = None,
+        watched_path: Path | None = None,
+        ui_file_item_visible: bool = True,
+    ) -> None:
         self._attached: dict[str, list[str]] = {}
+        self._queued_responses: list[_FakeGraphQLResponse] = queued_responses or []
+        self._watched_path = watched_path
+        self.watched_path_existed_at_commit: bool | None = None
+        self._ui_file_item_visible = ui_file_item_visible
+        self._last_attached_filename: str | None = None
 
     def attach(self, element_id: str, filename: str) -> None:
         self._attached[element_id] = [filename]
+        self._last_attached_filename = filename
 
-    def locator(self, selector: str) -> _FakeFileInputLocator:
-        match = re.search(r'\[id="([^"]+)"\]', selector)
-        assert match, f"unexpected file-control selector: {selector}"
-        return _FakeFileInputLocator(self, match.group(1))
+    def locator(self, selector: str) -> object:
+        id_match = re.search(r'\[id="([^"]+)"\]', selector)
+        if id_match:
+            return _FakeFileInputLocator(self, id_match.group(1))
+        if "file-item-name" in selector:
+            if self._ui_file_item_visible and self._last_attached_filename:
+                return _FakeUiFileItemLocator(1, self._last_attached_filename)
+            return _FakeUiFileItemLocator(0)
+        if "file-item-delete" in selector:
+            return _FakeUiFileItemLocator(1 if self._ui_file_item_visible else 0)
+        raise AssertionError(f"unexpected file-control selector: {selector}")
 
     def evaluate(self, script: str, arg: str) -> list[str]:
         match = re.search(r'\[id="([^"]+)"\]', arg)
         assert match, f"unexpected file-control readback selector: {arg}"
         return list(self._attached.get(match.group(1), []))
 
+    def expect_response(self, predicate, timeout: int | None = None) -> _FakeExpectResponseContext:
+        return _FakeExpectResponseContext(self, predicate, timeout or 0)
+
+    def wait_for_timeout(self, ms: int) -> None:
+        return None
+
 
 def test_upload_resume_and_upload_cover_letter_file_target_distinct_controls_via_real_adapter_methods() -> None:
-    page = _FakeFileUploadPage()
+    page = _FakeFileUploadPage(queued_responses=[_successful_commit_response("cover-letter-uuid")])
     adapter = AshbyAdapter()
     resume_field = DiscoveredField(
         label="Resume",
@@ -1563,3 +1708,259 @@ def test_upload_resume_returns_false_before_readback_confirms_the_filename() -> 
         context="_systemfield_resume",
     )
     assert adapter.upload_resume(page, Path("/tmp/ada-example-resume.txt"), resume_field) is False
+
+
+# -- upload_cover_letter_file commit-mutation wait: unlike the resume
+# control, the cover-letter control's raw `FileList` updates instantly
+# regardless of whether the server ever actually commits, so
+# `_upload_cover_letter_file_to_field` must wait for this field's own
+# `ApiSetFormValueToFile` response and trust only an HTTP- and
+# GraphQL-successful body. ---------------------------------------------
+
+
+def _cover_letter_field(element_id: str = "cover-letter-input-id") -> DiscoveredField:
+    return DiscoveredField(
+        label="Cover Letter",
+        field_type="file",
+        element_id=element_id,
+        context="cover-letter-uuid",
+    )
+
+
+def test_upload_cover_letter_file_fails_when_no_commit_response_arrives_despite_filelist_update(
+    tmp_path: Path,
+) -> None:
+    # The FileList updates immediately (a bare readback would have falsely
+    # reported success), but no matching commit response ever arrives
+    # within the bounded wait (an empty response queue).
+    pdf_path = tmp_path / "cover_letter.pdf"
+    pdf_path.write_bytes(b"%PDF-1.3\n...\n%%EOF")
+    page = _FakeFileUploadPage(watched_path=pdf_path)
+    adapter = AshbyAdapter()
+    field = _cover_letter_field()
+
+    result = adapter.upload_cover_letter_file(page, pdf_path, field)
+
+    assert result is False
+    # Failed due to the missing acknowledgement, not the write itself.
+    assert page._attached["cover-letter-input-id"] == ["cover_letter.pdf"]
+    assert pdf_path.exists()
+
+
+def test_upload_cover_letter_file_confirms_only_once_matching_commit_response_arrives(
+    tmp_path: Path,
+) -> None:
+    # Mirror image: a response matching this field's own commit mutation
+    # arrives, is HTTP- and GraphQL-successful, and is trusted.
+    pdf_path = tmp_path / "cover_letter.pdf"
+    pdf_path.write_bytes(b"%PDF-1.3\n...\n%%EOF")
+    field = _cover_letter_field()
+    page = _FakeFileUploadPage(
+        queued_responses=[_successful_commit_response(field.context)], watched_path=pdf_path
+    )
+    adapter = AshbyAdapter()
+
+    result = adapter.upload_cover_letter_file(page, pdf_path, field)
+
+    assert result is True
+    assert page.watched_path_existed_at_commit is True
+    assert pdf_path.exists()
+
+
+def test_upload_cover_letter_file_fails_on_graphql_error_in_matching_commit_response(
+    tmp_path: Path,
+) -> None:
+    # A matching response whose GraphQL body carries `errors` must never be
+    # trusted just because a matching response arrived at all.
+    pdf_path = tmp_path / "cover_letter.pdf"
+    pdf_path.write_bytes(b"%PDF-1.3\n...\n%%EOF")
+    field = _cover_letter_field()
+    page = _FakeFileUploadPage(queued_responses=[_graphql_error_commit_response(field.context)])
+    adapter = AshbyAdapter()
+
+    assert adapter.upload_cover_letter_file(page, pdf_path, field) is False
+
+
+def test_upload_cover_letter_file_ignores_a_different_fields_own_commit_response(tmp_path: Path) -> None:
+    # A commit response for a *different* field's own path (e.g. the
+    # resume control's) must never be mistaken for this field's own.
+    pdf_path = tmp_path / "cover_letter.pdf"
+    pdf_path.write_bytes(b"%PDF-1.3\n...\n%%EOF")
+    field = _cover_letter_field()
+    page = _FakeFileUploadPage(queued_responses=[_successful_commit_response("_systemfield_resume")])
+    adapter = AshbyAdapter()
+
+    assert adapter.upload_cover_letter_file(page, pdf_path, field) is False
+
+
+class _FileListClearedAfterCommitPage(_FakeFileUploadPage):
+    """Models React Dropzone clearing/resetting the native input's
+    `FileList` once the upload commits, even though the committed file
+    keeps rendering in the UI. `attach` still drives
+    `_last_attached_filename` (so the UI file-item fake keeps rendering the
+    committed name) but immediately empties the recorded `FileList`."""
+
+    def attach(self, element_id: str, filename: str) -> None:
+        super().attach(element_id, filename)
+        self._attached[element_id] = []
+
+
+def test_upload_cover_letter_file_succeeds_when_native_filelist_is_cleared_after_commit(
+    tmp_path: Path,
+) -> None:
+    # A FileList that React Dropzone has since cleared/reset must never
+    # turn an otherwise-successful upload into a false negative.
+    pdf_path = tmp_path / "cover_letter.pdf"
+    pdf_path.write_bytes(b"%PDF-1.3\n...\n%%EOF")
+    field = _cover_letter_field()
+    page = _FileListClearedAfterCommitPage(
+        queued_responses=[_successful_commit_response(field.context)], watched_path=pdf_path
+    )
+    adapter = AshbyAdapter()
+
+    result = adapter.upload_cover_letter_file(page, pdf_path, field)
+
+    assert result is True
+    # Left empty -- success here never depended on reading it back.
+    assert page._attached["cover-letter-input-id"] == []
+
+
+def test_upload_cover_letter_file_never_attaches_to_the_resume_controls_element_id(tmp_path: Path) -> None:
+    # The two file controls must never be confused under the
+    # commit-response-wait path either, mirroring the resume-path guard
+    # above.
+    pdf_path = tmp_path / "cover_letter.pdf"
+    pdf_path.write_bytes(b"%PDF-1.3\n...\n%%EOF")
+    field = _cover_letter_field()
+    page = _FakeFileUploadPage(queued_responses=[_successful_commit_response(field.context)])
+    adapter = AshbyAdapter()
+
+    assert adapter.upload_cover_letter_file(page, pdf_path, field) is True
+    assert page._attached["cover-letter-input-id"] == ["cover_letter.pdf"]
+    assert "resume-input-id" not in page._attached
+
+
+# -- _cover_letter_ui_file_item_visible: the final UI-visibility proof
+# `_upload_cover_letter_file_to_field` requires on top of the server
+# commit-mutation acknowledgement. -------------------------------------
+
+
+class _FakeUiScopedPage:
+    """Duck-types `.locator(selector)` -- returns the configured
+    `_FakeUiFileItemLocator` fake, keyed by whether the selector targets
+    the name-item or delete-control class."""
+
+    def __init__(self, *, name_locator: object, delete_locator: object) -> None:
+        self.selectors: list[str] = []
+        self._name_locator = name_locator
+        self._delete_locator = delete_locator
+
+    def locator(self, selector: str) -> object:
+        self.selectors.append(selector)
+        if "file-item-name" in selector:
+            return self._name_locator
+        if "file-item-delete" in selector:
+            return self._delete_locator
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+def test_cover_letter_ui_file_item_visible_true_for_matching_name_and_present_delete_control() -> None:
+    page = _FakeUiScopedPage(
+        name_locator=_FakeUiFileItemLocator(1, "cover_letter.pdf"),
+        delete_locator=_FakeUiFileItemLocator(1),
+    )
+    field = DiscoveredField(label="Cover Letter", field_type="file", context="cover-letter-uuid")
+    assert _cover_letter_ui_file_item_visible(page, field, "cover_letter.pdf") is True  # type: ignore[arg-type]
+    assert all('[data-field-path="cover-letter-uuid"]' in selector for selector in page.selectors)
+
+
+def test_cover_letter_ui_file_item_visible_false_while_still_loading() -> None:
+    # Name item rendered, but the delete control (no-longer-loading
+    # signal) has not appeared yet.
+    page = _FakeUiScopedPage(
+        name_locator=_FakeUiFileItemLocator(1, "cover_letter.pdf"),
+        delete_locator=_FakeUiFileItemLocator(0),
+    )
+    field = DiscoveredField(label="Cover Letter", field_type="file", context="cover-letter-uuid")
+    assert _cover_letter_ui_file_item_visible(page, field, "cover_letter.pdf") is False  # type: ignore[arg-type]
+
+
+def test_cover_letter_ui_file_item_visible_false_when_no_name_item_present() -> None:
+    page = _FakeUiScopedPage(
+        name_locator=_FakeUiFileItemLocator(0),
+        delete_locator=_FakeUiFileItemLocator(1),
+    )
+    field = DiscoveredField(label="Cover Letter", field_type="file", context="cover-letter-uuid")
+    assert _cover_letter_ui_file_item_visible(page, field, "cover_letter.pdf") is False  # type: ignore[arg-type]
+
+
+def test_cover_letter_ui_file_item_visible_false_when_filename_text_mismatches() -> None:
+    # A rendered item for an unrelated file (e.g. a leftover previous
+    # upload) must never match this filename.
+    page = _FakeUiScopedPage(
+        name_locator=_FakeUiFileItemLocator(1, "old_cover_letter.pdf"),
+        delete_locator=_FakeUiFileItemLocator(1),
+    )
+    field = DiscoveredField(label="Cover Letter", field_type="file", context="cover-letter-uuid")
+    assert _cover_letter_ui_file_item_visible(page, field, "cover_letter.pdf") is False  # type: ignore[arg-type]
+
+
+def test_cover_letter_ui_file_item_visible_false_without_a_data_field_path_context() -> None:
+    field = DiscoveredField(label="Cover Letter", field_type="file", context="")
+    page = _FakeUiScopedPage(
+        name_locator=_FakeUiFileItemLocator(1, "cover_letter.pdf"),
+        delete_locator=_FakeUiFileItemLocator(1),
+    )
+    assert _cover_letter_ui_file_item_visible(page, field, "cover_letter.pdf") is False  # type: ignore[arg-type]
+
+
+def test_cover_letter_ui_file_item_visible_false_when_matching_name_item_is_hidden() -> None:
+    # Present in the DOM is not the same as shown to the user: a matching
+    # name item with `is_visible() == False` (e.g. mid-transition, or
+    # behind an inactive tab) must not pass.
+    page = _FakeUiScopedPage(
+        name_locator=_FakeUiFileItemLocator(1, "cover_letter.pdf", visible=False),
+        delete_locator=_FakeUiFileItemLocator(1),
+    )
+    field = DiscoveredField(label="Cover Letter", field_type="file", context="cover-letter-uuid")
+    assert _cover_letter_ui_file_item_visible(page, field, "cover_letter.pdf") is False  # type: ignore[arg-type]
+
+
+def test_cover_letter_ui_file_item_visible_false_when_delete_control_is_hidden() -> None:
+    # Only a visible delete control counts as the no-longer-loading
+    # signal; mere DOM presence is not enough.
+    page = _FakeUiScopedPage(
+        name_locator=_FakeUiFileItemLocator(1, "cover_letter.pdf"),
+        delete_locator=_FakeUiFileItemLocator(1, visible=False),
+    )
+    field = DiscoveredField(label="Cover Letter", field_type="file", context="cover-letter-uuid")
+    assert _cover_letter_ui_file_item_visible(page, field, "cover_letter.pdf") is False  # type: ignore[arg-type]
+
+
+# -- upload_cover_letter_file: a successful server acknowledgement is still
+# not proof the UI shows the file. ------------------------------------------
+
+
+def test_upload_cover_letter_file_fails_closed_when_ui_never_shows_the_committed_file_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commit mutation succeeds and the FileList updates, but the
+    frontend never renders the committed file item within the bound --
+    must fail closed rather than trust the server acknowledgement alone.
+    """
+    monkeypatch.setattr(ashby_module, "_COVER_LETTER_UI_FILE_ITEM_WAIT_MS", 10)
+    pdf_path = tmp_path / "cover_letter.pdf"
+    pdf_path.write_bytes(b"%PDF-1.3\n...\n%%EOF")
+    field = _cover_letter_field()
+    page = _FakeFileUploadPage(
+        queued_responses=[_successful_commit_response(field.context)],
+        watched_path=pdf_path,
+        ui_file_item_visible=False,
+    )
+    adapter = AshbyAdapter()
+
+    result = adapter.upload_cover_letter_file(page, pdf_path, field)
+
+    assert result is False
+    # Failed solely because the UI never rendered the item, not an earlier stage.
+    assert page._attached["cover-letter-input-id"] == ["cover_letter.pdf"]
