@@ -880,3 +880,23 @@ companies:
     notes:
       - Verified public Ashby job board (slug lovable); title filter matched a subset of roughly 79 open roles. Observed Stockholm/London-based platform/software engineering postings list an OnSite workplace, not remote.
       - OnSite is only verified at the role level for the postings reviewed, not as company-wide policy. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
+
+  - name: Satispay
+    priority: A
+    category: fintech_payments
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Milan, Italy]
+    remote: limited
+    java_backend_relevance: high
+    role_keywords: [backend, platform, fintech, payments, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/satispay
+    job_board_url: https://jobs.ashbyhq.com/satispay
+    notes:
+      - Verified public Ashby job board (slug satispay); title filter matched 11 of 104 open roles, including a Senior Backend Software Engineer - Consumer Wealth posting (published 2026-09-30) naming Java, Spring Boot, and relocation support for moving countries.
+      - Relocation support is only confirmed for that posting, not as company-wide policy. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
