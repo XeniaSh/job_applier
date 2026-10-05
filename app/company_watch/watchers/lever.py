@@ -227,6 +227,9 @@ def lever_job_to_normalized(
     description = str(item.get("descriptionPlain") or "").strip()
     if not description:
         description = clean_html_to_text(str(item.get("description") or ""))
+    sections = _lever_description_sections(item)
+    if sections:
+        description = "\n\n".join(part for part in (description, *sections) if part)
     if not description:
         description = title
     published_at = item.get("createdAt")
@@ -243,6 +246,28 @@ def lever_job_to_normalized(
         url=url,
         published_at=published,
     )
+
+
+def _lever_description_sections(item: dict[str, object]) -> list[str]:
+    """Lever's `descriptionPlain` is only the intro prose; the actual
+    requirements/responsibilities live in the `lists` items (each with an
+    HTML `content` body), so they must be appended for full-text analysis.
+    """
+    lists = item.get("lists")
+    if not isinstance(lists, list):
+        return []
+    sections: list[str] = []
+    for entry in lists:
+        if not isinstance(entry, dict):
+            continue
+        heading_raw = entry.get("text")
+        heading = heading_raw.strip() if isinstance(heading_raw, str) else ""
+        content_raw = entry.get("content")
+        content_text = clean_html_to_text(content_raw) if isinstance(content_raw, str) else ""
+        if not content_text:
+            continue
+        sections.append(f"{heading}\n{content_text}" if heading else content_text)
+    return sections
 
 
 def build_lever_http_client(*, timeout_seconds: float, user_agent: str) -> httpx.Client:

@@ -224,6 +224,88 @@ def test_eu_hosted_board_fetches_eu_endpoint_only() -> None:
 
 
 @respx.mock
+def test_binance_board_resolves_to_verified_slug() -> None:
+    respx.get(lever_postings_endpoint("binance")).mock(
+        return_value=httpx.Response(status_code=200, json=[_job(title="Java Backend Engineer")])
+    )
+    company = _company(
+        name="Binance",
+        job_board_url="https://jobs.lever.co/binance",
+        role_title_keywords=["backend", "back-end", "java", "kotlin"],
+        exclude_title_keywords=["accelerator", "qa"],
+    )
+
+    result = _watcher().watch(company)
+
+    assert [call.request.url for call in respx.calls] == [
+        httpx.URL(lever_postings_endpoint("binance"))
+    ]
+    assert len(result.vacancies) == 1
+    assert result.vacancies[0].source == "target_company:lever:binance"
+    assert result.errors == []
+
+
+@respx.mock
+def test_lever_list_sections_are_appended_to_description() -> None:
+    job = _job(description="Join our KYC Tech team building backend services.")
+    job["lists"] = [
+        {
+            "text": "Requirements",
+            "content": "<ul><li>5+ years of Java and Spring Boot experience</li>"
+            "<li>Fluent in English</li></ul>",
+        },
+        {
+            "text": "Responsibilities",
+            "content": "<ul><li>Design backend APIs</li></ul>",
+        },
+    ]
+    respx.get(lever_postings_endpoint("qonto")).mock(
+        return_value=httpx.Response(status_code=200, json=[job])
+    )
+
+    result = _watcher().watch(_company())
+
+    assert len(result.vacancies) == 1
+    vacancy = result.vacancies[0]
+    assert "Join our KYC Tech team" in vacancy.description
+    assert "5+ years of Java and Spring Boot experience" in vacancy.description
+    assert "Design backend APIs" in vacancy.description
+    assert "<li>" not in vacancy.description
+    assert "<ul>" not in vacancy.description
+    # Identity/title/URL and title gating are unaffected by description composition.
+    assert vacancy.external_id == "abc123"
+    assert vacancy.title == "Java Backend Engineer"
+    assert vacancy.url == "https://jobs.lever.co/qonto/abc123"
+
+
+@respx.mock
+def test_lever_list_sections_fall_back_when_absent() -> None:
+    respx.get(lever_postings_endpoint("qonto")).mock(
+        return_value=httpx.Response(status_code=200, json=[_job()])
+    )
+    result = _watcher().watch(_company())
+    assert result.vacancies[0].description == "Java backend services and payments."
+
+
+@respx.mock
+def test_lever_malformed_lists_payload_does_not_crash() -> None:
+    job = _job()
+    job["lists"] = [
+        "not-a-dict",
+        {"text": 123, "content": None},
+        {"text": "Requirements", "content": ["not", "a", "string"]},
+    ]
+    respx.get(lever_postings_endpoint("qonto")).mock(
+        return_value=httpx.Response(status_code=200, json=[job])
+    )
+
+    result = _watcher().watch(_company())
+
+    assert len(result.vacancies) == 1
+    assert result.vacancies[0].description == "Java backend services and payments."
+
+
+@respx.mock
 def test_eu_host_404_is_isolated_per_company_error() -> None:
     respx.get(lever_postings_endpoint("pnlfin", region="eu")).mock(
         return_value=httpx.Response(status_code=404)

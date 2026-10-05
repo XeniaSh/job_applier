@@ -142,6 +142,17 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
         assert company.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
 
 
+def test_binance_lever_board_is_declared_with_conservative_filters() -> None:
+    config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
+
+    binance = next(company for company in config.companies if company.name == "Binance")
+    assert binance.watcher_type == "lever"
+    assert binance.ats == "lever"
+    assert binance.job_board_url == "https://jobs.lever.co/binance"
+    assert binance.role_title_keywords == ["backend", "back-end", "java", "kotlin"]
+    assert binance.exclude_title_keywords == ["accelerator", "qa"]
+
+
 def test_missing_file_raises_clear_error(tmp_path: Path) -> None:
     missing_file = tmp_path / "missing.yaml"
 

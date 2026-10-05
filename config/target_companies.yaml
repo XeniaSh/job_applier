@@ -900,3 +900,25 @@ companies:
     notes:
       - Verified public Ashby job board (slug satispay); title filter matched 11 of 104 open roles, including a Senior Backend Software Engineer - Consumer Wealth posting (published 2026-09-30) naming Java, Spring Boot, and relocation support for moving countries.
       - Relocation support is only confirmed for that posting, not as company-wide policy. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
+
+  - name: Binance
+    priority: A
+    category: fintech_crypto
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid, remote_region_limited]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [Asia, Remote Asia]
+    remote: region_limited
+    java_backend_relevance: high
+    role_keywords: [backend, java, kotlin]
+    role_title_keywords: [backend, back-end, java, kotlin]
+    exclude_title_keywords: [accelerator, qa]
+    ats: lever
+    watcher_type: lever
+    career_url: https://www.binance.com/en/careers
+    job_board_url: https://jobs.lever.co/binance
+    notes:
+      - Verified public Lever job board (slug binance) via the read-only postings API on 2026-10-05; 314 open postings.
+      - The generic 8-keyword title prefilter alone passes 34 postings, including 13 accelerator-program and 4 QA titles; a conservative company-specific role_title_keywords [backend, back-end, java, kotlin] plus exclude_title_keywords [accelerator, qa] narrows this to 17, e.g. "Backend Engineer (Java) - KYC Tech", "Backend Engineer (Java) -Trading", "Java Engineer", "Senior Backend Developer (Java)".
+      - Several postings list Asia-region or specific countries; do not assume universal remote, relocation, visa, or language eligibility. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
