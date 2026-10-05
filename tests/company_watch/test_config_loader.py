@@ -96,7 +96,7 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
     config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
 
     ashby_companies = [company for company in config.companies if company.watcher_type == "ashby"]
-    assert len(ashby_companies) == 15
+    assert len(ashby_companies) == 16
 
     expected_name_to_slug = {
         "TravelPerk / Perk": "Perk",
@@ -114,6 +114,7 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
         "n8n": "n8n",
         "Lovable": "lovable",
         "Satispay": "satispay",
+        "ARQ": "arq",
     }
     assert {company.name for company in ashby_companies} == set(expected_name_to_slug)
 
@@ -136,7 +137,7 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
     newly_added_ashby_companies = [
         company for company in ashby_companies if company.name != "TravelPerk / Perk"
     ]
-    assert len(newly_added_ashby_companies) == 14
+    assert len(newly_added_ashby_companies) == 15
     for company in newly_added_ashby_companies:
         assert company.relocation_status in {"mixed_check_per_role", "remote_global"}
         assert company.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS

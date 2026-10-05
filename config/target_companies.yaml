@@ -922,3 +922,24 @@ companies:
       - Verified public Lever job board (slug binance) via the read-only postings API on 2026-10-05; 314 open postings.
       - The generic 8-keyword title prefilter alone passes 34 postings, including 13 accelerator-program and 4 QA titles; a conservative company-specific role_title_keywords [backend, back-end, java, kotlin] plus exclude_title_keywords [accelerator, qa] narrows this to 17, e.g. "Backend Engineer (Java) - KYC Tech", "Backend Engineer (Java) -Trading", "Java Engineer", "Senior Backend Developer (Java)".
       - Several postings list Asia-region or specific countries; do not assume universal remote, relocation, visa, or language eligibility. Relocation/visa sponsorship and backend stack are not confirmed company-wide; check per role.
+
+  - name: ARQ
+    priority: A
+    category: fintech
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: [London, UK, Krakow, Poland]
+    remote: limited
+    java_backend_relevance: high
+    role_keywords: [backend, platform, fintech, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/arq
+    job_board_url: https://jobs.ashbyhq.com/arq
+    notes:
+      - Verified public Ashby job board (slug arq) via the read-only postings API on 2026-10-05; 29 open postings, and the standard 8-keyword title filter passed 9, all with Java backend descriptions.
+      - Six London/Krakow Software Engineer or Senior/Lead Software Engineer (Java) postings were published 2026-10-05 and list a Hybrid workplace.
+      - Hybrid is only verified at the role level for the postings reviewed, not as company-wide policy. Relocation/visa sponsorship is not confirmed company-wide; check per role.
