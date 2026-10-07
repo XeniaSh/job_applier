@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -25,11 +26,33 @@ from app.application.autofill.lever_url import (
     is_canonical_lever_hosted_url,
     is_same_job_apply_url,
 )
-from app.application.autofill.options import match_option, match_yes_no
+from app.application.autofill.models import FieldClassification
+from app.application.autofill.options import match_option, match_option_exact_normalized, match_yes_no
 from app.application.autofill.questions import QuestionKind
+from app.application.autofill.resolver import ResolvedVacancy
+from app.application.candidate_profile import CandidateProfile
 
 _TEXT_TYPES = frozenset({"text", "email", "tel", "url", "search", "number"})
 _FORM_READY_SELECTOR = "#application-form, form.application-form, input#name, input[name='name']"
+
+# Lever's own "Which location are you applying for?" control
+# (`<select name="opportunityLocationId">`). Its options are the hiring
+# team's own office choices for *this posting*, not a fact about the
+# candidate, so it is recognized purely by this stable, Lever-generated
+# field name -- never by the field's label or option text, which would
+# otherwise read as a generic "location" question about the candidate (see
+# `LeverAdapter.adjust_classified_field`).
+_OPPORTUNITY_LOCATION_FIELD_NAME = "opportunityLocationId"
+_OPPORTUNITY_LOCATION_SELECT_TIMEOUT_MS = 5_000
+_PLACEHOLDER_OPTION_TEXTS = (
+    "select",
+    "please select",
+    "select one",
+    "select an option",
+    "choose",
+    "choose one",
+    "choose an option",
+)
 
 # Older Lever posting templates render "Apply for this job" as an
 # <a data-qa="btn-apply-top|btn-apply-bottom">. That `data-qa` attribute is
@@ -342,6 +365,17 @@ class LeverAdapter:
                 self.last_multiselect_selected = selected
                 return bool(selected)
             if field.field_type == "select":
+                if field.name == _OPPORTUNITY_LOCATION_FIELD_NAME:
+                    # `adjust_classified_field` only ever lets this control
+                    # reach `fill_field` with an exact, discovered option
+                    # label, so `select_option` should resolve almost
+                    # immediately -- a short, explicit timeout bounds that in
+                    # case it does not, instead of falling back to
+                    # Playwright's default 30s wait (twice, once per
+                    # `_fill_and_confirm` attempt). This is a dedicated path,
+                    # not a change to `_fill_select`'s own shared behavior --
+                    # every other Lever select keeps Playwright's default.
+                    return _fill_opportunity_location_select(locator, classified.value)
                 return _fill_select(locator, classified.value, field.options)
             if field.field_type in _TEXT_TYPES or field.field_type == "textarea":
                 return _fill_text(locator, str(classified.value))
@@ -420,6 +454,92 @@ class LeverAdapter:
             return False
         value = self.read_back(page, field)
         return value is None or value == "" or (value == "false" and field.field_type == "checkbox")
+
+    def adjust_classified_field(
+        self,
+        item: ClassifiedField,
+        *,
+        profile: CandidateProfile,
+        vacancy: ResolvedVacancy,
+    ) -> ClassifiedField:
+        """Lever-only narrow post-classification adjustment.
+
+        `AutofillService` calls this (when present) right after the shared
+        `classifier.classify_field` pass, before `_enrich_unresolved`. The
+        only control it ever touches is `opportunityLocationId` -- Lever's
+        own "Which location are you applying for?" select, whose options
+        are the hiring team's office choices for *this posting*, not a fact
+        about the candidate. The shared classifier can map this control to
+        `LOCATION` (via its generic "location"-worded label, filling the
+        candidate's own residence -- a value absent from every real option)
+        or to an unresolved `QUESTION_OVERRIDE`; both are replaced here.
+
+        The only safe source of an answer is an explicit
+        `application_policy.question_overrides` string that matches exactly
+        one real, non-placeholder discovered option (case/whitespace/
+        punctuation differences tolerated, never a fuzzy/partial match).
+        Anything else -- no override, a boolean override, no match, or an
+        ambiguous match -- is forced to `UNSUPPORTED`: `AutofillService`'s
+        existing `UNSUPPORTED` branch skips the field before any fill
+        attempt (even if generic answer-generation enrichment would
+        otherwise re-enable `fill`), so this can never reach `fill_field`
+        with a value absent from the live control.
+        """
+        if not _is_opportunity_location_select(item.field):
+            return item
+        matched = _matched_opportunity_location_override(item.field, profile)
+        if matched is not None:
+            return replace(
+                item,
+                classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                kind=QuestionKind.QUESTION_OVERRIDE,
+                value=matched,
+                fill=True,
+                generated=False,
+                unresolved_reason=None,
+            )
+        return replace(
+            item,
+            classification=FieldClassification.UNSUPPORTED,
+            kind=QuestionKind.QUESTION_OVERRIDE,
+            value=None,
+            fill=False,
+            generated=False,
+            unresolved_reason=(
+                "Lever application-location choice requires an explicit "
+                "application_policy.question_overrides string answer that exactly matches "
+                "one discovered, non-placeholder option; never inferred from current "
+                "residence, relocation willingness, or fuzzy option matching"
+            ),
+        )
+
+
+def _is_opportunity_location_select(field: DiscoveredField) -> bool:
+    return field.name == _OPPORTUNITY_LOCATION_FIELD_NAME and field.field_type == "select"
+
+
+def _is_placeholder_option(option: str) -> bool:
+    return any(match_option_exact_normalized(text, [option]) is not None for text in _PLACEHOLDER_OPTION_TEXTS)
+
+
+def _matched_opportunity_location_override(field: DiscoveredField, profile: CandidateProfile) -> str | None:
+    override = profile.question_override_answer(field.label)
+    if not isinstance(override, str):
+        return None
+    # A list, not a set: two distinct `<option>` elements with identical
+    # label text (e.g. two offices both rendered "Buenos Aires") are two
+    # real, separately selectable choices -- deduplicating by label would
+    # silently accept an ambiguous match as if only one had matched.
+    matches: list[str] = []
+    for option in field.options:
+        if not option or _is_placeholder_option(option):
+            continue
+        matched = match_option_exact_normalized(override, [option])
+        if matched is not None:
+            matches.append(matched)
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
 
 def _application_form(page: Page) -> Locator:
@@ -663,6 +783,22 @@ def _fill_select(locator: Locator, value: object, options: list[str]) -> bool:
         pass
     try:
         locator.select_option(value=wanted)
+        return True
+    except PlaywrightError:
+        return False
+
+
+def _fill_opportunity_location_select(locator: Locator, value: object) -> bool:
+    """Fill the `opportunityLocationId` control via a native, single
+    `select_option(label=...)` call with a bounded secondary timeout.
+
+    `value` is always the exact, discovered option label already verified
+    by `LeverAdapter.adjust_classified_field` -- never a semantic yes/no or
+    a fuzzy/partial match -- so this never shares `_fill_select`'s
+    multi-attempt fallback logic.
+    """
+    try:
+        locator.select_option(label=str(value), timeout=_OPPORTUNITY_LOCATION_SELECT_TIMEOUT_MS)
         return True
     except PlaywrightError:
         return False
