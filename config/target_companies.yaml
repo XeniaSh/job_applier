@@ -281,13 +281,14 @@ companies:
     remote: limited
     java_backend_relevance: high
     role_keywords: [backend, payments, platform, lending, data platform, distributed systems]
-    ats: custom
-    watcher_type: custom
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
     career_url: https://careers.airwallex.com/
-    job_board_url: https://careers.airwallex.com/
+    job_board_url: https://jobs.ashbyhq.com/airwallex
     notes:
+      - Verified public Ashby job board (slug airwallex); backend/JVM-style title filter matched 44 of 540 open roles via the read-only API.
       - Some roles mention relocate to Singapore or ask about work visa sponsorship.
-      - Strong fintech/platform target, not always Java-specific.
 
   - name: Tabby
     priority: A

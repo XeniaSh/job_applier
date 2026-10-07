@@ -96,7 +96,7 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
     config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
 
     ashby_companies = [company for company in config.companies if company.watcher_type == "ashby"]
-    assert len(ashby_companies) == 16
+    assert len(ashby_companies) == 17
 
     expected_name_to_slug = {
         "TravelPerk / Perk": "Perk",
@@ -115,6 +115,7 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
         "Lovable": "lovable",
         "Satispay": "satispay",
         "ARQ": "arq",
+        "Airwallex": "airwallex",
     }
     assert {company.name for company in ashby_companies} == set(expected_name_to_slug)
 
@@ -130,17 +131,23 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
         assert company.ats == "ashby"
         assert company.job_board_url == f"https://jobs.ashbyhq.com/{expected_slug}"
 
-    # TravelPerk / Perk is a pre-existing, hand-verified entry with its own
-    # confirmed_role_based/legacy role_keywords metadata; only the newly
-    # added Ashby companies use the shared mixed_check_per_role/
-    # remote_global + standard role_title_keywords metadata.
+    # TravelPerk / Perk and Airwallex are pre-existing, hand-verified entries
+    # with their own confirmed_role_based relocation metadata; only the
+    # newly added Ashby companies use the shared mixed_check_per_role/
+    # remote_global relocation metadata. Airwallex still uses the standard
+    # role_title_keywords shared by all Ashby boards.
     newly_added_ashby_companies = [
-        company for company in ashby_companies if company.name != "TravelPerk / Perk"
+        company
+        for company in ashby_companies
+        if company.name not in {"TravelPerk / Perk", "Airwallex"}
     ]
     assert len(newly_added_ashby_companies) == 15
     for company in newly_added_ashby_companies:
         assert company.relocation_status in {"mixed_check_per_role", "remote_global"}
         assert company.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
+
+    airwallex = next(company for company in ashby_companies if company.name == "Airwallex")
+    assert airwallex.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
 
 
 def test_binance_lever_board_is_declared_with_conservative_filters() -> None:

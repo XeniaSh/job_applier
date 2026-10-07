@@ -3,8 +3,19 @@ from __future__ import annotations
 import httpx
 import respx
 
+from app.collectors.vacancy_collector import NormalizedVacancy
+from app.company_watch.config_loader import (
+    DEFAULT_TARGET_COMPANIES_PATH,
+    load_target_companies_config,
+)
 from app.company_watch.models import TargetCompany
-from app.company_watch.watchers.ashby import AshbyTargetWatcher, ashby_jobs_endpoint
+from app.company_watch.prefilter import passes_role_prefilter
+from app.company_watch.watchers.ashby import (
+    AshbyTargetWatcher,
+    ashby_jobs_endpoint,
+    is_ashby_target,
+    resolve_ashby_slug,
+)
 
 
 def _watcher(**overrides):
@@ -226,3 +237,31 @@ def test_source_and_external_id_are_stable() -> None:
     assert [item.external_id for item in first.vacancies] == [
         item.external_id for item in second.vacancies
     ]
+
+
+def _airwallex_company_from_real_config() -> TargetCompany:
+    config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
+    return next(company for company in config.companies if company.name == "Airwallex")
+
+
+def _airwallex_vacancy_with_title(title: str) -> NormalizedVacancy:
+    return NormalizedVacancy(
+        source="target_company:ashby:airwallex",
+        external_id="1",
+        title=title,
+        company="Airwallex",
+        location="Singapore",
+        employment=None,
+        description="",
+        url="https://jobs.ashbyhq.com/airwallex/1",
+        published_at=None,
+    )
+
+
+def test_airwallex_routes_to_ashby_watcher_from_real_config() -> None:
+    airwallex = _airwallex_company_from_real_config()
+
+    assert is_ashby_target(airwallex) is True
+    assert resolve_ashby_slug(airwallex) == "airwallex"
+    assert passes_role_prefilter(_airwallex_vacancy_with_title("Senior Backend Engineer"), airwallex) is True
+    assert passes_role_prefilter(_airwallex_vacancy_with_title("Account Executive"), airwallex) is False
