@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -281,12 +282,20 @@ class LeverAdapter:
     def discover_fields(self, page: Page) -> list[DiscoveredField]:
         if not self.recognize(page):
             raise LeverFormError("UNSUPPORTED_FORM")
+        discovery_start = time.monotonic()
+        logger.warning("lever_prepare stage=discovery_start")
         form = _application_form(page)
         fields: list[DiscoveredField] = []
         seen_radio_names: set[str] = set()
         seen_ids: set[str] = set()
         controls = form.locator("input, textarea, select")
-        for index in range(controls.count()):
+        control_count = controls.count()
+        for index in range(control_count):
+            # Logged before `_discover_control`'s own per-control Playwright
+            # calls (several `locator.evaluate`/`get_attribute` round-trips
+            # that can each stall) -- the last index seen here is the one
+            # diagnostic a hung discovery leaves behind.
+            logger.warning("lever_prepare stage=discover_field index=%d control_count=%d", index, control_count)
             locator = controls.nth(index)
             field = _discover_control(page, locator, seen_radio_names)
             if field is None:
@@ -296,6 +305,11 @@ class LeverAdapter:
                     continue
                 seen_ids.add(field.element_id)
             fields.append(field)
+        logger.warning(
+            "lever_prepare stage=discovery_complete field_count=%d elapsed_ms=%d",
+            len(fields),
+            int((time.monotonic() - discovery_start) * 1000),
+        )
         return fields
 
     def fill_field(self, page: Page, classified: ClassifiedField) -> bool:

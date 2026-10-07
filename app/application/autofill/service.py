@@ -257,8 +257,16 @@ class AutofillService:
                 failure_reason=AutofillFailureReason.UNSUPPORTED_FORM,
             )
 
+        is_lever = isinstance(adapter, LeverAdapter)
         discovered = adapter.discover_fields(page)
+        classify_start = time.monotonic()
         classified = [classify_field(item, profile) for item in discovered]
+        if is_lever:
+            logger.warning(
+                "lever_prepare stage=classification_complete field_count=%d elapsed_ms=%d",
+                len(classified),
+                int((time.monotonic() - classify_start) * 1000),
+            )
         adjust_classified_field = getattr(adapter, "adjust_classified_field", None)
         if adjust_classified_field is not None:
             # Optional, provider-specific hook (currently only `AshbyAdapter`
@@ -269,7 +277,7 @@ class AutofillService:
                 adjust_classified_field(item, profile=profile, vacancy=vacancy) for item in classified
             ]
         cover_letter_text = _maybe_cover_letter(
-            self._cover_letter_provider, classified, vacancy, profile
+            self._cover_letter_provider, classified, vacancy, profile, adapter=adapter
         )
         if cover_letter_text:
             logger.info(
@@ -297,7 +305,16 @@ class AutofillService:
 
         resume_items: list[ClassifiedField] = []
 
-        for item in classified:
+        for field_index, item in enumerate(classified):
+            if is_lever:
+                logger.warning(
+                    "lever_prepare stage=field_enrich_start field_index=%d kind=%s control_type=%s required=%s",
+                    field_index,
+                    item.kind.value,
+                    item.field.field_type,
+                    item.field.required,
+                )
+            enrich_start = time.monotonic() if is_lever else 0.0
             item = _enrich_unresolved(
                 item,
                 profile=profile,
@@ -305,6 +322,13 @@ class AutofillService:
                 cover_letter_text=cover_letter_text,
                 answer_generator=self._answer_generator,
             )
+            if is_lever:
+                logger.warning(
+                    "lever_prepare stage=field_enrich_end field_index=%d kind=%s elapsed_ms=%d",
+                    field_index,
+                    item.kind.value,
+                    int((time.monotonic() - enrich_start) * 1000),
+                )
             record = _field_result(item)
             if item.inactive_conditional:
                 continue
@@ -367,7 +391,7 @@ class AutofillService:
                 )
                 record = _field_result(item)
             if item.fill:
-                if _fill_and_confirm(adapter, page, item):
+                if _fill_and_confirm(adapter, page, item, field_index=field_index):
                     filled.append(record)
                     if item.kind is QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE:
                         sanctions_none_of_above_confirmed = True
@@ -413,9 +437,13 @@ class AutofillService:
 
         for item in resume_items:
             record = _field_result(item)
-            resume_uploaded = adapter.upload_resume(page, resume_path, item.field)
+            resume_uploaded = _upload_resume_attempt(
+                adapter, page, resume_path, item.field, attempt=1, is_lever=is_lever
+            )
             if not resume_uploaded:
-                resume_uploaded = adapter.upload_resume(page, resume_path, item.field)
+                resume_uploaded = _upload_resume_attempt(
+                    adapter, page, resume_path, item.field, attempt=2, is_lever=is_lever
+                )
             if resume_uploaded:
                 filled.append(record)
             else:
@@ -467,6 +495,35 @@ class AutofillService:
             cover_letter_filled=cover_letter_filled,
             submit_performed=False,
         )
+
+
+def _upload_resume_attempt(
+    adapter: AutofillAdapter,
+    page: object,
+    resume_path: Path,
+    field: object,
+    *,
+    attempt: int,
+    is_lever: bool,
+) -> bool:
+    """One `adapter.upload_resume` call, with a Lever-only start/end marker
+    bracketing it. A real run hit an isolated `TargetClosed` somewhere in
+    this retry loop with no later log line to show which of the two attempts
+    it happened on; these markers close that gap without changing the
+    upload/retry behavior itself.
+    """
+    start = time.monotonic() if is_lever else 0.0
+    if is_lever:
+        logger.warning("lever_prepare stage=resume_upload_start attempt=%d", attempt)
+    uploaded = adapter.upload_resume(page, resume_path, field)
+    if is_lever:
+        logger.warning(
+            "lever_prepare stage=resume_upload_end attempt=%d result=%s elapsed_ms=%d",
+            attempt,
+            uploaded,
+            int((time.monotonic() - start) * 1000),
+        )
+    return uploaded
 
 
 def _upload_cover_letter_file(
@@ -542,6 +599,8 @@ def _maybe_cover_letter(
     classified: list[ClassifiedField],
     vacancy: ResolvedVacancy,
     profile: CandidateProfile,
+    *,
+    adapter: object = None,
 ) -> str | None:
     if not any(item.kind is QuestionKind.COVER_LETTER for item in classified):
         logger.info("Cover letter generation skipped: no Cover Letter field discovered.")
@@ -549,11 +608,26 @@ def _maybe_cover_letter(
     if provider is None:
         logger.warning("Cover letter generation was never invoked: no LLM provider.")
         return None
+    is_lever = isinstance(adapter, LeverAdapter)
+    if is_lever:
+        logger.warning("lever_prepare stage=cover_letter_start")
+    start = time.monotonic()
     try:
         text = provider.generate(vacancy, profile)
     except Exception:
         logger.warning("Cover letter generation failed", exc_info=True)
+        if is_lever:
+            logger.warning(
+                "lever_prepare stage=cover_letter_end outcome=error elapsed_ms=%d",
+                int((time.monotonic() - start) * 1000),
+            )
         return None
+    if is_lever:
+        logger.warning(
+            "lever_prepare stage=cover_letter_end outcome=%s elapsed_ms=%d",
+            "generated" if text and text.strip() else "empty",
+            int((time.monotonic() - start) * 1000),
+        )
     if text is None:
         return None
     cleaned = text.strip()
@@ -748,12 +822,18 @@ def _field_result(item: ClassifiedField) -> AutofillFieldResult:
     )
 
 
-def _fill_and_confirm(adapter: AutofillAdapter, page: object, item: ClassifiedField) -> bool:
+def _fill_and_confirm(
+    adapter: AutofillAdapter, page: object, item: ClassifiedField, *, field_index: int | None = None
+) -> bool:
     diagnostic = item.kind in _FILL_DIAGNOSTIC_KINDS
-    ok, check_item, read_back = _fill_and_read_back(adapter, page, item, attempt=1, diagnostic=diagnostic)
+    ok, check_item, read_back = _fill_and_read_back(
+        adapter, page, item, attempt=1, diagnostic=diagnostic, field_index=field_index
+    )
     if ok and _readback_matches(check_item, read_back):
         return True
-    ok, check_item, read_back = _fill_and_read_back(adapter, page, item, attempt=2, diagnostic=diagnostic)
+    ok, check_item, read_back = _fill_and_read_back(
+        adapter, page, item, attempt=2, diagnostic=diagnostic, field_index=field_index
+    )
     confirmed = bool(ok and _readback_matches(check_item, read_back))
     if not confirmed:
         _log_unconfirmed_select_choice(check_item, adapter, ok=ok, read_back=read_back)
@@ -768,15 +848,52 @@ _FILL_DIAGNOSTIC_KINDS = frozenset({QuestionKind.CURRENT_TITLE, QuestionKind.COU
 
 
 def _fill_and_read_back(
-    adapter: AutofillAdapter, page: object, item: ClassifiedField, *, attempt: int, diagnostic: bool
+    adapter: AutofillAdapter,
+    page: object,
+    item: ClassifiedField,
+    *,
+    attempt: int,
+    diagnostic: bool,
+    field_index: int | None = None,
 ) -> tuple[bool, ClassifiedField, str | None]:
+    is_lever = isinstance(adapter, LeverAdapter)
+    if is_lever:
+        logger.warning(
+            "lever_prepare stage=fill_start attempt=%d field_index=%s kind=%s control_type=%s required=%s",
+            attempt,
+            field_index,
+            item.kind.value,
+            item.field.field_type,
+            item.field.required,
+        )
     fill_start = time.monotonic()
     ok = adapter.fill_field(page, item)
     fill_elapsed_ms = int((time.monotonic() - fill_start) * 1000)
     check_item = _with_confirmed_choice(adapter, _with_confirmed_multiselect(adapter, item))
+    if is_lever:
+        logger.warning(
+            "lever_prepare stage=readback_start attempt=%d field_index=%s kind=%s fill_ok=%s fill_elapsed_ms=%d",
+            attempt,
+            field_index,
+            item.kind.value,
+            ok,
+            fill_elapsed_ms,
+        )
     readback_start = time.monotonic()
     read_back = adapter.read_back(page, item.field)
     readback_elapsed_ms = int((time.monotonic() - readback_start) * 1000)
+    if is_lever:
+        logger.warning(
+            "lever_prepare stage=fill_readback_complete attempt=%d field_index=%s kind=%s fill_ok=%s "
+            "fill_elapsed_ms=%d readback_present=%s readback_elapsed_ms=%d",
+            attempt,
+            field_index,
+            item.kind.value,
+            ok,
+            fill_elapsed_ms,
+            bool(read_back),
+            readback_elapsed_ms,
+        )
     if diagnostic:
         _log_field_fill_diagnostic(
             item,
