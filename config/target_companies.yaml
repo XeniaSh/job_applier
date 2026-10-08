@@ -944,3 +944,43 @@ companies:
       - Verified public Ashby job board (slug arq) via the read-only postings API on 2026-10-05; 29 open postings, and the standard 8-keyword title filter passed 9, all with Java backend descriptions.
       - Six London/Krakow Software Engineer or Senior/Lead Software Engineer (Java) postings were published 2026-10-05 and list a Hybrid workplace.
       - Hybrid is only verified at the role level for the postings reviewed, not as company-wide policy. Relocation/visa sponsorship is not confirmed company-wide; check per role.
+
+  - name: Partly
+    priority: A
+    category: automotive_parts_marketplace
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [hybrid, on_site]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: ["Auckland, New Zealand", "Christchurch, New Zealand"]
+    remote: limited
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, marketplace, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/partly.com
+    job_board_url: https://jobs.ashbyhq.com/partly.com
+    notes:
+      - Verified public Ashby job board (slug partly.com) via the read-only postings API on 2026-10-08; 27 open postings, 15 in New Zealand, and the standard 8-keyword title filter passed 3 of the NZ postings.
+      - Observed Auckland/Christchurch roles list Hybrid or on-site workplaces. Relocation/visa sponsorship is not confirmed company-wide; check per role.
+
+  - name: Halter
+    priority: A
+    category: agritech_hardware_software
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [on_site]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: ["Auckland, New Zealand"]
+    remote: limited
+    java_backend_relevance: medium
+    role_keywords: [backend, platform, agritech, distributed systems]
+    role_title_keywords: [backend, back-end, java, jvm, kotlin, server, platform engineer, software engineer]
+    ats: ashby
+    watcher_type: ashby
+    career_url: https://jobs.ashbyhq.com/halter
+    job_board_url: https://jobs.ashbyhq.com/halter
+    notes:
+      - Verified public Ashby job board (slug halter) via the read-only postings API on 2026-10-08; 257 open postings, 82 in New Zealand, and the standard 8-keyword title filter passed 5 of the NZ postings.
+      - Observed Auckland roles list an OnSite workplace. Remote policy is not confirmed company-wide beyond these roles; check per role. Relocation/visa sponsorship is not confirmed company-wide; check per role.

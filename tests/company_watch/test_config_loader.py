@@ -96,7 +96,7 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
     config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
 
     ashby_companies = [company for company in config.companies if company.watcher_type == "ashby"]
-    assert len(ashby_companies) == 17
+    assert len(ashby_companies) == 19
 
     expected_name_to_slug = {
         "TravelPerk / Perk": "Perk",
@@ -116,6 +116,8 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
         "Satispay": "satispay",
         "ARQ": "arq",
         "Airwallex": "airwallex",
+        "Partly": "partly.com",
+        "Halter": "halter",
     }
     assert {company.name for company in ashby_companies} == set(expected_name_to_slug)
 
@@ -141,13 +143,25 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
         for company in ashby_companies
         if company.name not in {"TravelPerk / Perk", "Airwallex"}
     ]
-    assert len(newly_added_ashby_companies) == 15
+    assert len(newly_added_ashby_companies) == 17
     for company in newly_added_ashby_companies:
         assert company.relocation_status in {"mixed_check_per_role", "remote_global"}
         assert company.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
 
     airwallex = next(company for company in ashby_companies if company.name == "Airwallex")
     assert airwallex.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
+
+    partly = next(company for company in ashby_companies if company.name == "Partly")
+    assert partly.relocation_status == "mixed_check_per_role"
+    assert partly.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
+    assert partly.job_board_url == "https://jobs.ashbyhq.com/partly.com"
+    assert partly.known_hiring_locations == ["Auckland, New Zealand", "Christchurch, New Zealand"]
+
+    halter = next(company for company in ashby_companies if company.name == "Halter")
+    assert halter.relocation_status == "mixed_check_per_role"
+    assert halter.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
+    assert halter.job_board_url == "https://jobs.ashbyhq.com/halter"
+    assert halter.known_hiring_locations == ["Auckland, New Zealand"]
 
 
 def test_binance_lever_board_is_declared_with_conservative_filters() -> None:
