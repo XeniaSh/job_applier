@@ -64,15 +64,13 @@ _WORK_AUTH_REQUIRED_MARKERS = (
     "must have the right to work",
     "must already be eligible to work",
     "must be eligible to work",
+    "legal right to work",
     "us work authorization required",
     "work authorization required",
     "work authorisation required",
     "citizens only",
-    "residents only",
-    "must reside in",
-    "must be located in",
-    "must currently live in",
-    "must be based in",
+    "permanent residents only",
+    "permanent resident only",
 )
 
 

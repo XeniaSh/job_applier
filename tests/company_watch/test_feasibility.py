@@ -78,3 +78,85 @@ def test_worldwide_remote_is_likely_even_without_visa() -> None:
 
     assert result.label == "LIKELY"
     assert result.remote_type == "worldwide"
+
+
+def test_unclear_when_only_physical_location_is_required_nz() -> None:
+    result = assess_application_feasibility(
+        vacancy_text="This role must be based in New Zealand for compliance reasons.",
+        location="Wellington",
+    )
+
+    assert result.work_authorization_requirement == "unknown"
+    assert result.visa_sponsorship == "unknown"
+    assert result.label == "UNCLEAR"
+    assert "visa/relocation not mentioned; check manually" in result.warnings
+
+
+def test_unclear_when_only_physical_location_is_required_auckland() -> None:
+    result = assess_application_feasibility(
+        vacancy_text="Candidates must reside in Auckland to be considered.",
+        location="Auckland",
+    )
+
+    assert result.work_authorization_requirement == "unknown"
+    assert result.label == "UNCLEAR"
+
+
+def test_unclear_when_only_physical_location_is_required_germany() -> None:
+    result = assess_application_feasibility(
+        vacancy_text="Applicants must be located in Germany for this position.",
+        location="Berlin",
+    )
+
+    assert result.work_authorization_requirement == "unknown"
+    assert result.label == "UNCLEAR"
+
+
+def test_unclear_when_only_physical_location_is_required_singapore() -> None:
+    result = assess_application_feasibility(
+        vacancy_text="You must currently live in Singapore to apply.",
+        location="Singapore",
+    )
+
+    assert result.work_authorization_requirement == "unknown"
+    assert result.label == "UNCLEAR"
+
+
+def test_required_when_explicit_eligibility_text_present_regardless_of_location() -> None:
+    result = assess_application_feasibility(
+        vacancy_text="Must be based in New Zealand. Applicants must be eligible to work in New Zealand.",
+        location="Auckland",
+    )
+
+    assert result.work_authorization_requirement == "required"
+    assert result.label == "UNLIKELY"
+
+
+def test_required_when_legal_right_to_work_phrase_present() -> None:
+    result = assess_application_feasibility(
+        vacancy_text="Candidates must have a legal right to work in Germany.",
+        location="Berlin",
+    )
+
+    assert result.work_authorization_requirement == "required"
+    assert result.label == "UNLIKELY"
+
+
+def test_unclear_when_only_bare_residents_only_phrase_present() -> None:
+    result = assess_application_feasibility(
+        vacancy_text="Singapore residents only may apply for this role.",
+        location="Singapore",
+    )
+
+    assert result.work_authorization_requirement == "unknown"
+    assert result.label == "UNCLEAR"
+
+
+def test_required_when_permanent_residents_only_phrase_present() -> None:
+    result = assess_application_feasibility(
+        vacancy_text="Singapore permanent residents only may apply for this role.",
+        location="Singapore",
+    )
+
+    assert result.work_authorization_requirement == "required"
+    assert result.label == "UNLIKELY"

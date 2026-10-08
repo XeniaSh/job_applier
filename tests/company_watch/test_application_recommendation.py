@@ -4,7 +4,7 @@ from app.company_watch.application_recommendation import (
     recommendation_label,
 )
 from app.company_watch.candidate_constraints import CandidateConstraints
-from app.company_watch.feasibility import ApplicationFeasibility
+from app.company_watch.feasibility import ApplicationFeasibility, assess_application_feasibility
 from app.company_watch.models import TargetCompany
 from app.company_watch.seniority import classify_seniority
 from app.models import Decision
@@ -99,6 +99,53 @@ def test_work_authorization_required_without_sponsorship_is_skip() -> None:
         constraints=_constraints(),
         company=_company(),
         location="Chicago",
+    )
+    assert result.label == "SKIP"
+    assert any("work authorization" in reason for reason in result.reasons)
+
+
+def test_location_only_requirement_is_not_skip() -> None:
+    feasibility = assess_application_feasibility(
+        vacancy_text="This role must be based in New Zealand.",
+        location="Auckland",
+    )
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=feasibility,
+        constraints=_constraints(),
+        company=_company(),
+        location="Auckland",
+    )
+    assert result.label != "SKIP"
+
+
+def test_permanent_residents_only_requirement_is_skip() -> None:
+    feasibility = assess_application_feasibility(
+        vacancy_text="Singapore permanent residents only may apply for this role.",
+        location="Singapore",
+    )
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=feasibility,
+        constraints=_constraints(),
+        company=_company(),
+        location="Singapore",
+    )
+    assert result.label == "SKIP"
+    assert any("work authorization" in reason for reason in result.reasons)
+
+
+def test_explicit_eligibility_requirement_with_location_is_skip() -> None:
+    feasibility = assess_application_feasibility(
+        vacancy_text="Must be based in New Zealand. Applicants must be eligible to work in New Zealand.",
+        location="Auckland",
+    )
+    result = recommend_application(
+        decision=Decision.STRONG_MATCH,
+        feasibility=feasibility,
+        constraints=_constraints(),
+        company=_company(),
+        location="Auckland",
     )
     assert result.label == "SKIP"
     assert any("work authorization" in reason for reason in result.reasons)
