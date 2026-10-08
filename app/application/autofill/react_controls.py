@@ -350,6 +350,39 @@ def confirm_option_selected(
     )
 
 
+def confirm_other_option_committed_locally(locator: Locator, option_label: str) -> bool:
+    """Confirm this control's own committed selection is exactly "Other",
+    read straight from this control's own single-value display node --
+    never `confirm_option_selected`'s page-wide primary signal.
+
+    Used only by the residence-country "Other" fallback
+    (`greenhouse._select_other_combobox_option`); every other fallback
+    path keeps using `confirm_option_selected` unchanged.
+    `wait_for_selected_label` (the primary signal `confirm_option_selected`
+    relies on) checks every single-value/chip node on the *whole page*, so
+    an unrelated control that already shows "Other" (e.g. a
+    work-authorization dropdown) could satisfy it even when this
+    control's own click was swallowed and it still shows its previous
+    value (e.g. a stale "France"). This never queries beyond this
+    control's own display node, and never accepts `read_selected_label`'s
+    typed-search-input fallback -- text the candidate's prior filter only
+    typed, and never actually committed, must never count as evidence
+    "Other" was selected.
+    """
+    node = _single_value_node(locator)
+    if node is None:
+        return False
+    try:
+        text = " ".join((node.inner_text() or "").split())
+    except PlaywrightError:
+        return False
+    if not text:
+        return False
+    if match_option_exact_normalized("Other", [text]) is not None:
+        return True
+    return bool(option_label) and match_option_exact_normalized(option_label, [text]) is not None
+
+
 def selection_display_is_dial_code_fragment(locator: Locator) -> bool:
     return _dial_code_fragment(locator) is not None
 
@@ -865,6 +898,59 @@ def _single_value_node(locator: Locator) -> Locator | None:
     if selected.count() == 0:
         return None
     return selected.first
+
+
+_CLEAR_INDICATOR_SELECTOR = (
+    "[class*='clear-indicator'], [class*='clearIndicator'], "
+    "[aria-label='Clear value'], [aria-label='Clear']"
+)
+
+
+def clear_selected_value(locator: Locator) -> bool:
+    """Best-effort clear of this control's own already-committed selected
+    value (never merely its typed search text -- see
+    `greenhouse._clear_combobox_input` for that) via a local clear
+    indicator scoped to this control's own wrapper (`_control_root`,
+    never a page-wide selector that could hit an unrelated field's clear
+    control). Returns True only once this control's own display is
+    confirmed to no longer show a selection; False (never raises) when no
+    safely scoped clear control exists or the clear does not persist.
+    """
+    control = _control_root(locator)
+    clear_control = control.locator(_CLEAR_INDICATOR_SELECTOR)
+    try:
+        if clear_control.count() == 0 or not clear_control.first.is_visible():
+            return False
+    except PlaywrightError:
+        return False
+    try:
+        clear_control.first.click(timeout=2_000)
+    except PlaywrightError:
+        try:
+            clear_control.first.click(force=True, timeout=2_000)
+        except PlaywrightError:
+            return False
+    node = _single_value_node(locator)
+    if node is not None:
+        try:
+            return not bool((node.inner_text() or "").strip())
+        except PlaywrightError:
+            return False
+    # No dedicated single-value node exists in this control's markup at
+    # all -- that is never itself proof of a cleared selection, since a
+    # durable committed value can persist elsewhere on this same control
+    # root (a `data-selected-value`/`aria-label`/`title` attribute
+    # carrying the committed value, the same signal the dial-code-
+    # fragment fallback relies on). Only report cleared once none of
+    # those remain either.
+    for attr in ("data-selected-value", "aria-label", "title"):
+        try:
+            raw = (control.get_attribute(attr, timeout=500) or "").strip()
+        except PlaywrightError:
+            raw = ""
+        if raw:
+            return False
+    return True
 
 
 def _combobox_listbox_ids(control: Locator) -> list[str]:

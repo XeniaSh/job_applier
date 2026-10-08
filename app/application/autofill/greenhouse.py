@@ -489,7 +489,14 @@ class GreenhouseAdapter:
                         self.last_choice_selected = resolved.get("label")
                     return choice_ok
                 combo_resolved: dict[str, str] = {}
-                combo_ok = _fill_combobox(page, locator, str(classified.value), resolved=combo_resolved)
+                combo_ok = _fill_combobox(
+                    page,
+                    locator,
+                    str(classified.value),
+                    kind=classified.kind,
+                    field=field,
+                    resolved=combo_resolved,
+                )
                 self.last_choice_trace = _describe_choice_interaction(
                     locator, field, classified.kind, combo_ok
                 )
@@ -742,6 +749,17 @@ def _discover_control(
             return None
         context, context_required = _checkbox_question_meta(locator)
         label = _checkbox_display_label(label, context)
+    elif field_type == "combobox" and re.search(r"\bcountry\b", label, re.I) and not re.search(
+        r"\bphone\b", label, re.I
+    ):
+        # Captures this control's own field-local help text, e.g. a
+        # residence-country combobox's "If you do not see your country in
+        # the list, please select Other." Unlike the checkbox walk above
+        # (which accepts any sufficiently long ancestor text as a
+        # fallback), this never climbs to a broad, unnamed ancestor that
+        # could also wrap a sibling question's own help text -- see
+        # `_combobox_field_help`.
+        context = _combobox_field_help(locator)
     if _is_decoy_control(locator, label, name, element_id, field_type):
         return None
     if _is_cover_letter_label(label, name, element_id):
@@ -765,7 +783,7 @@ def _discover_control(
         current_value=_current_value(locator, field_type),
         autocomplete=locator.get_attribute("autocomplete"),
         element_id=element_id,
-        context=context if field_type == "checkbox" else "",
+        context=context if field_type in {"checkbox", "combobox"} else "",
     )
 
 
@@ -848,6 +866,56 @@ def _checkbox_question_meta(locator: Locator) -> tuple[str, bool]:
         return "", False
     context = " ".join(str(raw.get("context") or "").split())
     return context, bool(raw.get("required"))
+
+
+# Deliberately narrower than `_CHECKBOX_QUESTION_META_JS`'s ancestor walk:
+# that walk accepts any sufficiently long ancestor text as a fallback
+# ("broader"), which can climb past this control's own container into a
+# shared wrapper that also holds a sibling question's help text -- fine for
+# a checkbox's own option label (short, so the fallback rarely fires in
+# practice) but not safe for a combobox's field-local instruction text,
+# which this module trusts to decide whether "Other" may ever be clicked.
+# This only ever returns text from a scope it can prove belongs to this
+# control alone: an aria-describedby target (always control-specific by
+# construction), or the nearest ancestor within a bounded climb that is
+# both structurally named (question/field/fieldset/section) *and* carries
+# its own direct label/legend -- never a bare long-text fallback. No safely
+# scoped context means an empty string, never a guess.
+_COMBOBOX_FIELD_HELP_JS = """el => {
+    const describedBy = (el.getAttribute('aria-describedby') || '').trim();
+    if (describedBy) {
+        const text = describedBy.split(/\\s+/).map(id => {
+            const node = document.getElementById(id);
+            return node ? (node.innerText || node.textContent || '') : '';
+        }).filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+        if (text) return text;
+    }
+    let node = el.parentElement;
+    for (let i = 0; i < 4 && node && node.tagName && !['FORM', 'BODY', 'HTML'].includes(node.tagName); i++) {
+        const marker = String(node.className || '') + ' ' + String(node.id || '');
+        const named = /question/i.test(marker)
+            || /(?:^|\\s)field\\b/i.test(marker)
+            || ['FIELDSET', 'SECTION'].includes(node.tagName);
+        if (named) {
+            const ownLabel = node.querySelector(':scope > label, :scope > legend, :scope > [class*="label"]');
+            if (ownLabel) {
+                return (node.innerText || '').replace(/\\s+/g, ' ').trim();
+            }
+        }
+        node = node.parentElement;
+    }
+    return '';
+}"""
+
+
+def _combobox_field_help(locator: Locator) -> str:
+    try:
+        raw = locator.evaluate(_COMBOBOX_FIELD_HELP_JS)
+    except PlaywrightError:
+        return ""
+    if not isinstance(raw, str):
+        return ""
+    return " ".join(raw.split())
 
 
 def _looks_like_privacy_field(field: DiscoveredField) -> bool:
@@ -1402,6 +1470,7 @@ def _fill_combobox(
     value: str,
     *,
     kind: QuestionKind | None = None,
+    field: DiscoveredField | None = None,
     resolved: dict[str, str] | None = None,
 ) -> bool:
     """Type into a custom searchable combobox and commit the exact live
@@ -1427,9 +1496,10 @@ def _fill_combobox(
     combobox options are only worded as the leading component -- except
     for SCHOOL, which never tries this head fallback, since an explicit
     value like "Aalto University, Helsinki" must never resolve to a
-    different institution's live option ("Aalto University"). No blind
-    Enter is ever pressed and no other option is ever substituted -- once
-    resolved, only that exact live option's id/label (captured before any
+    different institution's live option ("Aalto University"). A country
+    question may use the exact "Other" option only when its own help text
+    explicitly instructs that fallback. No blind Enter is ever pressed;
+    once resolved, only that live option's id/label (captured before any
     click, since a committed React-select can detach/unmount the option
     node itself, which would otherwise leave a later attribute read
     waiting on a locator that never reappears) is clicked (up to twice,
@@ -1449,9 +1519,7 @@ def _fill_combobox(
         try:
             locator.fill(value, timeout=5_000)
         except PlaywrightError:
-            _dismiss_overlays(page)
-            _clear_combobox_input(locator)
-            return False
+            return _fail_combobox_fill(page, locator, kind)
     react_controls.scoped_visible_option_texts(page, locator)
     # SCHOOL never uses the shared fuzzy/prefix scoped matcher -- a partial
     # or unrelated live option (e.g. "Aalto University" when the candidate's
@@ -1472,10 +1540,14 @@ def _fill_combobox(
             option = matcher(page, locator, head)
             matched_value = head
     if option is None:
+        if kind is QuestionKind.COUNTRY and field is not None and _country_other_instructed(field.context):
+            if _select_other_combobox_option(page, locator):
+                if resolved is not None:
+                    resolved["label"] = "Other"
+                _dismiss_overlays(page)
+                return True
         _log_combobox_no_match(page, locator, start)
-        _dismiss_overlays(page)
-        _clear_combobox_input(locator)
-        return False
+        return _fail_combobox_fill(page, locator, kind)
     for _click_attempt in range(2):
         # Captured before the click below: a committed React-select can
         # detach/unmount the clicked option node itself, and reading an
@@ -1530,8 +1602,33 @@ def _fill_combobox(
                 int((time.monotonic() - start) * 1000),
             )
             break
+    return _fail_combobox_fill(page, locator, kind)
+
+
+def _fail_combobox_fill(page: Page, locator: Locator, kind: QuestionKind | None) -> bool:
+    """Common fail-closed exit for every `_fill_combobox` failure path.
+
+    Always dismisses any open menu and wipes leftover typed search text
+    (`_clear_combobox_input`) so neither is ever later mistaken for a
+    committed selection. For COUNTRY specifically, also best-effort clears
+    this control's own already-*committed* selected value (never merely
+    the typed text) via `react_controls.clear_selected_value`, which is
+    itself scoped to this control's own wrapper -- a stale, visibly wrong
+    prior country selection (e.g. a leftover "France") must never be left
+    silently in place just because this fill attempt failed. When that
+    clear cannot be confirmed, this logs an explicit warning naming only
+    the control (never the stale or requested country text) so a live run
+    is never left with only the generic read-back-mismatch warning as
+    evidence that an unconfirmed, pre-existing selection remains.
+    """
     _dismiss_overlays(page)
     _clear_combobox_input(locator)
+    if kind is QuestionKind.COUNTRY and not react_controls.clear_selected_value(locator):
+        logger.warning(
+            "combobox_country_stale_selection_unconfirmed element_id=%r "
+            "reason=could_not_clear_pre_existing_selection_requires_manual_correction",
+            locator.get_attribute("id") or "",
+        )
     return False
 
 
@@ -1553,6 +1650,78 @@ def _log_combobox_no_match(page: Page, locator: Locator, start: float) -> None:
         listbox_resolved,
         int((time.monotonic() - start) * 1000),
     )
+
+
+# Scoped, Greenhouse-only residence-country fallback: some Greenhouse custom
+# country questions omit the candidate's actual country of residence from
+# their option list entirely, but explicitly tell the candidate what to do
+# about it in the question's own field-local help text. That instruction is
+# the only trigger for ever clicking "Other" -- never a blanket substitution
+# for any unmatched country, and only ever reached for QuestionKind.COUNTRY
+# (see `_fill_combobox`'s one call site for this).
+_COUNTRY_OTHER_INSTRUCTION_RE = re.compile(
+    r"\b(?:do\s+not|don't|does\s+not|doesn't)\s+see\s+your\s+country\b.{0,80}?\bselect\b.{0,20}?\bother\b",
+    re.I | re.S,
+)
+
+
+def _country_other_instructed(context: str) -> bool:
+    """True only when this field's own local help text (never a sibling
+    question's -- `context` is already scoped by the control-specific
+    help-text lookup in `_discover_control`)
+    explicitly tells the candidate to select Other when their country is
+    not listed.
+    """
+    text = " ".join((context or "").split())
+    if not text:
+        return False
+    return bool(_COUNTRY_OTHER_INSTRUCTION_RE.search(text))
+
+
+def _select_other_combobox_option(page: Page, locator: Locator) -> bool:
+    """Click the exact "Other" option in this control's own live listbox.
+
+    Only ever reached after the candidate's actual country has no live
+    match and the field's own help text explicitly instructs this (see
+    `_country_other_instructed`). Clears the unmatched typed search text
+    first so a prior filter (e.g. "Spain") that hid "Other" from the
+    rendered list cannot itself hide the fallback option. Exact-normalized
+    match only -- never a fuzzy/prefix guess.
+
+    Confirmation deliberately never uses `confirm_option_selected`: that
+    function's primary signal (`wait_for_selected_label`) checks every
+    single-value/chip node on the *whole page*, so an unrelated control
+    that already shows "Other" (e.g. a work-authorization dropdown) could
+    satisfy it even when this control's own click was swallowed and it
+    still shows its previous, wrong value (e.g. a stale "France"). Instead
+    this uses `confirm_other_option_committed_locally`, which only ever
+    reads this control's own single-value display node, or this fails
+    closed exactly like an ordinary unmatched country.
+    """
+    try:
+        locator.fill("", timeout=1_000)
+    except PlaywrightError:
+        return False
+    option = react_controls.scoped_matching_option_exact_normalized(page, locator, "Other")
+    if option is None:
+        return False
+    for _click_attempt in range(2):
+        try:
+            option_label = " ".join((option.inner_text(timeout=1_000) or "").split())
+        except PlaywrightError:
+            option_label = ""
+        try:
+            option.click(timeout=3_000)
+        except PlaywrightError:
+            try:
+                option.click(force=True, timeout=3_000)
+            except PlaywrightError:
+                break
+        if react_controls.confirm_other_option_committed_locally(locator, option_label):
+            logger.info("combobox_other_selected element_id=%r", locator.get_attribute("id") or "")
+            return True
+    logger.warning("combobox_other_unconfirmed element_id=%r", locator.get_attribute("id") or "")
+    return False
 
 
 def _fill_choice(

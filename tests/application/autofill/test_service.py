@@ -1043,6 +1043,79 @@ def test_service_accepts_matching_years_readback_with_no_warning() -> None:
     assert not any("read-back failed" in warning.lower() for warning in result.warnings)
 
 
+def _profile_with_country() -> CandidateProfile:
+    return CandidateProfile.model_validate(
+        {
+            "identity": {
+                "first_name": "Ada",
+                "last_name": "Example",
+                "email": "ada.example@example.test",
+                "phone": "+15555550100",
+                "country": "Germany",
+            },
+            "application_files": {"default_resume": "tests/fixtures/autofill/resume.txt"},
+        }
+    )
+
+
+class _GreenhouseCountryUnconfirmedAdapter(GreenhouseAdapter):
+    """Real `GreenhouseAdapter` subclass (so `isinstance(adapter, GreenhouseAdapter)`
+    holds): fill_field reports success, but the country combobox never
+    actually reads back -- reproducing the fail-closed `_fail_combobox_fill`
+    path for `QuestionKind.COUNTRY`."""
+
+    def prepare_page(self, page: object) -> None:
+        _ = page
+
+    def detect_challenge(self, page: object) -> str | None:
+        _ = page
+        return None
+
+    def recognize(self, page: object) -> bool:
+        _ = page
+        return True
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(label="First Name", name="first_name", required=True),
+            DiscoveredField(label="Country", name="country", field_type="combobox", required=True),
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        return bool(getattr(classified, "fill", False))
+
+    def upload_resume(self, page: object, resume_path: object, field: object) -> bool:
+        _ = page, resume_path, field
+        return False
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        if field.name == "first_name":
+            return "Ada"
+        return None
+
+
+def test_service_greenhouse_country_unconfirmed_readback_warns_manual_check() -> None:
+    session = _FakeSession()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile_with_country,
+        adapter=_GreenhouseCountryUnconfirmedAdapter(),
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert any("country" in item.label.lower() for item in result.unresolved_required_fields)
+    assert any(
+        "residence country selection" in warning.lower() and "not confirmed" in warning.lower()
+        for warning in result.warnings
+    )
+    assert not any(warning == "Read-back failed for 'Country'." for warning in result.warnings)
+
+
 def _profile_with_current_location() -> CandidateProfile:
     return CandidateProfile.model_validate(
         {

@@ -408,6 +408,12 @@ class AutofillService:
                             adapter_reason
                             or f"Cover letter not filled: read-back failed for '{item.field.label}'."
                         )
+                    elif isinstance(adapter, GreenhouseAdapter) and item.kind is QuestionKind.COUNTRY:
+                        warnings.append(
+                            f"Residence country selection for '{item.field.label}' was not "
+                            "confirmed: any visible selection must be checked and corrected "
+                            "manually."
+                        )
                     else:
                         warnings.append(f"Read-back failed for '{item.field.label}'.")
                     _append_unresolved(item, record, unresolved_required, unresolved_optional)
