@@ -550,6 +550,106 @@ def test_technology_named_only_in_context_fills_from_explicit_value() -> None:
     assert mapped.value == "3"
 
 
+_PARTLY_PYTHON_YEARS_LABEL = (
+    "How many years of professional experience do you have building "
+    "production systems primarily in Python?"
+)
+
+
+def test_technology_named_after_primarily_in_stays_unresolved_without_explicit_value() -> None:
+    """Observed Partly/Ashby wording. The candidate's 6-7 configured years are
+    Java/Kotlin, not Python -- general/relevant years must never be borrowed
+    to answer a question scoped to a specific, unconfigured technology.
+    """
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "years_of_relevant_experience": 7,
+            "professional_tech_stack": ["Java", "Kotlin"],
+            "technology_years": [
+                {"technology": "Java", "years": 7},
+                {"technology": "Kotlin", "years": 2},
+            ],
+        }
+    )
+    field = DiscoveredField(
+        label=_PARTLY_PYTHON_YEARS_LABEL,
+        required=True,
+        field_type="select",
+        options=["0-1 years", "1-3 years", "3-5 years", "5-7 years", "6+ years"],
+    )
+    mapped = map_question(field, profile)
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason is not None
+    assert "Python" in mapped.unresolved_reason
+    # Never silently inherits the general/relevant professional years value.
+    assert mapped.value != profile.relevant_experience_years()
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+def test_technology_named_after_primarily_in_fills_from_explicit_configured_value() -> None:
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "professional_tech_stack": ["Java", "Kotlin"],
+            "technology_years": [
+                {"technology": "Java", "years": 7},
+                {"technology": "Kotlin", "years": 2},
+                {"technology": "Python", "years": 2},
+            ],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label=_PARTLY_PYTHON_YEARS_LABEL,
+            required=True,
+            field_type="select",
+            options=["0-1 years", "1-3 years", "3-5 years", "5-7 years", "6+ years"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "1-3 years"
+
+
+def test_technology_named_after_primarily_using_international_case_stays_unresolved() -> None:
+    """Equivalent wording naming a different technology via "primarily using
+    <X>", as seen on non-US boards.
+    """
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "professional_tech_stack": ["Java", "Kotlin"],
+            "technology_years": [
+                {"technology": "Java", "years": 7},
+                {"technology": "Kotlin", "years": 2},
+            ],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label=(
+                "How many years of professional experience do you have "
+                "building distributed systems primarily using Go?"
+            ),
+            required=True,
+            field_type="text",
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is False
+    assert mapped.value is None
+    assert mapped.unresolved_reason is not None
+    assert "Go" in mapped.unresolved_reason
+    assert mapped.value != profile.relevant_experience_years()
+
+
 def test_combined_multi_technology_years_question_stays_unresolved() -> None:
     """A question naming two known technologies together cannot be answered with
     either technology's own configured value: that would silently drop or

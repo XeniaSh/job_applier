@@ -77,6 +77,39 @@ def test_parse_years_experience_technology_alternate_phrasings() -> None:
     assert parse_years_experience_technology("Total years of experience in the industry") is None
 
 
+def test_parse_years_experience_technology_finds_technology_after_primarily_in() -> None:
+    """Observed Partly/Ashby wording: the named technology sits after a
+    "building production systems primarily in <X>" clause, far from
+    "experience" itself. Without this, "years of professional experience"
+    matches the generic filler word "professional" first and the real
+    technology later in the sentence is never reached.
+    """
+    assert (
+        parse_years_experience_technology(
+            "How many years of professional experience do you have building "
+            "production systems primarily in Python?"
+        )
+        == "Python"
+    )
+    # Equivalent wording naming a different technology via "primarily using".
+    assert (
+        parse_years_experience_technology(
+            "How many years of professional experience do you have building "
+            "distributed systems primarily using Go?"
+        )
+        == "Go"
+    )
+    # A generic (non-technology) "primarily in/using" clause must still be
+    # rejected like any other generic phrase.
+    assert (
+        parse_years_experience_technology(
+            "How many years of professional experience do you have primarily "
+            "in the industry?"
+        )
+        is None
+    )
+
+
 def test_parse_years_experience_technology_keeps_full_comma_separated_phrase() -> None:
     """The captured phrase must not be truncated at a comma: dropping "Kotlin"
     from "Java, Kotlin" would let a single-technology answer (e.g. only Java

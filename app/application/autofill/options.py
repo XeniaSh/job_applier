@@ -55,6 +55,17 @@ _TECH_EXPERIENCE_YEARS_RE = re.compile(
     rf"({_TECH_WORD}(?:{_TECH_WORD_SEP}{_TECH_WORD}){{0,2}})\s+experience\s*\(\s*years?\s*\)",
     re.IGNORECASE,
 )
+# "primarily in/using/with <tech>" — e.g. "...experience do you have building
+# production systems primarily in Python?". Checked ahead of the patterns
+# above: in that wording, "years of professional experience" already matches
+# `_TECH_BEFORE_EXPERIENCE_RE` on the filler word "professional" (rejected by
+# `_GENERIC_YEARS_EXPERIENCE_PHRASES` below), which would otherwise short-
+# circuit the lookup before the actual named technology later in the
+# sentence is ever considered.
+_TECH_PRIMARILY_RE = re.compile(
+    rf"\bprimarily\s+(?:in|using|with)\s+({_TECH_WORD}(?:{_TECH_WORD_SEP}{_TECH_WORD}){{0,2}})",
+    re.IGNORECASE,
+)
 # Trailing filler words trimmed off a captured phrase (never a technology name
 # by itself): "Spring Boot development" -> "Spring Boot".
 _TRAILING_FILLER_WORDS = {"development", "experience", "background", "work"}
@@ -109,7 +120,7 @@ def parse_years_experience_technology(text: str) -> str | None:
     names.
     """
     haystack = text or ""
-    match = (
+    match = _TECH_PRIMARILY_RE.search(haystack) or (
         _TECH_AFTER_EXPERIENCE_RE.search(haystack)
         or _TECH_BEFORE_EXPERIENCE_RE.search(haystack)
         or _TECH_EXPERIENCE_YEARS_RE.search(haystack)
