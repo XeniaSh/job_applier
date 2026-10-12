@@ -637,6 +637,29 @@ class GreenhouseAdapter:
     def resume_file_attached(self, page: Page, field: DiscoveredField) -> bool:
         return bool(_file_names(page, field))
 
+    def upload_cover_letter_file(self, page: Page, file_path: Path, field: DiscoveredField) -> bool:
+        """Uploads a generated cover-letter PDF to Greenhouse's required
+        Cover Letter *file* control -- distinct from, and never reusing, the
+        resume control's own input/verification. `_cover_letter_file_names`
+        only ever reads `field.element_id` (expected "cover_letter") and,
+        unlike `_file_names`, never falls back to the resume input's id.
+        """
+        try:
+            page.keyboard.press("Escape")
+        except PlaywrightError:
+            pass
+        path = str(file_path)
+        filename = file_path.name
+        try:
+            _set_cover_letter_file(page, field, path)
+        except PlaywrightError:
+            pass
+        if _cover_letter_file_attached(page, field, filename):
+            return True
+        if not page.url.startswith("file:"):
+            page.wait_for_timeout(1500)
+        return _cover_letter_file_attached(page, field, filename)
+
     def read_back(self, page: Page, field: DiscoveredField) -> str | None:
         if _is_cover_letter_field(field) or field.field_type == "cover_letter":
             editor = _cover_letter_editor(page, _cover_letter_container(page))
@@ -651,7 +674,10 @@ class GreenhouseAdapter:
                 if inner:
                     return inner
         if field.field_type == "file":
-            names = _file_names(page, field)
+            if _is_cover_letter_field(field):
+                names = _cover_letter_file_names(page, field)
+            else:
+                names = _file_names(page, field)
             return names[0] if names else None
         locator = _field_locator(page, field)
         if field.field_type == "checkbox":
@@ -762,15 +788,31 @@ def _discover_control(
         context = _combobox_field_help(locator)
     if _is_decoy_control(locator, label, name, element_id, field_type):
         return None
+    cover_letter_required_file = False
     if _is_cover_letter_label(label, name, element_id):
-        field_type = "cover_letter"
         if re.search(r"cover\s+letter", label, re.I) is None:
             label = "Cover Letter"
+        if field_type == "file" and _file_upload_group_required(locator):
+            # A required Greenhouse Cover Letter attachment (e.g. Adyen's
+            # posting) marks `aria-required="true"` on the wrapping
+            # `role="group"` file-upload container, never on the `<input
+            # type="file">` itself -- so the group, not just the input, is
+            # what must be consulted to notice it. Keeping `field_type`
+            # as "file" here (instead of the usual "cover_letter" override
+            # below) is what lets the service route this control through
+            # its dedicated generated-PDF file-upload path rather than the
+            # optional "Enter manually" text path, which this group's own
+            # required marker says is not an acceptable substitute.
+            cover_letter_required_file = True
+        else:
+            field_type = "cover_letter"
     options = []
     if field_type in {"select", "multiselect"}:
         options = _select_options(locator)
     required = _is_required(locator)
-    if field_type == "checkbox" and not required:
+    if cover_letter_required_file:
+        required = True
+    elif field_type == "checkbox" and not required:
         required = context_required
     elif not required and field_type in _ORDINARY_VISUAL_REQUIRED_TYPES:
         required = _has_ordinary_visual_required_marker(locator, label)
@@ -947,6 +989,25 @@ def _is_required(locator: Locator) -> bool:
         return True
     aria = (locator.get_attribute("aria-required") or "").lower()
     return aria == "true"
+
+
+_FILE_UPLOAD_GROUP_REQUIRED_JS = """el => {
+    const group = el.closest('[role="group"]');
+    if (!group) return false;
+    return (group.getAttribute('aria-required') || '').toLowerCase() === 'true';
+}"""
+
+
+def _file_upload_group_required(locator: Locator) -> bool:
+    """Greenhouse's file-upload widget (e.g. Cover Letter, Resume) marks
+    `aria-required` on the ancestor `role="group"` wrapper -- never on the
+    `<input type="file">` control itself -- so `_is_required` alone never
+    sees it. Scoped to the nearest such group only; never climbs past it.
+    """
+    try:
+        return bool(locator.evaluate(_FILE_UPLOAD_GROUP_REQUIRED_JS))
+    except PlaywrightError:
+        return False
 
 
 def _has_ordinary_visual_required_marker(locator: Locator, label: str) -> bool:
@@ -2355,6 +2416,51 @@ def _file_names(page: Page, field: DiscoveredField) -> list[str]:
                 const exact = document.querySelector(`input[type="file"][id="${id}"]`);
                 const fallback = document.querySelector('input[type="file"][id="resume"]');
                 const el = exact || fallback;
+                return el ? Array.from(el.files || []).map(file => file.name) : [];
+            }""",
+            element_id,
+        )
+    except PlaywrightError:
+        return []
+    if not isinstance(found, list):
+        return []
+    return [str(item) for item in found]
+
+
+def _set_cover_letter_file(page: Page, field: DiscoveredField, path: str) -> None:
+    locator = _cover_letter_file_locator(page, field)
+    if locator.count() == 0:
+        return
+    locator.set_input_files(path, timeout=5_000, no_wait_after=True)
+
+
+def _cover_letter_file_locator(page: Page, field: DiscoveredField) -> Locator:
+    element_id = field.element_id or "cover_letter"
+    return page.locator(f'input[type="file"][id="{element_id}"]')
+
+
+def _cover_letter_file_attached(page: Page, field: DiscoveredField, filename: str | None) -> bool:
+    # Never falls back to scanning the page's visible text for `filename`:
+    # an upload-rejection toast or error message can legitimately echo the
+    # attempted filename back without the file ever having attached, so only
+    # the cover-letter file control's own `.files` state -- read via
+    # `_cover_letter_file_names` -- counts as a real attachment.
+    names = _cover_letter_file_names(page, field)
+    if filename:
+        return filename in names
+    return bool(names)
+
+
+def _cover_letter_file_names(page: Page, field: DiscoveredField) -> list[str]:
+    # Unlike `_file_names` (which falls back to "#resume" for the resume
+    # control), this only ever reads the exact `field.element_id` (expected
+    # "cover_letter") -- it must never read back the resume input's files as
+    # a false confirmation of a cover-letter upload.
+    element_id = field.element_id or "cover_letter"
+    try:
+        found = page.evaluate(
+            """id => {
+                const el = document.querySelector(`input[type="file"][id="${id}"]`);
                 return el ? Array.from(el.files || []).map(file => file.name) : [];
             }""",
             element_id,

@@ -373,6 +373,27 @@ class AutofillService:
                     # the raw generated prose in `item.value`.
                     cover_letter_file_items.append(item)
                 else:
+                    if item.kind is QuestionKind.COVER_LETTER:
+                        # `item.fill` is False here only because generation
+                        # itself never produced text (never an upload
+                        # failure -- that is reported separately, below the
+                        # dedicated `cover_letter_file_items` loop). Without
+                        # this, a required Cover Letter *file* control with
+                        # no generated text would be left unresolved with no
+                        # warning at all explaining why.
+                        generation_error = getattr(self._cover_letter_provider, "last_error", None)
+                        if self._cover_letter_provider is None:
+                            warnings.append(
+                                "Cover letter file was not attached: generation was "
+                                "never invoked (no LLM provider)."
+                            )
+                        elif generation_error:
+                            warnings.append(f"Cover letter file was not attached: {generation_error}")
+                        else:
+                            warnings.append(
+                                f"Cover letter file was not attached for '{item.field.label}': "
+                                "generation returned no text."
+                            )
                     _append_unresolved(item, record, unresolved_required, unresolved_optional)
                 continue
             if (

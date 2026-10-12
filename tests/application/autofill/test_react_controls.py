@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -626,5 +627,182 @@ def test_cover_letter_react_clear_is_detected() -> None:
         editor = session.page.locator("#cover_letter_text")
         assert editor.is_visible()
         assert text not in (editor.input_value() or "")
+    finally:
+        session.close()
+
+
+REQUIRED_COVER_LETTER_FILE_FIXTURE = Path("tests/fixtures/autofill/greenhouse_cover_letter_required_file.html")
+
+
+def test_required_cover_letter_attachment_is_discovered_as_required_file_field() -> None:
+    """Adyen's posting (job-boards.greenhouse.io/adyen/jobs/7919170) marks
+    `aria-required="true"` on the Cover Letter file-upload group, never on
+    the `<input type="file">` itself. Discovery must keep `field_type`
+    "file" (not fold it into the generic "cover_letter" text-editor type)
+    and must read "required" off that ancestor group.
+    """
+    session = _open(REQUIRED_COVER_LETTER_FILE_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        fields = adapter.discover_fields(session.page)
+        cover = _field(fields, "cover letter")
+        assert cover.field_type == "file"
+        assert cover.required is True
+        assert cover.element_id == "cover_letter"
+        classified = classify_field(cover, _profile())
+        assert classified.kind is QuestionKind.COVER_LETTER
+    finally:
+        session.close()
+
+
+def test_required_cover_letter_file_upload_succeeds_and_reads_back(tmp_path: Path) -> None:
+    session = _open(REQUIRED_COVER_LETTER_FILE_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        cover = _field(adapter.discover_fields(session.page), "cover letter")
+        pdf_path = tmp_path / "cover_letter.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4 fake generated cover letter\n%%EOF")
+        assert adapter.upload_cover_letter_file(session.page, pdf_path, cover) is True
+        assert adapter.read_back(session.page, cover) == "cover_letter.pdf"
+        assert session.page.evaluate("window.__submitClicked") is False
+    finally:
+        session.close()
+
+
+class _RequiredCoverLetterFileResolver:
+    def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
+        url = REQUIRED_COVER_LETTER_FILE_FIXTURE.resolve().as_uri()
+        return ResolvedVacancy(
+            source=source,
+            external_id=external_id,
+            title="Backend Engineer",
+            company="Adyen",
+            url=url,
+            application_url=url,
+        )
+
+
+def test_service_uploads_generated_pdf_for_required_cover_letter_file() -> None:
+    session_holder: dict[str, BrowserSession] = {}
+
+    def factory() -> BrowserSession:
+        session = BrowserSession(headed=False, keep_open=True)
+        session_holder["session"] = session
+        return session
+
+    def wait() -> None:
+        assert session_holder["session"].page.evaluate("window.__submitClicked") is False
+
+    service = AutofillService(
+        resolver=_RequiredCoverLetterFileResolver(),
+        profile_loader=_profile,
+        browser_factory=factory,
+        wait_for_review=wait,
+        cover_letter_provider=_FakeCoverLetter(),
+    )
+    try:
+        result = service.run("target_company:greenhouse:adyen", "7919170", keep_open=True)
+        assert result.submit_performed is False
+        assert result.cover_letter_filled is True
+        assert not any("section was not found" in warning.lower() for warning in result.warnings)
+        unresolved = [item.label.lower() for item in result.unresolved_required_fields]
+        assert not any("cover letter" in label for label in unresolved)
+        filled = [item.label.lower() for item in result.filled_fields]
+        assert any("cover letter" in label for label in filled)
+        attached = session_holder["session"].page.evaluate(
+            "document.getElementById('cover_letter').files.length"
+        )
+        assert attached == 1
+    finally:
+        session_holder["session"].close()
+
+
+def test_service_leaves_required_cover_letter_file_unresolved_when_generation_fails() -> None:
+    session_holder: dict[str, BrowserSession] = {}
+
+    def factory() -> BrowserSession:
+        session = BrowserSession(headed=False, keep_open=True)
+        session_holder["session"] = session
+        return session
+
+    class _NoCoverLetter:
+        last_error = "generation returned no text"
+
+        def generate(self, vacancy: object, profile: CandidateProfile) -> str | None:
+            _ = vacancy, profile
+            return None
+
+    service = AutofillService(
+        resolver=_RequiredCoverLetterFileResolver(),
+        profile_loader=_profile,
+        browser_factory=factory,
+        wait_for_review=lambda: None,
+        cover_letter_provider=_NoCoverLetter(),
+    )
+    try:
+        result = service.run("target_company:greenhouse:adyen", "7919170", keep_open=True)
+        assert result.cover_letter_filled is False
+        unresolved = [item.label.lower() for item in result.unresolved_required_fields]
+        assert any("cover letter" in label for label in unresolved)
+        assert any("cover letter" in warning.lower() for warning in result.warnings)
+        attached = session_holder["session"].page.evaluate(
+            "document.getElementById('cover_letter').files.length"
+        )
+        assert attached == 0
+    finally:
+        session_holder["session"].close()
+
+
+REQUIRED_COVER_LETTER_FILE_WITH_RESUME_FIXTURE = Path(
+    "tests/fixtures/autofill/greenhouse_cover_letter_required_file_with_resume.html"
+)
+
+
+def test_required_cover_letter_readback_never_falls_back_to_resume_file() -> None:
+    """A Resume already attached on the same page must never surface as the
+    required Cover Letter file's own read-back, even for a Greenhouse
+    variant whose markup keeps this control's `element_id` from being
+    captured by discovery. `_file_names` (the resume control's own reader)
+    falls back to `#resume` when given no id; `read_back` must route a
+    cover-letter file field through `_cover_letter_file_names` instead,
+    which only ever defaults to `#cover_letter` and never `#resume`.
+    """
+    session = _open(REQUIRED_COVER_LETTER_FILE_WITH_RESUME_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        fields = adapter.discover_fields(session.page)
+        resume_field = _field(fields, "resume")
+        cover_field = _field(fields, "cover letter")
+        resume_path = Path("tests/fixtures/autofill/resume.txt")
+        assert adapter.upload_resume(session.page, resume_path, resume_field) is True
+
+        unidentified_cover_field = replace(cover_field, element_id=None)
+        assert adapter.read_back(session.page, unidentified_cover_field) is None
+        uploaded = adapter.upload_cover_letter_file(
+            session.page, Path("/nonexistent-dir/cover_letter.pdf"), unidentified_cover_field
+        )
+        assert uploaded is False
+    finally:
+        session.close()
+
+
+def test_cover_letter_attachment_check_ignores_body_text_without_real_file() -> None:
+    """An upload-rejection toast that echoes back the attempted filename
+    (e.g. "cover_letter.pdf could not be uploaded") must never be read as a
+    successful attachment -- only the cover-letter file control's own
+    `.files` state counts. Attempting the upload with a path that cannot be
+    read (so the control's input never actually receives a file) must leave
+    the control reporting no attachment despite the toast text matching.
+    """
+    session = _open(REQUIRED_COVER_LETTER_FILE_WITH_RESUME_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        cover_field = _field(adapter.discover_fields(session.page), "cover letter")
+        assert session.page.get_by_text("cover_letter.pdf could not be uploaded").count() > 0
+        uploaded = adapter.upload_cover_letter_file(
+            session.page, Path("/nonexistent-dir/cover_letter.pdf"), cover_field
+        )
+        assert uploaded is False
+        assert adapter.read_back(session.page, cover_field) is None
     finally:
         session.close()

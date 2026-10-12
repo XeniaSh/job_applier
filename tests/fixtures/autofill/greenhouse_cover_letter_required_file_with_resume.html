@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Greenhouse required Cover Letter attachment alongside an attached Resume (Adyen-shaped)</title>
+  <style>.visually-hidden { position: absolute; width: 1px; height: 1px; opacity: 0.01; }</style>
+</head>
+<body>
+  <form id="application_form" data-ats="greenhouse">
+    <div class="file-upload">
+      <label for="resume">Resume<span class="required">*</span></label>
+      <input id="resume" class="visually-hidden" type="file" accept=".pdf,.doc,.docx,.txt,.rtf">
+    </div>
+    <div role="group" aria-labelledby="upload-label-cover_letter" aria-required="true" class="file-upload">
+      <div id="upload-label-cover_letter" class="label upload-label">Cover Letter<span class="required">*</span></div>
+      <button type="button" data-testid="cover_letter-dropzone">Drop files here</button>
+      <input id="cover_letter" class="visually-hidden" type="file" accept=".pdf,.doc,.docx,.txt,.rtf">
+      <button type="button" data-testid="cover_letter-text">Enter manually</button>
+    </div>
+    <div class="toast-error" role="alert">cover_letter.pdf could not be uploaded. Please try again.</div>
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+  <script>
+    window.__submitClicked = false;
+    document.getElementById("submit_app").addEventListener("click", function () {
+      window.__submitClicked = true;
+    });
+  </script>
+</body>
+</html>
