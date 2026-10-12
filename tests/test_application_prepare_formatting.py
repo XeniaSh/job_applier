@@ -11,6 +11,7 @@ from app.application.autofill.models import AutofillFailureReason, AutofillStatu
 from app.application.autofill.review_session import ReviewSessionCloseOutcome
 from app.telegram.application_prepare import (
     FAILED_TEXT,
+    RESIDENCE_COUNTRY_UNCONFIRMED_TEXT,
     format_application_prepare_failed_text,
     format_application_prepare_completed_text,
     format_review_done_response_text,
@@ -128,6 +129,34 @@ def test_ready_for_review_unresolved_field_summary_is_preserved() -> None:
     assert "Unresolved required fields: 1" in text
     assert "Manual review needed." in text
     assert "Submit was not performed." in text
+
+
+def test_residence_country_unconfirmed_warning_adds_prominent_line() -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:agoda",
+        external_id="1",
+        status=AutofillStatus.NEEDS_MANUAL_INTERVENTION,
+        warnings=[
+            "Residence country selection for 'Country of residence' was not "
+            "confirmed: any visible selection must be checked and corrected "
+            "manually."
+        ],
+    )
+    text = format_application_prepare_completed_text(result)
+    assert RESIDENCE_COUNTRY_UNCONFIRMED_TEXT in text
+    assert "Country of residence" not in text
+    assert "Brazil" not in text
+
+
+def test_without_residence_country_warning_no_extra_line_is_added() -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:agoda",
+        external_id="1",
+        status=AutofillStatus.READY_FOR_REVIEW,
+        warnings=["Read-back failed for 'Some other field'."],
+    )
+    text = format_application_prepare_completed_text(result)
+    assert RESIDENCE_COUNTRY_UNCONFIRMED_TEXT not in text
 
 
 def test_review_done_response_text_for_each_outcome() -> None:

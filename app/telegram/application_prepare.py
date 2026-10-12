@@ -34,6 +34,15 @@ _CHALLENGE_LABELS: dict[str, str] = {
     "login": "a login/authentication prompt",
 }
 
+_RESIDENCE_COUNTRY_UNCONFIRMED_PREFIX = "Residence country selection for '"
+_RESIDENCE_COUNTRY_UNCONFIRMED_SUFFIX = (
+    "was not confirmed: any visible selection must be checked and corrected manually."
+)
+RESIDENCE_COUNTRY_UNCONFIRMED_TEXT = (
+    "The residence country selection could not be confirmed: check and correct it "
+    "manually before using Submit."
+)
+
 _FAILURE_REASON_TEXT: dict[AutofillFailureReason, str] = {
     AutofillFailureReason.UNSUPPORTED_FORM: (
         "Preparation failed: automatic filling is not supported for this "
@@ -90,8 +99,18 @@ def format_application_prepare_completed_text(result: AutofillResult) -> str:
         lines.append("Manual review needed.")
     if result.status is AutofillStatus.NEEDS_MANUAL_INTERVENTION:
         lines.append(f"Reason: {_challenge_label(result.warnings)} was detected in the browser.")
+    if _has_residence_country_unconfirmed_warning(result.warnings):
+        lines.append(RESIDENCE_COUNTRY_UNCONFIRMED_TEXT)
     lines.append("Submit was not performed.")
     return "\n".join(lines)
+
+
+def _has_residence_country_unconfirmed_warning(warnings: list[str]) -> bool:
+    return any(
+        warning.startswith(_RESIDENCE_COUNTRY_UNCONFIRMED_PREFIX)
+        and warning.endswith(_RESIDENCE_COUNTRY_UNCONFIRMED_SUFFIX)
+        for warning in warnings
+    )
 
 
 def _challenge_label(warnings: list[str]) -> str:
