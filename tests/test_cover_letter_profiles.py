@@ -18,7 +18,7 @@ BASE_LETTER = (
 )
 
 NZ_BLOCK_SNIPPET = "Although I currently live outside New Zealand, I am actively seeking relocation opportunities."
-NZ_TRAVEL_SNIPPET = "can travel to New Zealand for in-person interviews or meetings if helpful"
+NZ_TRAVEL_SNIPPET = "I would be happy to meet in person during that visit if helpful"
 
 
 @pytest.mark.parametrize(
@@ -92,3 +92,14 @@ def test_relocation_block_file_exists() -> None:
     content = path.read_text(encoding="utf-8")
     assert NZ_BLOCK_SNIPPET in content
     assert NZ_TRAVEL_SNIPPET in content
+
+
+def test_relocation_block_states_supplied_facts_without_fabricated_visa_claim() -> None:
+    path = Path("profiles/cover_letter_relocation_new_zealand.md")
+    content = path.read_text(encoding="utf-8")
+    assert "visit to New Zealand in 2026" in content
+    assert "do not yet have a confirmed arrival date" in content
+    assert "employer-supported work visa" in content
+    # The profile has no current NZ visa/residence fact and no confirmed arrival date.
+    assert "valid" not in content.lower()
+    assert "mid-December" not in content

@@ -11,9 +11,24 @@ from app.application.autofill.questions import (
 )
 from app.application.autofill.resolver import ResolvedVacancy
 from app.application.candidate_profile import CandidateProfile
+from app.cover_letter_profiles import resolve_cover_letter_profile
 from app.prompt_loader import PromptLoadError, load_application_answer_prompt
 
 _MAX_SENTENCES = 3
+
+# Bounded, question-scoped facts for a New Zealand vacancy's own free-text
+# questions (e.g. "What draws you to working in New Zealand?"). Only used
+# when the question itself names New Zealand -- never appended to unrelated
+# questions just because the vacancy happens to be in New Zealand -- and
+# never claims current New Zealand residence, work authorization, or a
+# specific arrival date, none of which are supplied facts.
+_NEW_ZEALAND_RELOCATION_FACTS = (
+    "Does not currently live in New Zealand and has no current New Zealand work visa; "
+    "would need an employer-supported work visa to take up a role there.",
+    "Is planning a visit to New Zealand in 2026 (no confirmed arrival date yet) and is "
+    "willing to meet in person during that visit.",
+    "Is open to relocating to New Zealand for the right opportunity.",
+)
 
 
 class ApplicationAnswerLLM(Protocol):
@@ -88,6 +103,9 @@ class ApplicationAnswerGenerator:
         candidate = professional_context_from_profile(profile)
         if markdown_profile and markdown_profile.strip():
             candidate = f"{candidate}\n\n{markdown_profile.strip()}"
+        nz_facts = _new_zealand_facts_for_question(field, vacancy)
+        if nz_facts:
+            candidate = f"{candidate}\n\n{nz_facts}"
         try:
             raw_answer, confident = self._llm_client.create_short_application_answer(
                 prompt=prompt,
@@ -113,6 +131,26 @@ class ApplicationAnswerGenerator:
                 return ", ".join(selected) if selected else None
             return match_option(answer, field.options)
         return answer
+
+
+def _new_zealand_facts_for_question(field: DiscoveredField, vacancy: ResolvedVacancy | None) -> str | None:
+    """Bounded New Zealand relocation facts, only for a question that itself
+    names New Zealand (e.g. "What draws you to working in New Zealand?").
+
+    Scoped to the field's own label so these facts are never repeated into
+    unrelated free-text answers just because a neighboring question in the
+    same group (`field.context`) or the vacancy happens to mention New
+    Zealand.
+    """
+    if vacancy is None:
+        return None
+    if "new zealand" not in field.label.lower():
+        return None
+    location = vacancy.vacancy.location if vacancy.vacancy is not None else None
+    letter_profile = resolve_cover_letter_profile(location=location, vacancy_text=vacancy_context(vacancy))
+    if letter_profile.name != "relocation" or "New Zealand" not in letter_profile.label:
+        return None
+    return "\n".join(_NEW_ZEALAND_RELOCATION_FACTS)
 
 
 def _limit_sentences(text: str, max_sentences: int = _MAX_SENTENCES) -> str:

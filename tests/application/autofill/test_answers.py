@@ -3,7 +3,9 @@ from __future__ import annotations
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.answers import ApplicationAnswerGenerator
 from app.application.autofill.questions import QuestionKind, is_llm_eligible_question, map_question
+from app.application.autofill.resolver import ResolvedVacancy
 from app.application.candidate_profile import CandidateProfile
+from app.collectors.vacancy_collector import NormalizedVacancy
 
 
 def _profile() -> CandidateProfile:
@@ -171,3 +173,113 @@ def test_unconfident_llm_answer_is_discarded() -> None:
     generator = ApplicationAnswerGenerator(llm)
     field = DiscoveredField(label="Why do you want to work here?", field_type="textarea")
     assert generator.generate(field, _profile()) is None
+
+
+def _nz_vacancy() -> ResolvedVacancy:
+    return ResolvedVacancy(
+        source="target_company:greenhouse:acme",
+        external_id="1",
+        title="Backend Engineer",
+        company="Acme",
+        url="https://example.test/jobs/1",
+        application_url="https://example.test/jobs/1",
+        vacancy=NormalizedVacancy(
+            source="target_company:greenhouse:acme",
+            external_id="1",
+            title="Backend Engineer",
+            company="Acme",
+            location="Auckland, New Zealand",
+            employment=None,
+            description="",
+            url="https://example.test/jobs/1",
+            published_at=None,
+        ),
+    )
+
+
+def _non_nz_vacancy() -> ResolvedVacancy:
+    return ResolvedVacancy(
+        source="target_company:greenhouse:acme",
+        external_id="2",
+        title="Backend Engineer",
+        company="Acme",
+        url="https://example.test/jobs/2",
+        application_url="https://example.test/jobs/2",
+        vacancy=NormalizedVacancy(
+            source="target_company:greenhouse:acme",
+            external_id="2",
+            title="Backend Engineer",
+            company="Acme",
+            location="Berlin, Germany",
+            employment=None,
+            description="",
+            url="https://example.test/jobs/2",
+            published_at=None,
+        ),
+    )
+
+
+def test_nz_relevant_free_text_question_gets_relocation_facts() -> None:
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(
+        label="What draws you to working in New Zealand?",
+        field_type="textarea",
+    )
+    generator.generate(field, _profile(), _nz_vacancy())
+    assert llm.calls
+    candidate_profile = str(llm.calls[0]["candidate_profile"])
+    assert "planning a visit to New Zealand in 2026" in candidate_profile
+    assert "no confirmed arrival date" in candidate_profile
+    assert "willing to meet in person" in candidate_profile
+    assert "employer-supported work visa" in candidate_profile
+    # Never claims current NZ residence/authorization or a specific date.
+    assert "mid-December" not in candidate_profile
+    assert "valid" not in candidate_profile.lower()
+
+
+def test_nz_unrelated_free_text_question_does_not_get_relocation_facts() -> None:
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Why do you want to work here?", field_type="textarea")
+    generator.generate(field, _profile(), _nz_vacancy())
+    assert llm.calls
+    candidate_profile = str(llm.calls[0]["candidate_profile"])
+    assert "New Zealand" not in candidate_profile
+    assert "employer-supported work visa" not in candidate_profile
+
+
+def test_non_nz_vacancy_free_text_question_mentioning_new_zealand_does_not_get_facts() -> None:
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(
+        label="Please describe what draws you to working in New Zealand.",
+        field_type="textarea",
+    )
+    generator.generate(field, _profile(), _non_nz_vacancy())
+    assert llm.calls
+    candidate_profile = str(llm.calls[0]["candidate_profile"])
+    assert "employer-supported work visa" not in candidate_profile
+
+
+def test_nz_vacancy_visa_sponsorship_question_still_excluded_from_llm() -> None:
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Will you require visa sponsorship?")
+    assert generator.generate(field, _profile(), _nz_vacancy()) is None
+    assert llm.calls == []
+
+
+def test_unrelated_label_with_new_zealand_in_context_does_not_get_facts() -> None:
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(
+        label="Why do you want to work here?",
+        field_type="textarea",
+        context="What draws you to working in New Zealand?",
+    )
+    generator.generate(field, _profile(), _nz_vacancy())
+    assert llm.calls
+    candidate_profile = str(llm.calls[0]["candidate_profile"])
+    assert "New Zealand" not in candidate_profile
+    assert "employer-supported work visa" not in candidate_profile
