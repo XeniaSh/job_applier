@@ -461,6 +461,36 @@ _TECH_AREAS: dict[str, tuple[str, ...]] = {
     "redis": ("redis",),
 }
 
+# Global education safeguard: generated prose must never mention an academic
+# credential, regardless of whether the vacancy asks about education or the
+# profile happens to contain a matching-looking field of study -- inferring a
+# degree claim from interests/experience/markdown is exactly what caused a
+# non-IT master's to be voiced as an implied CS credential. Education is only
+# ever surfaced through the deterministic ATS dropdown mapping (questions.py).
+# Scoped to credential/attendance claims (degree types, "graduated from",
+# "studied at ... university") so a university named as an employer (e.g.
+# "the University of Auckland") in truthful work history is not blocked.
+_EDUCATION_MENTION_RE = re.compile(
+    r"\b(?:master'?s?|bachelor'?s?|ph\.?d|doctorate|doctoral|diploma|undergraduate|postgraduate)\b"
+    r"|\b(?:academic|university)\s+degree\b"
+    r"|\bdegree\s+in\b"
+    r"|\b(?:holds?|earned|awarded|has|have)\s+an?\s+degree\b"
+    r"|\b(?:studied|study|enrolled|enrolment|enrollment|attended)\b[^.]{0,60}\buniversity\b"
+    r"|\bgraduation\b"
+    r"|\bgraduated\s+from\b"
+    r"|\bgraduate\s+(?:degree|school)\b",
+    re.IGNORECASE,
+)
+
+
+def contains_unsupported_education_claim(text: str) -> bool:
+    """True when `text` mentions a degree, academic level, or formal education.
+
+    Generated prose fails closed on any such mention: it is never backed by a
+    verified degree subject, so it must not be voiced at all.
+    """
+    return bool(_EDUCATION_MENTION_RE.search(text))
+
 
 def _validate_cover_letter(
     *,
@@ -499,6 +529,10 @@ def _validate_cover_letter(
     for term in _FORBIDDEN_LEVEL_TERMS:
         if re.search(rf"\b{re.escape(term)}\b", lower):
             raise CoverLetterValidationError(f"Forbidden seniority/title term detected: {term}")
+    if contains_unsupported_education_claim(letter):
+        raise CoverLetterValidationError(
+            "Education/degree mentions are not allowed in generated cover letters."
+        )
 
     # Around-seven-years wording must exist explicitly.
     if (

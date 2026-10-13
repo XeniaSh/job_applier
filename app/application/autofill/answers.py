@@ -12,6 +12,7 @@ from app.application.autofill.questions import (
 from app.application.autofill.resolver import ResolvedVacancy
 from app.application.candidate_profile import CandidateProfile
 from app.cover_letter_profiles import resolve_cover_letter_profile
+from app.llm_client import contains_unsupported_education_claim
 from app.prompt_loader import PromptLoadError, load_application_answer_prompt
 
 _MAX_SENTENCES = 3
@@ -44,14 +45,19 @@ class ApplicationAnswerLLM(Protocol):
 
 
 def professional_context_from_profile(profile: CandidateProfile) -> str:
-    """Compact professional facts without email/phone."""
+    """Compact professional facts without email/phone.
+
+    Deliberately excludes academic level: it is only used for the
+    deterministic ATS dropdown mapping (see questions.py) and must never be
+    volunteered into LLM prose, which fails closed on any education mention
+    via `app.llm_client.contains_unsupported_education_claim`.
+    """
     employment = profile.employment
     lines = [
         f"Name: {profile.identity.first_name} {profile.identity.last_name}",
         f"Current title: {employment.current_title or ''}".rstrip(),
         _years_line(profile),
         f"Location: {profile.identity.current_location or ''}".rstrip(),
-        f"Highest awarded academic level: {profile.awarded_academic_level() or ''}".rstrip(),
         f"Tech stack: {', '.join(employment.professional_tech_stack)}".rstrip(),
         f"Preferred fields of interest: {', '.join(employment.preferred_fields_of_interest)}".rstrip(),
     ]
@@ -120,6 +126,8 @@ class ApplicationAnswerGenerator:
             return None
         answer = _limit_sentences(raw_answer)
         if not answer:
+            return None
+        if contains_unsupported_education_claim(answer):
             return None
         if field.field_type in {"select", "radio", "combobox", "multiselect"} and field.options:
             if mapped.kind is QuestionKind.TECH_STACK or field.field_type == "multiselect":

@@ -16,6 +16,8 @@ Hard rules:
 - Never output "6 years", "six years", exact dates, or overly precise durations.
 - Never invent Redis or any unconfirmed skill.
 - Never claim Senior/Lead/Principal/Staff/Architect for the candidate.
+- Never mention academic degrees, academic level, or formal education/attendance (e.g. master's, bachelor's, PhD, diploma, graduation, studying at a university), even if the vacancy text asks about education/qualifications. A university or college may still be named as an employer in genuine work history. Always rely on professional experience instead.
+- Prioritize concrete professional experience (years of experience, core technologies) over education.
 - You may refer to the vacancy title as written (for example: "this Senior Java Developer role") without claiming that title yourself.
 - If only the job title is known, reference only that title. Do not invent responsibilities, stack requirements, or company details.
 - Mention normally only 1-2 highly relevant core technologies (for example Java and Kotlin, or Java and Spring Boot).
@@ -71,6 +73,7 @@ Final self-check before output:
 5) Every claim is supported by candidate_profile.md.
 6) Role fit sentence refers to the vacancy title when known, without inventing duties.
 7) Text sounds like a real engineer wrote it.
+8) No academic degree/education/graduation/university-attendance mention, even if the vacancy asks about it (naming a university as an employer in genuine work history is fine).
 
 Return JSON only:
 {

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.answers import ApplicationAnswerGenerator
+from app.application.autofill.answers import ApplicationAnswerGenerator, professional_context_from_profile
 from app.application.autofill.questions import QuestionKind, is_llm_eligible_question, map_question
 from app.application.autofill.resolver import ResolvedVacancy
 from app.application.candidate_profile import CandidateProfile
@@ -173,6 +173,46 @@ def test_unconfident_llm_answer_is_discarded() -> None:
     generator = ApplicationAnswerGenerator(llm)
     field = DiscoveredField(label="Why do you want to work here?", field_type="textarea")
     assert generator.generate(field, _profile()) is None
+
+
+def test_professional_context_never_volunteers_academic_level() -> None:
+    profile = _profile()
+    profile.employment.highest_academic_level = "Master's"
+    text = professional_context_from_profile(profile).lower()
+    assert "academic" not in text
+    assert "master" not in text
+    assert "7 years" in text or "seven years" in text
+
+
+def test_irrelevant_masters_mention_is_rejected_for_free_text_answer() -> None:
+    llm = _RecordingLLM(answer="I also hold a master's degree, which helped me grow professionally.")
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Why do you want to work here?", field_type="textarea")
+    assert generator.generate(field, _profile()) is None
+
+
+def test_degree_mention_rejected_when_question_asks_about_qualifications() -> None:
+    llm = _RecordingLLM(answer="I hold a bachelor's degree relevant to this role.")
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Tell us about your qualifications for this role", field_type="textarea")
+    assert generator.generate(field, _profile()) is None
+
+
+def test_degree_mention_rejected_even_when_preferred_fields_of_interest_names_a_matching_degree() -> None:
+    llm = _RecordingLLM(answer="I have a master's degree in Computer Science.")
+    generator = ApplicationAnswerGenerator(llm)
+    profile = _profile()
+    profile.employment.preferred_fields_of_interest = ["Bachelor's degree in Computer Science"]
+    field = DiscoveredField(label="Tell us about your qualifications for this role", field_type="textarea")
+    assert generator.generate(field, profile) is None
+
+
+def test_experience_wording_is_not_blocked_by_education_guard() -> None:
+    llm = _RecordingLLM(answer="I bring around seven years of Java and Kotlin backend experience.")
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Why do you want to work here?", field_type="textarea")
+    answer = generator.generate(field, _profile())
+    assert answer == "I bring around seven years of Java and Kotlin backend experience."
 
 
 def _nz_vacancy() -> ResolvedVacancy:

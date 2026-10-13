@@ -13,6 +13,7 @@ from app.llm_client import (
     _apply_soft_cover_letter_cleanup,
     _count_complete_sentences,
     _validate_cover_letter,
+    contains_unsupported_education_claim,
 )
 from app.models import (
     CoverLetterResult,
@@ -1056,3 +1057,103 @@ def test_soft_cleanup_removes_opportunity_and_leak_sentences() -> None:
     assert "how my experience" not in cleaned.lower()
     assert "this opportunity aligns" not in cleaned.lower()
     assert 3 <= _count_complete_sentences(cleaned) <= 5
+
+
+def test_validate_rejects_irrelevant_masters_mention() -> None:
+    result = CoverLetterResult(
+        language="en",
+        cover_letter=(
+            "I am a Java Backend Engineer with around seven years of experience with Java and Kotlin. "
+            "I also hold a master's degree. "
+            "My background is relevant to this Java Backend Engineer role."
+        ),
+        used_resume="java-backend",
+    )
+    with pytest.raises(CoverLetterValidationError, match="Education/degree mention"):
+        _validate_cover_letter(
+            result=result,
+            vacancy_text="Title: Java Backend Engineer",
+            candidate_profile="Java Backend Engineer with around seven years of experience in Java and Kotlin.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+            recommended_resume="java-backend",
+        )
+
+
+def test_validate_rejects_degree_mention_even_when_vacancy_asks_and_profile_has_matching_field() -> None:
+    result = CoverLetterResult(
+        language="en",
+        cover_letter=(
+            "I am a Java Backend Engineer with around seven years of experience with Java and Kotlin. "
+            "I hold a bachelor's degree in computer science. "
+            "My background is relevant to this Java Backend Engineer role."
+        ),
+        used_resume="java-backend",
+    )
+    with pytest.raises(CoverLetterValidationError, match="Education/degree mention"):
+        _validate_cover_letter(
+            result=result,
+            vacancy_text="Title: Java Backend Engineer. Requires a bachelor's degree.",
+            candidate_profile=(
+                "Java Backend Engineer with around seven years of experience in Java and Kotlin. "
+                "Bachelor's degree in Computer Science."
+            ),
+            preferred_language="en",
+            grammatical_gender="neutral",
+            recommended_resume="java-backend",
+        )
+
+
+def test_contains_unsupported_education_claim_true_for_any_degree_mention() -> None:
+    assert contains_unsupported_education_claim("I have a master's degree.")
+
+
+def test_contains_unsupported_education_claim_false_without_degree_mention() -> None:
+    assert not contains_unsupported_education_claim(
+        "I have around seven years of Java and Kotlin backend experience."
+    )
+
+
+def test_contains_unsupported_education_claim_ignores_idiomatic_degree_usage() -> None:
+    assert not contains_unsupported_education_claim(
+        "My experience matches this role to some degree, mostly through Java and Kotlin work."
+    )
+
+
+def test_contains_unsupported_education_claim_true_even_with_matching_it_subject() -> None:
+    assert contains_unsupported_education_claim("I hold a master's degree in computer science.")
+
+
+def test_contains_unsupported_education_claim_true_for_university_mention() -> None:
+    assert contains_unsupported_education_claim("I studied at the University of Auckland.")
+
+
+def test_contains_unsupported_education_claim_true_for_graduation_mention() -> None:
+    assert contains_unsupported_education_claim("My graduation was in 2015.")
+    assert contains_unsupported_education_claim("I graduated from a top engineering school in 2015.")
+
+
+def test_contains_unsupported_education_claim_does_not_overmatch_ordinary_work_words() -> None:
+    assert not contains_unsupported_education_claim(
+        "I led a graduated rollout of the payments service across universal endpoints."
+    )
+
+
+def test_contains_unsupported_education_claim_allows_university_named_as_employer() -> None:
+    assert not contains_unsupported_education_claim(
+        "I worked on services for the University of Auckland."
+    )
+
+
+def test_contains_unsupported_education_claim_true_for_graduated_from_university_employer() -> None:
+    assert contains_unsupported_education_claim("I graduated from the University of Auckland.")
+
+
+def test_contains_unsupported_education_claim_true_for_generic_degree_claim() -> None:
+    assert contains_unsupported_education_claim("I have a degree.")
+
+
+def test_contains_unsupported_education_claim_ignores_to_some_degree_idiom() -> None:
+    assert not contains_unsupported_education_claim(
+        "My experience matches this role to some degree."
+    )
