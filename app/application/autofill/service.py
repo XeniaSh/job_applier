@@ -317,6 +317,12 @@ class AutofillService:
             for item in classified
         )
 
+        sibling_kinds = frozenset(item.kind for item in classified)
+        sibling_has_dedicated_new_zealand_question = any(
+            item.kind in _NZ_FREE_TEXT_KINDS and "new zealand" in item.field.label.lower()
+            for item in classified
+        )
+
         for field_index, item in enumerate(classified):
             if is_lever:
                 logger.warning(
