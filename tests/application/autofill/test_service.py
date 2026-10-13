@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from app.application.autofill.answers import ApplicationAnswerGenerator
 from app.application.autofill.ashby import AshbyAdapter
 from app.application.autofill.browser import BrowserNavigationError, BrowserSetupError
 from app.application.autofill.fields import DiscoveredField
@@ -2286,3 +2287,205 @@ def test_sanctions_followup_never_fills_when_primary_click_readback_fails() -> N
         "fill_field must never be attempted for the follow-up when the primary's "
         "click/read-back never confirmed a checked state"
     )
+
+
+class _RecordingAnswerGenerator:
+    """Stands in for `ApplicationAnswerGenerator`, recording the sibling
+    context `_enrich_unresolved` threads through for each field so the test
+    can assert it reflects the other fields actually discovered on the form.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate(
+        self,
+        field: DiscoveredField,
+        profile: object,
+        vacancy: object = None,
+        *,
+        markdown_profile: str | None = None,
+        sibling_kinds: frozenset[QuestionKind] = frozenset(),
+        sibling_has_dedicated_new_zealand_question: bool = False,
+    ) -> str | None:
+        self.calls.append(
+            {
+                "label": field.label,
+                "sibling_kinds": sibling_kinds,
+                "sibling_has_dedicated_new_zealand_question": sibling_has_dedicated_new_zealand_question,
+            }
+        )
+        return "Generated answer."
+
+
+def test_enrich_unresolved_threads_sibling_context_from_the_wider_form() -> None:
+    """A professional_free_text catch-all sitting alongside a dedicated
+    relocation question must see that sibling's kind, and alongside a
+    dedicated New Zealand free-text question must see that too --
+    `_enrich_unresolved` is the seam the service loop uses to pass this
+    through.
+    """
+    catchall = classify_field(
+        DiscoveredField(label="Anything else you want to share?", field_type="textarea"),
+        _profile(),
+    )
+    vacancy = ResolvedVacancy(
+        source="target_company:ashby:halter",
+        external_id="8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce",
+        title="Backend Engineer",
+        company="Halter",
+        url="https://jobs.ashbyhq.com/halter/8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce",
+        application_url="https://jobs.ashbyhq.com/halter/8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce",
+        vacancy=NormalizedVacancy(
+            source="target_company:ashby:halter",
+            external_id="8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce",
+            title="Backend Engineer",
+            company="Halter",
+            location="Auckland, New Zealand",
+            employment=None,
+            description="",
+            url="https://jobs.ashbyhq.com/halter/8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce",
+            published_at=None,
+        ),
+    )
+    answer_generator = _RecordingAnswerGenerator()
+    _enrich_unresolved(
+        catchall,
+        profile=_profile(),
+        vacancy=vacancy,
+        cover_letter_text=None,
+        answer_generator=answer_generator,
+        sibling_kinds=frozenset({QuestionKind.RELOCATION}),
+        sibling_has_dedicated_new_zealand_question=True,
+    )
+    assert answer_generator.calls == [
+        {
+            "label": "Anything else you want to share?",
+            "sibling_kinds": frozenset({QuestionKind.RELOCATION}),
+            "sibling_has_dedicated_new_zealand_question": True,
+        }
+    ]
+
+
+class _HalterLikeAdapter:
+    """Approximates the free-text fields observed on the Halter Ashby
+    posting (8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce, Auckland): a `why_company`
+    textarea, a generic catch-all `professional_free_text` textarea
+    ("Anything else you want to share?"), and a Cover Letter file control --
+    with no dedicated relocation or visa_sponsorship question on the form.
+    Also includes a work-authorization question that happens to name New
+    Zealand, to prove that an unrelated sibling naming New Zealand never
+    globally suppresses the catch-all's facts.
+
+    Records the actual value handed to `fill_field` (and echoes it back from
+    `read_back`) so tests can assert on what would really be typed into the
+    form, not just the LLM prompt.
+    """
+
+    def __init__(self) -> None:
+        self.filled_values: dict[str, object] = {}
+
+    def detect_challenge(self, page: object) -> str | None:
+        _ = page
+        return None
+
+    def recognize(self, page: object) -> bool:
+        _ = page
+        return True
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(label="Why do you want to work here?", field_type="textarea"),
+            DiscoveredField(label="Anything else you want to share?", field_type="textarea"),
+            DiscoveredField(
+                label="Are you legally authorized to work in New Zealand?",
+                field_type="radio",
+                options=["Yes", "No"],
+            ),
+            DiscoveredField(label="Cover Letter", field_type="file"),
+        ]
+
+    def fill_field(self, page: object, classified: object) -> bool:
+        _ = page
+        if not getattr(classified, "fill", False):
+            return False
+        self.filled_values[classified.field.label] = classified.value
+        return True
+
+    def upload_resume(self, page: object, resume_path: object, field: object) -> bool:
+        _ = page, resume_path, field
+        return False
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page
+        value = self.filled_values.get(field.label)
+        return str(value) if value is not None else None
+
+
+class _NzResolver:
+    def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
+        return ResolvedVacancy(
+            source=source,
+            external_id=external_id,
+            title="Backend Engineer",
+            company="Halter",
+            url="https://jobs.ashbyhq.com/halter/8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce",
+            application_url="https://jobs.ashbyhq.com/halter/8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce",
+            vacancy=NormalizedVacancy(
+                source=source,
+                external_id=external_id,
+                title="Backend Engineer",
+                company="Halter",
+                location="Auckland, New Zealand",
+                employment=None,
+                description="",
+                url="https://jobs.ashbyhq.com/halter/8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce",
+                published_at=None,
+            ),
+        )
+
+
+class _RecordingAnswerLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def create_short_application_answer(self, **kwargs: object) -> tuple[str, bool]:
+        self.calls.append(kwargs)
+        return "Short generated answer.", True
+
+
+def test_service_ashby_halter_like_field_set_puts_nz_facts_only_in_catchall_free_text() -> None:
+    """Regression for the Halter posting: the generic catch-all
+    `professional_free_text` field should volunteer the bounded NZ
+    relocation facts since nothing else on the form covers them, while the
+    unrelated `why_company` field must not -- and an unrelated sibling that
+    merely names New Zealand (the work-authorization question) must not
+    suppress them either. Asserts the actual value that would be typed into
+    the form (what `fill_field` received and `read_back` confirmed), not
+    just the LLM prompt -- a prompt-only injection never guarantees the
+    LLM's final answer actually includes the facts.
+    """
+    llm = _RecordingAnswerLLM()
+    adapter = _HalterLikeAdapter()
+    service = AutofillService(
+        resolver=_NzResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: _FakeSession(),
+        wait_for_review=lambda: None,
+        answer_generator=ApplicationAnswerGenerator(llm),
+    )
+    result = service.run("target_company:ashby:halter", "8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+
+    why_company_value = str(adapter.filled_values["Why do you want to work here?"])
+    catchall_value = str(adapter.filled_values["Anything else you want to share?"])
+
+    assert "New Zealand" not in why_company_value
+    assert "New Zealand" in catchall_value
+    assert "meet in person" in catchall_value
+    assert "employer-supported work visa" in catchall_value
+    assert "open to relocating" in catchall_value.lower()
+    # The catch-all answer is built deterministically, never from the LLM.
+    assert not any(call.get("question") == "Anything else you want to share?" for call in llm.calls)

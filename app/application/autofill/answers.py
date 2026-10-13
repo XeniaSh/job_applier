@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Protocol
+import re
 
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.options import match_option, select_listed_options
@@ -29,6 +30,27 @@ _NEW_ZEALAND_RELOCATION_FACTS = (
     "Is planning a visit to New Zealand in 2026 (no confirmed arrival date yet) and is "
     "willing to meet in person during that visit.",
     "Is open to relocating to New Zealand for the right opportunity.",
+)
+
+# A true catch-all prompt ("Anything else you'd like to share/add/know/
+# mention?"), not every `professional_free_text` textarea -- a question
+# like "Briefly describe your technical background" must never match.
+_CATCH_ALL_LABEL_RE = re.compile(
+    r"anything else.{0,40}(share|add|know|mention|tell us)",
+    re.IGNORECASE,
+)
+
+_VISA_SENTENCE = (
+    "I don't currently live in New Zealand and would need an employer-supported work "
+    "visa to take up a role there."
+)
+_RELOCATION_AND_VISIT_SENTENCE = (
+    "I'm open to relocating to New Zealand for the right opportunity and am planning a "
+    "visit in 2026 (no confirmed arrival date yet), when I'd be happy to meet in person."
+)
+_VISIT_ONLY_SENTENCE = (
+    "I'm planning a visit to New Zealand in 2026 (no confirmed arrival date yet), when "
+    "I'd be happy to meet in person."
 )
 
 
@@ -98,10 +120,22 @@ class ApplicationAnswerGenerator:
         vacancy: ResolvedVacancy | None = None,
         *,
         markdown_profile: str | None = None,
+        sibling_kinds: frozenset[QuestionKind] = frozenset(),
+        sibling_has_dedicated_new_zealand_question: bool = False,
     ) -> str | None:
         mapped = map_question(field, profile)
         if not is_llm_eligible_question(field, mapped):
             return None
+        catchall_answer = _new_zealand_catchall_answer(
+            field,
+            profile,
+            vacancy,
+            kind=mapped.kind,
+            sibling_kinds=sibling_kinds,
+            sibling_has_dedicated_new_zealand_question=sibling_has_dedicated_new_zealand_question,
+        )
+        if catchall_answer is not None:
+            return catchall_answer
         try:
             prompt = load_application_answer_prompt()
         except PromptLoadError:
@@ -159,6 +193,90 @@ def _new_zealand_facts_for_question(field: DiscoveredField, vacancy: ResolvedVac
     if letter_profile.name != "relocation" or "New Zealand" not in letter_profile.label:
         return None
     return "\n".join(_NEW_ZEALAND_RELOCATION_FACTS)
+
+
+_REMOTE_RE = re.compile(r"\bremote\b", re.IGNORECASE)
+_ONSITE_OR_HYBRID_RE = re.compile(r"\b(hybrid|on-?site|in[- ]office)\b", re.IGNORECASE)
+
+
+def _is_remote_only_vacancy(vacancy: ResolvedVacancy) -> bool:
+    """True when the vacancy's own location/employment fields say "remote"
+    with no hybrid/on-site marker -- e.g. "Remote - New Zealand" -- so a
+    user whose relocation scope is on-site/hybrid NZ is not assumed to be
+    relocating or visiting in person for a role that never requires it.
+    """
+    normalized = vacancy.vacancy
+    if normalized is None:
+        return False
+    haystack = " ".join(filter(None, [normalized.location, normalized.employment]))
+    return bool(_REMOTE_RE.search(haystack)) and not _ONSITE_OR_HYBRID_RE.search(haystack)
+
+
+def _is_nz_relocation_vacancy(vacancy: ResolvedVacancy | None) -> bool:
+    if vacancy is None:
+        return False
+    if _is_remote_only_vacancy(vacancy):
+        return False
+    location = vacancy.vacancy.location if vacancy.vacancy is not None else None
+    letter_profile = resolve_cover_letter_profile(location=location, vacancy_text=vacancy_context(vacancy))
+    return letter_profile.name == "relocation" and "New Zealand" in letter_profile.label
+
+
+def _experience_sentence(profile: CandidateProfile) -> str | None:
+    """A first-person sentence stating explicit profile facts only -- never
+    an LLM guess -- so it is safe to use verbatim as applicant form prose.
+    """
+    years = profile.relevant_experience_years()
+    stack = list(profile.employment.professional_tech_stack)
+    if years is None or not stack:
+        return None
+    if abs(years - 7) < 0.51:
+        years_text = "roughly seven years"
+    else:
+        rendered = str(int(years)) if years == int(years) else str(years)
+        years_text = f"{rendered} years"
+    tech_text = stack[0] if len(stack) == 1 else ", ".join(stack[:-1]) + f" and {stack[-1]}"
+    return f"I bring {years_text} of backend engineering experience; my professional stack includes {tech_text}."
+
+
+def _new_zealand_catchall_answer(
+    field: DiscoveredField,
+    profile: CandidateProfile,
+    vacancy: ResolvedVacancy | None,
+    *,
+    kind: QuestionKind,
+    sibling_kinds: frozenset[QuestionKind],
+    sibling_has_dedicated_new_zealand_question: bool,
+) -> str | None:
+    """A deterministic, first-person answer for a true catch-all free-text
+    question (e.g. "Anything else you'd like to share?") on a New Zealand
+    vacancy, used only when no other question on the form already covers
+    the same ground.
+
+    Built entirely from explicit profile facts and the fixed sentence
+    constants below -- never from LLM output -- so it can never echo an
+    unsafe claim (e.g. an LLM inventing "I already have a New Zealand work
+    visa") about residence, visa, or relocation status.
+    """
+    if kind is not QuestionKind.PROFESSIONAL_FREE_TEXT or vacancy is None:
+        return None
+    if "new zealand" in field.label.lower() or not _CATCH_ALL_LABEL_RE.search(field.label):
+        return None
+    if sibling_has_dedicated_new_zealand_question:
+        return None
+    if not _is_nz_relocation_vacancy(vacancy):
+        return None
+    sentences: list[str] = []
+    experience = _experience_sentence(profile)
+    if experience:
+        sentences.append(experience)
+    if QuestionKind.VISA_SPONSORSHIP not in sibling_kinds:
+        sentences.append(_VISA_SENTENCE)
+    if QuestionKind.RELOCATION in sibling_kinds:
+        sentences.append(_VISIT_ONLY_SENTENCE)
+    else:
+        sentences.append(_RELOCATION_AND_VISIT_SENTENCE)
+    return " ".join(sentences[:_MAX_SENTENCES])
 
 
 def _limit_sentences(text: str, max_sentences: int = _MAX_SENTENCES) -> str:

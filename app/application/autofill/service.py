@@ -57,6 +57,12 @@ _UNSUPPORTED_FORM_ERRORS: tuple[type[Exception], ...] = (
     AshbyFormError,
 )
 
+# Sibling kinds eligible to carry the full New Zealand relocation fact set
+# via their own label (see `answers._new_zealand_facts_for_question`) -- used
+# to detect a dedicated sibling question that already covers the same
+# ground, never just any field whose label happens to mention New Zealand.
+_NZ_FREE_TEXT_KINDS = frozenset({QuestionKind.WHY_COMPANY, QuestionKind.PROFESSIONAL_FREE_TEXT})
+
 
 class AutofillAdapter(Protocol):
     """The DOM surface `AutofillService` drives. No adapter exposes a submit method."""
@@ -305,6 +311,12 @@ class AutofillService:
 
         resume_items: list[ClassifiedField] = []
 
+        sibling_kinds = frozenset(item.kind for item in classified)
+        sibling_has_dedicated_new_zealand_question = any(
+            item.kind in _NZ_FREE_TEXT_KINDS and "new zealand" in item.field.label.lower()
+            for item in classified
+        )
+
         for field_index, item in enumerate(classified):
             if is_lever:
                 logger.warning(
@@ -321,6 +333,8 @@ class AutofillService:
                 vacancy=vacancy,
                 cover_letter_text=cover_letter_text,
                 answer_generator=self._answer_generator,
+                sibling_kinds=sibling_kinds,
+                sibling_has_dedicated_new_zealand_question=sibling_has_dedicated_new_zealand_question,
             )
             if is_lever:
                 logger.warning(
@@ -668,6 +682,8 @@ def _enrich_unresolved(
     vacancy: ResolvedVacancy,
     cover_letter_text: str | None,
     answer_generator: ApplicationAnswerGenerator | None,
+    sibling_kinds: frozenset[QuestionKind] = frozenset(),
+    sibling_has_dedicated_new_zealand_question: bool = False,
 ) -> ClassifiedField:
     if item.fill:
         return item
@@ -695,7 +711,13 @@ def _enrich_unresolved(
         return item
     if answer_generator is None:
         return item
-    answer = answer_generator.generate(item.field, profile, vacancy)
+    answer = answer_generator.generate(
+        item.field,
+        profile,
+        vacancy,
+        sibling_kinds=sibling_kinds,
+        sibling_has_dedicated_new_zealand_question=sibling_has_dedicated_new_zealand_question,
+    )
     if not answer:
         return item
     value: str | list[str] = answer

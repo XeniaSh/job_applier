@@ -323,3 +323,181 @@ def test_unrelated_label_with_new_zealand_in_context_does_not_get_facts() -> Non
     candidate_profile = str(llm.calls[0]["candidate_profile"])
     assert "New Zealand" not in candidate_profile
     assert "employer-supported work visa" not in candidate_profile
+
+
+# Halter (Ashby posting 8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce, Auckland) shows a
+# `why_company` textarea, a generic catch-all `professional_free_text`
+# textarea ("Anything else you want to share?"), and a separate cover letter
+# file control. The catch-all is the only one of those that should carry the
+# bounded relocation facts, built deterministically (never from the LLM, so
+# an LLM-invented claim about visa/residence/relocation can never reach the
+# form) unless another field already covers the same ground.
+
+
+def test_nz_catchall_free_text_answer_is_deterministic_first_person_and_ignores_llm() -> None:
+    """The catch-all answer never goes through the LLM at all, so an LLM
+    returning an unsafe claim (falsely claiming current NZ work
+    authorization) can never influence -- let alone appear in -- the final
+    answer actually typed into the form.
+    """
+    llm = _RecordingLLM(answer="I already have a New Zealand work visa and have moved there.")
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Anything else you want to share?", field_type="textarea")
+    answer = generator.generate(field, _profile(), _nz_vacancy())
+    assert answer is not None
+    assert llm.calls == []
+    assert "already have" not in answer
+    assert "moved there" not in answer
+    assert answer.startswith("I ")
+    assert "roughly seven years of backend engineering experience" in answer
+    assert "my professional stack includes Java and Kotlin" in answer
+    assert "don't currently live in New Zealand" in answer
+    assert "open to relocating" in answer.lower()
+    assert "meet in person" in answer
+    assert len([s for s in answer.split(". ") if s]) <= 3
+    # Never claims current NZ residence/authorization or a specific date.
+    assert "mid-December" not in answer
+    assert "valid" not in answer.lower()
+
+
+def test_nz_catchall_experience_sentence_never_implies_per_technology_years() -> None:
+    """years_of_experience is a total-career figure, not a per-technology one.
+    Wording it as "seven years of Python backend experience" would falsely
+    claim seven years specifically in Python, so the years claim and the
+    tech stack must stay in separate clauses.
+    """
+    llm = _RecordingLLM(answer="irrelevant -- catch-all bypasses the LLM")
+    generator = ApplicationAnswerGenerator(llm)
+    profile = _profile()
+    profile.employment.professional_tech_stack = ["Python", "Kotlin"]
+    field = DiscoveredField(label="Anything else you want to share?", field_type="textarea")
+    answer = generator.generate(field, profile, _nz_vacancy())
+    assert answer is not None
+    assert "seven years of Python" not in answer
+    assert "roughly seven years of backend engineering experience" in answer
+    assert "my professional stack includes Python and Kotlin" in answer
+
+
+def test_nz_why_company_field_still_requires_explicit_new_zealand_label() -> None:
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Why do you want to work here?", field_type="textarea")
+    generator.generate(field, _profile(), _nz_vacancy())
+    assert llm.calls
+    candidate_profile = str(llm.calls[0]["candidate_profile"])
+    assert "New Zealand" not in candidate_profile
+
+
+def test_nz_generic_professional_free_text_question_is_not_treated_as_catchall() -> None:
+    """Only a true catch-all prompt ("Anything else...") volunteers the
+    facts -- an unrelated `professional_free_text` question such as a
+    technical-background prompt must never get them, even on an NZ vacancy.
+    """
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Briefly describe your technical background", field_type="textarea")
+    mapped = map_question(field, _profile())
+    assert mapped.kind is QuestionKind.PROFESSIONAL_FREE_TEXT
+    answer = generator.generate(field, _profile(), _nz_vacancy())
+    assert answer is not None
+    assert "New Zealand" not in answer
+    assert "employer-supported work visa" not in answer
+
+
+def test_nz_catchall_free_text_skips_facts_when_sibling_why_company_names_new_zealand() -> None:
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Anything else you want to share?", field_type="textarea")
+    answer = generator.generate(
+        field,
+        _profile(),
+        _nz_vacancy(),
+        sibling_has_dedicated_new_zealand_question=True,
+    )
+    assert answer is not None
+    assert "New Zealand" not in answer
+    assert "employer-supported work visa" not in answer
+
+
+def test_nz_catchall_free_text_sibling_relocation_question_suppresses_only_the_relocation_fact() -> None:
+    """A dedicated sibling `relocation` question already states willingness
+    to relocate, so the catch-all must not repeat it -- but the visit/
+    in-person fact, which no sibling asks about, must still come through.
+    """
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Anything else you want to share?", field_type="textarea")
+    answer = generator.generate(
+        field,
+        _profile(),
+        _nz_vacancy(),
+        sibling_kinds=frozenset({QuestionKind.RELOCATION}),
+    )
+    assert answer is not None
+    assert "open to relocating" not in answer.lower()
+    assert "meet in person" in answer
+    assert "employer-supported work visa" in answer
+
+
+def test_nz_catchall_free_text_sibling_visa_question_suppresses_only_the_visa_fact() -> None:
+    """A dedicated sibling `visa_sponsorship` question already covers the
+    work-visa topic, so the catch-all must not repeat it -- but the visit/
+    in-person fact, which no sibling asks about, must still come through.
+    """
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Anything else you want to share?", field_type="textarea")
+    answer = generator.generate(
+        field,
+        _profile(),
+        _nz_vacancy(),
+        sibling_kinds=frozenset({QuestionKind.VISA_SPONSORSHIP}),
+    )
+    assert answer is not None
+    assert "employer-supported work visa" not in answer
+    assert "meet in person" in answer
+    assert "open to relocating" in answer.lower()
+
+
+def test_remote_nz_vacancy_catchall_free_text_question_does_not_get_relocation_facts() -> None:
+    """A remote-only NZ vacancy never requires relocating or visiting in
+    person, so the deterministic catch-all must not fire -- the question
+    falls through to the normal LLM path instead.
+    """
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Anything else you want to share?", field_type="textarea")
+    remote_nz_vacancy = ResolvedVacancy(
+        source="target_company:greenhouse:acme",
+        external_id="3",
+        title="Backend Engineer",
+        company="Acme",
+        url="https://example.test/jobs/3",
+        application_url="https://example.test/jobs/3",
+        vacancy=NormalizedVacancy(
+            source="target_company:greenhouse:acme",
+            external_id="3",
+            title="Backend Engineer",
+            company="Acme",
+            location="Remote - New Zealand",
+            employment=None,
+            description="",
+            url="https://example.test/jobs/3",
+            published_at=None,
+        ),
+    )
+    answer = generator.generate(field, _profile(), remote_nz_vacancy)
+    assert llm.calls
+    assert answer is not None
+    assert "employer-supported work visa" not in answer
+    assert "open to relocating" not in answer.lower()
+
+
+def test_non_nz_vacancy_catchall_free_text_question_does_not_get_facts() -> None:
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Anything else you want to share?", field_type="textarea")
+    answer = generator.generate(field, _profile(), _non_nz_vacancy())
+    assert answer is not None
+    assert "New Zealand" not in answer
+    assert "employer-supported work visa" not in answer
