@@ -984,3 +984,47 @@ companies:
     notes:
       - Verified public Ashby job board (slug halter) via the read-only postings API on 2026-10-08; 257 open postings, 82 in New Zealand, and the standard 8-keyword title filter passed 5 of the NZ postings.
       - Observed Auckland roles list an OnSite workplace. Remote policy is not confirmed company-wide beyond these roles; check per role. Relocation/visa sponsorship is not confirmed company-wide; check per role.
+
+  - name: PayPay
+    priority: A
+    category: fintech_payments
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [relocation, visa_sponsorship]
+    relocation_status: confirmed_role_based
+    known_hiring_locations: ["Tokyo, Japan"]
+    remote: limited
+    java_backend_relevance: very_high
+    role_keywords: [backend, java, kotlin, spring boot, kafka, payments]
+    role_title_keywords: [backend, back-end, java, kotlin]
+    ats: greenhouse
+    watcher_type: greenhouse
+    career_url: https://job-boards.greenhouse.io/paypay
+    job_board_url: https://job-boards.greenhouse.io/paypay
+    notes:
+      - Verified public Greenhouse job board (slug paypay) via the read-only postings API on 2026-10-14; 85 raw postings, 6 pass the standard 8-keyword title filter, 0 errors.
+      - Three current Backend Engineer postings use canonical job-boards.greenhouse.io/paypay/jobs/<id> apply URLs and name Java/Kotlin, Spring Boot, and Kafka, plus explicit VISA sponsorship and relocation support.
+      - "A conservative company-specific role_title_keywords [backend, back-end, java, kotlin] is used instead of the standard 8-keyword list: the remaining three standard-filter passes are less-direct Cloud Platform Engineer titles, and this list retains the three backend roles without broadening to them."
+
+  - name: Everbridge
+    priority: A
+    category: critical_event_management_saas
+    language: english
+    russian_speaking_signal: false
+    hiring_modes: [remote_region_limited]
+    relocation_status: mixed_check_per_role
+    known_hiring_locations: ["Auckland, New Zealand", India]
+    remote: region_limited
+    java_backend_relevance: medium
+    role_keywords: [backend, java, platform, distributed systems]
+    role_title_keywords: [backend, back-end, java, software engineer]
+    exclude_title_keywords: [french, full stack]
+    ats: lever
+    watcher_type: lever
+    career_url: https://jobs.lever.co/everbridge
+    job_board_url: https://jobs.lever.co/everbridge
+    notes:
+      - Verified public Lever job board (slug everbridge) via the read-only postings API on 2026-10-14; 28 raw postings, 5 pass the standard 8-keyword title filter, 0 errors.
+      - Current Auckland Senior Software Engineer posting (id 0e7dd2e6-aeea-426c-b46c-f1293da08bd0) names Java in the stack; two India Senior Software Engineer Backend & AI-Enabled postings are also current. These three postings are labeled remote within their listed locations.
+      - Sponsorship/relocation is NOT confirmed company-wide; relocation_status is mixed_check_per_role and eligibility must be checked per role.
+      - exclude_title_keywords excludes a French-speaking platform role and a full-stack role, in addition to the standard title filter, to keep the conservative backend/Java focus.

@@ -175,6 +175,29 @@ def test_binance_lever_board_is_declared_with_conservative_filters() -> None:
     assert binance.exclude_title_keywords == ["accelerator", "qa"]
 
 
+def test_paypay_greenhouse_board_is_declared_with_conservative_filters() -> None:
+    config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
+
+    paypay = next(company for company in config.companies if company.name == "PayPay")
+    assert paypay.watcher_type == "greenhouse"
+    assert paypay.ats == "greenhouse"
+    assert paypay.job_board_url == "https://job-boards.greenhouse.io/paypay"
+    assert paypay.role_title_keywords == ["backend", "back-end", "java", "kotlin"]
+    assert paypay.relocation_status == "confirmed_role_based"
+
+
+def test_everbridge_lever_board_is_declared_with_conservative_filters() -> None:
+    config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
+
+    everbridge = next(company for company in config.companies if company.name == "Everbridge")
+    assert everbridge.watcher_type == "lever"
+    assert everbridge.ats == "lever"
+    assert everbridge.job_board_url == "https://jobs.lever.co/everbridge"
+    assert everbridge.role_title_keywords == ["backend", "back-end", "java", "software engineer"]
+    assert everbridge.exclude_title_keywords == ["french", "full stack"]
+    assert everbridge.relocation_status == "mixed_check_per_role"
+
+
 def test_missing_file_raises_clear_error(tmp_path: Path) -> None:
     missing_file = tmp_path / "missing.yaml"
 
