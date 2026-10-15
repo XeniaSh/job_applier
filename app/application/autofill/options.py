@@ -107,6 +107,11 @@ _GENERIC_YEARS_EXPERIENCE_PHRASES = {
     "work",
     "hands on",
     "hands-on",
+    # Degenerate capture: `_TECH_BEFORE_EXPERIENCE_RE`'s own optional
+    # "(?:\s+of)?" can backtrack into *not* consuming "of" and instead let the
+    # mandatory capture group match it alone (e.g. "years of Experience" with
+    # no other word in between) -- "of" is never a technology name.
+    "of",
 }
 
 
@@ -493,6 +498,71 @@ def match_option_exact_normalized(wanted: str, options: list[str]) -> str | None
             continue
         if _normalize_exact_label(option) == needle:
             return option.strip()
+    return None
+
+
+_NOTICE_PERIOD_UNIT_DAYS = {"day": 1.0, "week": 7.0, "month": 30.0}
+_NOTICE_PERIOD_UNIT_RE = re.compile(r"\b(day|week|month)s?\b", re.IGNORECASE)
+
+
+def _notice_period_amount_unit(text: str) -> tuple[float, str] | None:
+    """The leading number and its unit (defaulting to "day" when the text
+    names no unit of its own). Returns None when `text` has no leading number.
+    """
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    unit_match = _NOTICE_PERIOD_UNIT_RE.search(text)
+    unit = unit_match.group(1).lower() if unit_match else "day"
+    return float(match.group(1)), unit
+
+
+def match_notice_period_option(wanted: str, options: list[str]) -> str | None:
+    """Match an explicit notice-period fact (e.g. "30 days") to a visible
+    option.
+
+    Only two cases resolve: the fact is an exact normalized match for an
+    option (e.g. "30 days" == "30 Days"), or it is a semantic day-equivalent
+    match that falls inside exactly one option's numeric range (e.g. "15
+    days" inside "0-30 Days" when no other option's range also covers it).
+    A value that sits on a boundary shared by two adjacent ranges (e.g. "30
+    days" against both "0-30 Days" and "30-60 Days") is ambiguous -- the
+    explicit period could belong to either -- and a value that matches zero
+    or more than one range is likewise never guessed. Both stay unresolved
+    rather than picking a nearest-looking option.
+    """
+    labels = [item.strip() for item in options if item and item.strip()]
+    if not labels:
+        return None
+    exact = match_option_exact_normalized(wanted, labels)
+    if exact is not None:
+        return exact
+    wanted_parsed = _notice_period_amount_unit(wanted)
+    if wanted_parsed is None:
+        return None
+    wanted_amount, wanted_unit = wanted_parsed
+    wanted_days = wanted_amount * _NOTICE_PERIOD_UNIT_DAYS[wanted_unit]
+    matches: list[str] = []
+    for option in labels:
+        range_match = _RANGE_RE.search(option)
+        if not range_match:
+            continue
+        unit_match = _NOTICE_PERIOD_UNIT_RE.search(option)
+        unit = unit_match.group(1).lower() if unit_match else "day"
+        if "month" in (wanted_unit, unit) and wanted_unit != unit:
+            # A month has no single exact day-count (28-31) -- converting
+            # across units with "month" on either side would invent a
+            # specific day figure the fact/option text never actually
+            # stated. "day" <-> "week" conversion stays exact (a week is
+            # always 7 days) and is unaffected.
+            continue
+        unit_days = _NOTICE_PERIOD_UNIT_DAYS[unit]
+        low = float(range_match.group(1)) * unit_days
+        high = float(range_match.group(2)) * unit_days
+        if low <= wanted_days <= high:
+            matches.append(option)
+    if len(matches) == 1:
+        return matches[0]
     return None
 
 

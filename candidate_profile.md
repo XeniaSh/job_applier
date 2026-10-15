@@ -99,6 +99,8 @@ Commercial or practical experience:
 - relational databases
 - database query analysis and optimization
 - production incident investigation
+- production releases / deployments
+- OpenShift
 - backend integrations
 - architecture discussions
 - MongoDB
@@ -121,6 +123,27 @@ The candidate actively uses AI-assisted development tools for:
 Always state that generated results are reviewed and verified.
 
 Do not convert this into claims of commercial AI product development.
+
+No specific AI coding/engineering tool brand name (assistant, IDE plugin, etc.) is
+confirmed here. Never name one as something the candidate regularly uses; leave that
+specific question unanswered/manual instead.
+
+Verification process for AI-assisted or AI-generated code before merging or deploying,
+for application questions that ask about this:
+- read the full diff before accepting any change;
+- run the relevant focused tests, not only a full suite;
+- run linters (e.g. Ruff) and fix any findings;
+- run regression tests for the affected area;
+- for browser/ATS automation specifically, a human reviews the proposed changes before
+  treating a run as final (a supervised application-preparation review step).
+
+Concrete example of meaningful AI use in software engineering, for application questions
+that ask for one: this very automation project ("Job Applier") uses an OpenRouter-based
+LLM integration to analyze and score job vacancies, combined with deterministic
+filtering and application-preparation automation (including this candidate-profile-
+driven autofill). Describe it as a personal automation project the candidate works on,
+verified through the process above, never as a commercially shipped AI product and
+never with an inflated personal-authorship claim beyond "worked on".
 
 ## Never claim
 

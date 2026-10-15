@@ -48,6 +48,7 @@ from app.application.autofill.submit import (
 from app.application.candidate_profile import CandidateProfile, countries_mentioned, normalize_country_name
 from app.application.candidate_profile_loader import CandidateProfileLoadError, load_structured_candidate_profile
 from app.cover_letter_documents import generate_cover_letter_artifacts
+from app.profile_loader import ProfileLoadError, load_candidate_profile_context
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +76,11 @@ class AutofillAdapter(Protocol):
     def read_back(self, page: object, field: object) -> str | None: ...
 
     # `upload_cover_letter_file` is a further optional hook, like
-    # `prepare_page`/`adjust_classified_field`/`observe_final_fill_plan`
-    # below -- not every adapter defines it (currently only `AshbyAdapter`
-    # does), so it is deliberately left out of this Protocol and always
-    # resolved via `getattr(adapter, "upload_cover_letter_file", None)`.
+    # `prepare_page`/`adjust_classified_field`/`observe_final_fill_plan`/
+    # `reconcile_discovered_fields` below -- not every adapter defines it
+    # (currently only `AshbyAdapter` does), so it is deliberately left out
+    # of this Protocol and always resolved via
+    # `getattr(adapter, "upload_cover_letter_file", None)`.
 
 
 def default_adapter_for_source(source: str) -> AutofillAdapter:
@@ -265,6 +267,12 @@ class AutofillService:
 
         is_lever = isinstance(adapter, LeverAdapter)
         discovered = adapter.discover_fields(page)
+        reconcile_discovered_fields = getattr(adapter, "reconcile_discovered_fields", None)
+        prefill_reconciliation_warnings = (
+            reconcile_discovered_fields(page, profile=profile, fields=discovered)
+            if reconcile_discovered_fields is not None
+            else []
+        )
         classify_start = time.monotonic()
         classified = [classify_field(item, profile) for item in discovered]
         if is_lever:
@@ -285,6 +293,7 @@ class AutofillService:
         cover_letter_text = _maybe_cover_letter(
             self._cover_letter_provider, classified, vacancy, profile, adapter=adapter
         )
+        markdown_profile = _load_markdown_profile() if self._answer_generator is not None else ""
         if cover_letter_text:
             logger.info(
                 "Cover letter text is available (%s characters); attempting Enter manually.",
@@ -304,12 +313,13 @@ class AutofillService:
         sensitive: list[AutofillFieldResult] = []
         unsupported: list[AutofillFieldResult] = []
         generated: list[AutofillFieldResult] = []
-        warnings: list[str] = []
+        warnings: list[str] = list(prefill_reconciliation_warnings)
         resume_uploaded = False
         cover_letter_filled = False
         sanctions_none_of_above_confirmed = False
 
         resume_items: list[ClassifiedField] = []
+        observe_final_fill_plan = getattr(adapter, "observe_final_fill_plan", None)
 
         sibling_kinds = frozenset(item.kind for item in classified)
         sibling_has_dedicated_new_zealand_question = any(
@@ -339,9 +349,12 @@ class AutofillService:
                 vacancy=vacancy,
                 cover_letter_text=cover_letter_text,
                 answer_generator=self._answer_generator,
+                markdown_profile=markdown_profile,
                 sibling_kinds=sibling_kinds,
                 sibling_has_dedicated_new_zealand_question=sibling_has_dedicated_new_zealand_question,
             )
+            if observe_final_fill_plan is not None:
+                observe_final_fill_plan(item)
             if is_lever:
                 logger.warning(
                     "lever_prepare stage=field_enrich_end field_index=%d kind=%s elapsed_ms=%d",
@@ -641,6 +654,22 @@ def _upload_cover_letter_file(
         return False
 
 
+def _load_markdown_profile() -> str:
+    """The narrative `candidate_profile.md`, the same richer factual context
+    already used for cover-letter generation (see
+    `AutofillCoverLetterProvider.generate`) -- reused here so free-text
+    application-answer generation sees the same explicit facts (confirmed
+    tech stack detail, AI-assisted-development practice, explicit "never
+    claim" boundaries) rather than only the compact structured profile.
+    """
+    try:
+        return load_candidate_profile_context().text
+    except ProfileLoadError:
+        return ""
+    except OSError:
+        return ""
+
+
 def _maybe_cover_letter(
     provider: CoverLetterTextProvider | None,
     classified: list[ClassifiedField],
@@ -688,6 +717,7 @@ def _enrich_unresolved(
     vacancy: ResolvedVacancy,
     cover_letter_text: str | None,
     answer_generator: ApplicationAnswerGenerator | None,
+    markdown_profile: str = "",
     sibling_kinds: frozenset[QuestionKind] = frozenset(),
     sibling_has_dedicated_new_zealand_question: bool = False,
 ) -> ClassifiedField:
@@ -721,6 +751,7 @@ def _enrich_unresolved(
         item.field,
         profile,
         vacancy,
+        markdown_profile=markdown_profile,
         sibling_kinds=sibling_kinds,
         sibling_has_dedicated_new_zealand_question=sibling_has_dedicated_new_zealand_question,
     )

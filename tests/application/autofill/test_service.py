@@ -2311,6 +2311,7 @@ class _RecordingAnswerGenerator:
         self.calls.append(
             {
                 "label": field.label,
+                "markdown_profile": markdown_profile,
                 "sibling_kinds": sibling_kinds,
                 "sibling_has_dedicated_new_zealand_question": sibling_has_dedicated_new_zealand_question,
             }
@@ -2361,10 +2362,35 @@ def test_enrich_unresolved_threads_sibling_context_from_the_wider_form() -> None
     assert answer_generator.calls == [
         {
             "label": "Anything else you want to share?",
+            "markdown_profile": "",
             "sibling_kinds": frozenset({QuestionKind.RELOCATION}),
             "sibling_has_dedicated_new_zealand_question": True,
         }
     ]
+
+
+def test_enrich_unresolved_threads_markdown_profile_narrative_context() -> None:
+    """`_enrich_unresolved` must forward the narrative `candidate_profile.md`
+    text it receives straight through to `answer_generator.generate` -- this
+    is the seam `AutofillService.run` uses (via `_load_markdown_profile`) to
+    give free-text answer generation the same richer factual context
+    cover-letter generation already has.
+    """
+    catchall = classify_field(
+        DiscoveredField(label="Briefly describe your backend experience.", field_type="textarea"),
+        _profile(),
+    )
+    answer_generator = _RecordingAnswerGenerator()
+    _enrich_unresolved(
+        catchall,
+        profile=_profile(),
+        vacancy=None,
+        cover_letter_text=None,
+        answer_generator=answer_generator,
+        markdown_profile="NARRATIVE_MARKER_TEXT",
+    )
+    assert answer_generator.calls
+    assert answer_generator.calls[0]["markdown_profile"] == "NARRATIVE_MARKER_TEXT"
 
 
 class _HalterLikeAdapter:
@@ -2489,3 +2515,46 @@ def test_service_ashby_halter_like_field_set_puts_nz_facts_only_in_catchall_free
     assert "open to relocating" in catchall_value.lower()
     # The catch-all answer is built deterministically, never from the LLM.
     assert not any(call.get("question") == "Anything else you want to share?" for call in llm.calls)
+
+
+def test_service_run_threads_narrative_markdown_profile_into_llm_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: `AutofillService.run` must load the narrative
+    `candidate_profile.md` text and have it actually reach the LLM's
+    `candidate_profile` argument for a generated free-text answer -- not
+    just the compact `professional_context_from_profile` summary.
+    """
+    marker = "NARRATIVE_MARKER: confirmed OpenShift and production incident investigation experience."
+    monkeypatch.setattr(
+        "app.application.autofill.service.load_candidate_profile_context",
+        lambda: type("Ctx", (), {"text": marker})(),
+    )
+    llm = _RecordingAnswerLLM()
+    adapter = _HalterLikeAdapter()
+    service = AutofillService(
+        resolver=_NzResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: _FakeSession(),
+        wait_for_review=lambda: None,
+        answer_generator=ApplicationAnswerGenerator(llm),
+    )
+    result = service.run("target_company:ashby:halter", "8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce", keep_open=False)
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    why_company_call = next(call for call in llm.calls if call.get("question") == "Why do you want to work here?")
+    assert marker in str(why_company_call["candidate_profile"])
+
+
+def test_load_markdown_profile_returns_empty_string_on_profile_load_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing/empty `candidate_profile.md` must never break answer
+    generation -- `_load_markdown_profile` fails closed to an empty string
+    rather than raising, so answers fall back to the compact structured
+    profile only.
+    """
+    from app.application.autofill.service import _load_markdown_profile
+    from app.profile_loader import ProfileLoadError
+
+    def _raise() -> None:
+        raise ProfileLoadError("missing")
+
+    monkeypatch.setattr("app.application.autofill.service.load_candidate_profile_context", _raise)
+    assert _load_markdown_profile() == ""

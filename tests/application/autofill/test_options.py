@@ -7,6 +7,7 @@ from app.application.autofill.options import (
     match_affirmative_option,
     match_application_source,
     match_gender_option,
+    match_notice_period_option,
     match_option,
     match_option_exact_normalized,
     match_prefer_not_to_disclose_gender,
@@ -331,3 +332,30 @@ def test_match_sponsorship_option_does_not_pick_unrelated_hsm() -> None:
     )
     assert match_sponsorship_option(False, options, referenced_country="uzbekistan") == "No"
     assert match_sponsorship_option(True, ["Yes", "No"], referenced_country=None) == "Yes"
+
+
+def test_match_notice_period_option_does_not_guess_month_as_thirty_days() -> None:
+    """A month has no single exact day-count (28-31) -- converting "1 month"
+    into a guessed 30-day value to match it against day-denominated options
+    would invent a figure the fact never actually stated. This must stay
+    unresolved even though a naive day-equivalence conversion would land
+    unambiguously inside a single day-based range.
+    """
+    options = ["0-30 Days", "30-60 Days", "60-90 days"]
+    assert match_notice_period_option("1 month", options) is None
+
+
+def test_match_notice_period_option_still_converts_exact_week_to_day_units() -> None:
+    """Day <-> week conversion stays exact (a week is always 7 days) and
+    must be unaffected by the month cross-unit restriction above.
+    """
+    options = ["0-30 Days", "30-60 Days", "60-90 days"]
+    assert match_notice_period_option("2 weeks", options) == "0-30 Days"
+
+
+def test_match_notice_period_option_matches_same_unit_month_ranges() -> None:
+    """Same-unit comparison (month fact against month-denominated options)
+    is not a cross-unit conversion and must still resolve normally.
+    """
+    options = ["0-2 months", "2-4 months"]
+    assert match_notice_period_option("1 month", options) == "0-2 months"

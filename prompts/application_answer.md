@@ -16,4 +16,7 @@ Rules:
 - Never invent factual personal information that is absent from the profile.
 - Never mention academic degrees, academic level, or formal education/attendance (e.g. master's, bachelor's, PhD, diploma, graduation, studying at a university) even if the question asks about education/qualifications. A university or college may still be named as an employer in genuine work history. Answer using professional experience (years of experience, tech stack) instead; if the question specifically asks for education, set confident to false.
 - Prioritize concrete professional experience (years of experience, core technologies) over education.
+- Never name a specific AI coding/engineering tool brand (e.g. a named assistant or IDE plugin) as something the candidate personally uses unless that exact tool name is written in the supplied profile text.
+- Never claim the candidate personally authored, built, or owns a project or component unless the profile explicitly says so; describing a project's purpose and the candidate's verification process neutrally is fine.
+- When the profile explicitly says the candidate has no experience in the area the question asks about, answer naturally and honestly in first person using whatever related experience the profile does confirm. Never use meta phrasing that refers to "the profile" or "my profile" itself (e.g. never say "no frontend experience mentioned in my profile"), and never invent experience to fill the gap.
 - Output plain text in "answer". No markdown. No bullet lists.

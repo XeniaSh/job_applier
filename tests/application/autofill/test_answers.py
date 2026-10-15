@@ -175,6 +175,126 @@ def test_unconfident_llm_answer_is_discarded() -> None:
     assert generator.generate(field, _profile()) is None
 
 
+def test_markdown_profile_narrative_facts_reach_llm_payload() -> None:
+    """The richer narrative `candidate_profile.md` text (passed through as
+    `markdown_profile`) must actually reach the LLM's `candidate_profile`
+    argument, not just the compact `professional_context_from_profile`
+    summary -- this is the seam `AutofillService` uses (see
+    `_load_markdown_profile` in service.py) to give free-text answer
+    generation the same richer factual context cover-letter generation
+    already has.
+    """
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Briefly describe your backend experience.", field_type="textarea")
+    marker = "UNIQUE_NARRATIVE_MARKER: confirmed OpenShift and production incident investigation experience."
+    answer = generator.generate(field, _profile(), markdown_profile=f"## Section\n\n{marker}")
+    assert answer is not None
+    assert llm.calls
+    assert marker in str(llm.calls[0]["candidate_profile"])
+
+
+def test_absent_markdown_profile_does_not_add_extra_context() -> None:
+    """When no narrative profile text is available (e.g. the file failed to
+    load), the candidate_profile payload must be exactly the compact
+    summary -- no blank trailing section.
+    """
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Briefly describe your backend experience.", field_type="textarea")
+    generator.generate(field, _profile(), markdown_profile=None)
+    assert llm.calls
+    assert str(llm.calls[0]["candidate_profile"]) == professional_context_from_profile(_profile())
+
+    llm.calls.clear()
+    generator.generate(field, _profile(), markdown_profile="   ")
+    assert llm.calls
+    assert str(llm.calls[0]["candidate_profile"]) == professional_context_from_profile(_profile())
+
+
+def test_ai_tool_brand_usage_question_never_reaches_llm() -> None:
+    """Verified Everbridge posting ff6eacff-741a-4f60-aff4-a45e89b003a9 asks
+    "Which AI coding or engineering tools have you used regularly in the
+    past 6 months?" -- no specific tool brand/regular-usage fact is
+    confirmed anywhere in the profile, and an LLM asked this directly is
+    prone to inventing a plausible-sounding brand name, so this must never
+    reach the LLM at all (fails closed unconditionally, independent of any
+    confidence signal the LLM might otherwise return).
+    """
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(
+        label="Which AI coding or engineering tools have you used regularly in the past 6 months?",
+        field_type="textarea",
+        required=True,
+    )
+    assert generator.generate(field, _profile()) is None
+    assert llm.calls == []
+
+
+def test_recent_reapplication_question_never_reaches_llm() -> None:
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(
+        label="Have you applied to this company in the past 6 months?",
+        field_type="select",
+        options=["Yes", "No"],
+        required=True,
+    )
+    assert generator.generate(field, _profile()) is None
+    assert llm.calls == []
+
+
+def test_unrelated_recent_months_question_still_reaches_llm() -> None:
+    """Regression guard: a professional free-text question merely sharing
+    the same recency window as the re-application question (e.g. the
+    Everbridge AI-task question) must not be swept into that unrelated
+    forbidden category.
+    """
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(
+        label="Describe one real software engineering task where you used AI meaningfully in the past 6 months.",
+        field_type="textarea",
+        required=True,
+    )
+    assert generator.generate(field, _profile()) is not None
+    assert llm.calls
+
+
+def test_profile_meta_reference_answer_is_rejected() -> None:
+    """Verified Everbridge posting ff6eacff-741a-4f60-aff4-a45e89b003a9: the
+    LLM confidently answered a frontend-experience question with "no
+    frontend experience mentioned in my profile" -- a meta-reference to the
+    profile document rather than natural first-person prose. The prompt now
+    discourages this, but a confident LLM answer must still be rejected
+    (fails closed to manual review) even if it ignores that instruction.
+    """
+    llm = _RecordingLLM(answer="No frontend experience mentioned in my profile.", confident=True)
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Describe your frontend experience.", field_type="textarea")
+    assert generator.generate(field, _profile()) is None
+
+
+def test_natural_backend_focused_answer_is_accepted() -> None:
+    """Control for `test_profile_meta_reference_answer_is_rejected`: a
+    natural first-person answer leaning on confirmed backend experience,
+    with no profile-referential meta phrasing, must still be accepted.
+    """
+    llm = _RecordingLLM(
+        answer=(
+            "I haven't worked on frontend specifically, but I bring strong backend "
+            "engineering experience with Java and Kotlin."
+        ),
+        confident=True,
+    )
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(label="Describe your frontend experience.", field_type="textarea")
+    answer = generator.generate(field, _profile())
+    assert answer is not None
+    assert "backend" in answer.lower()
+
+
 def test_professional_context_never_volunteers_academic_level() -> None:
     profile = _profile()
     profile.employment.highest_academic_level = "Master's"

@@ -21,6 +21,7 @@ from app.application.autofill.options import (
     match_interest_option,
     match_located_or_relocate_option,
     match_named_skill_set,
+    match_notice_period_option,
     match_option,
     match_option_exact_normalized,
     match_prefer_not_to_disclose_gender,
@@ -139,6 +140,7 @@ class QuestionKind(StrEnum):
     REMOTE_WORK_ARRANGEMENT = "remote_work_arrangement"
     CURRENT_EMPLOYER = "current_employer"
     CURRENT_TITLE = "current_title"
+    NOTICE_PERIOD = "notice_period"
     SKILL_SET_CHOICE = "skill_set_choice"
     EMPLOYEE_RELATIONSHIP = "employee_relationship"
     EMPLOYEE_RELATIONSHIP_DETAILS = "employee_relationship_details"
@@ -210,6 +212,7 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.REMOTE_WORK_ARRANGEMENT,
         QuestionKind.CURRENT_EMPLOYER,
         QuestionKind.CURRENT_TITLE,
+        QuestionKind.NOTICE_PERIOD,
         QuestionKind.SKILL_SET_CHOICE,
     }
 )
@@ -469,21 +472,63 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
             fillable=answer is not None,
         )
 
+    if _is_notice_period(text):
+        notice = profile.employment.notice_period
+        if not notice:
+            return MappedQuestion(kind=QuestionKind.NOTICE_PERIOD, fillable=False)
+        if field.options:
+            value = match_notice_period_option(notice, field.options)
+            return MappedQuestion(kind=QuestionKind.NOTICE_PERIOD, value=value, fillable=bool(value))
+        return MappedQuestion(kind=QuestionKind.NOTICE_PERIOD, value=notice, fillable=True)
+
     if _is_salary(text):
-        if profile.may_fill_salary() and profile.employment.salary_expectations is not None:
-            amount = profile.employment.salary_expectations.amount
-            currency = profile.employment.salary_expectations.currency or ""
-            value = f"{amount} {currency}".strip() if amount is not None else None
-            return MappedQuestion(kind=QuestionKind.SALARY, value=value, fillable=bool(value))
+        # Scoped to the field's own label, never the combined `text` -- an
+        # unrelated sibling's "current ..." wording in a shared
+        # `field.context` must never misclassify this field as a
+        # current-salary question. When this field's own label is empty,
+        # though, `field.context` *is* this field's own (not a sibling's)
+        # question text -- e.g. a Lever custom question with no direct
+        # `<label>` -- so it is the only text available to recognize this
+        # field as current-salary rather than silently falling through to
+        # the expected-salary branch below.
+        current_salary_text = field.label if field.label.strip() else field.context
+        if _is_current_salary(current_salary_text.lower()):
+            # No profile fact represents a *current* salary (only
+            # `salary_expectations`, the desired/expected figure) -- this
+            # must stay blank even when expected salary is configured, never
+            # borrowing that figure for a different question.
+            return MappedQuestion(kind=QuestionKind.SALARY, fillable=False)
+        expectations = profile.employment.salary_expectations
+        if profile.may_fill_salary() and expectations is not None:
+            amount = expectations.amount
+            currency = (expectations.currency or "").strip()
+            period = (expectations.period or "").strip()
+            # Amount, currency, and period must all be explicitly configured:
+            # a bare number or a number-plus-currency with no period is an
+            # ambiguous figure (daily? monthly? annual?) that must never be
+            # presented as if it were a complete, truthful answer.
+            if amount is not None and currency and period:
+                value = f"{amount} {currency} {period}"
+                return MappedQuestion(kind=QuestionKind.SALARY, value=value, fillable=True)
         return MappedQuestion(kind=QuestionKind.SALARY, fillable=False)
 
     if _is_years_experience(text):
-        named_technologies = find_known_technologies_in_text(
-            f"{field.label} {field.context}", profile.known_technology_names()
+        # A question whose own label already explicitly declares itself an
+        # "overall" (never "relevant") total-career question must stay
+        # scoped to that label alone -- never `field.context`, which (for a
+        # checkbox/combobox/radio group) can carry an unrelated sibling's own
+        # wording. Any other label -- including one with no technology hint
+        # of its own, e.g. a blank or generic "Years of experience" label on
+        # a board whose live DOM only names the technology via shared/group
+        # context -- keeps the previous context-aware detection; narrowing
+        # that case too would regress real technology-scoped questions on
+        # boards that rely on context to carry the technology name.
+        label_is_generic_overall = _is_overall_years_experience(field.label.lower())
+        tech_search_text = field.label if label_is_generic_overall else f"{field.label} {field.context}"
+        named_technologies = find_known_technologies_in_text(tech_search_text, profile.known_technology_names())
+        raw_technology_phrase = parse_years_experience_technology(field.label) or (
+            None if label_is_generic_overall else parse_years_experience_technology(field.context)
         )
-        raw_technology_phrase = parse_years_experience_technology(
-            field.label
-        ) or parse_years_experience_technology(field.context)
         scope_terms = split_technology_scope_terms(raw_technology_phrase)
         if len(named_technologies) > 1 or len(scope_terms) > 1:
             named = named_technologies if len(named_technologies) > 1 else scope_terms
@@ -510,7 +555,15 @@ def map_question(field: DiscoveredField, profile: CandidateProfile) -> MappedQue
                 )
             value = match_years_option(tech_years, field.options)
             return MappedQuestion(kind=QuestionKind.YEARS_EXPERIENCE, value=value, fillable=bool(value))
-        years = profile.relevant_experience_years()
+        # An "overall" (never "relevant") years-of-experience question asks
+        # for the candidate's total career figure specifically, so it must
+        # use the explicit `years_of_experience` fact directly -- never the
+        # "relevant experience" override, even when that is also configured.
+        years = (
+            profile.employment.years_of_experience
+            if _is_overall_years_experience(text)
+            else profile.relevant_experience_years()
+        )
         if years is None:
             return MappedQuestion(kind=QuestionKind.YEARS_EXPERIENCE, fillable=False)
         value = match_years_option(years, field.options)
@@ -1283,10 +1336,36 @@ def _is_salary(text: str) -> bool:
     return any(term in text for term in ("salary", "compensation", "expected pay", "desired pay"))
 
 
+def _is_current_salary(label: str) -> bool:
+    """A *current* salary question, distinct from expected/desired salary.
+
+    No profile fact represents current salary (only
+    `employment.salary_expectations`, the candidate's desired figure), so
+    this must never reuse that expected-salary value. Takes the field's own
+    label only, never the combined label+context search text: a sibling
+    field's unrelated "current ..." wording living in shared `field.context`
+    must never make this field itself look like a current-salary question.
+    """
+    return "current" in label
+
+
+def _is_notice_period(text: str) -> bool:
+    return "notice period" in text
+
+
 def _is_years_experience(text: str) -> bool:
     if "year" not in text:
         return False
     return any(term in text for term in ("experience", "relevant"))
+
+
+def _is_overall_years_experience(text: str) -> bool:
+    """A total/overall career-experience question, not one scoped to
+    "relevant" experience specifically (which may use the narrower
+    `years_of_relevant_experience` override when configured; see
+    `CandidateProfile.relevant_experience_years`).
+    """
+    return "overall" in text and "relevant" not in text
 
 
 def _is_academic_level(text: str) -> bool:
@@ -1652,8 +1731,6 @@ def _is_llm_forbidden_text(text: str) -> bool:
         "sms",
         "other job openings",
         "engineering blog",
-        "past 6 months",
-        "past six months",
         "hybrid",
         "in the office",
         "onsite",
@@ -1677,7 +1754,38 @@ def _is_llm_forbidden_text(text: str) -> bool:
         "working arrangement",
         "work arrangement",
     )
-    return any(term in text for term in terms)
+    return (
+        any(term in text for term in terms)
+        or _is_recent_reapplication_mention(text)
+        or _is_ai_tool_usage_question(text)
+    )
+
+
+def _is_recent_reapplication_mention(text: str) -> bool:
+    """"Have you applied to this company in the past 6 months?" and
+    equivalents only -- scoped to "appl..." so it never blocks an unrelated
+    professional free-text question that happens to name the same recency
+    window (e.g. "which AI coding tools have you used regularly in the past
+    6 months?").
+    """
+    if not any(term in text for term in ("past 6 months", "past six months")):
+        return False
+    return "appl" in text
+
+
+def _is_ai_tool_usage_question(text: str) -> bool:
+    """Which specific AI coding/engineering tool(s) the candidate has used.
+
+    Brand-name tool usage is never reliably known from the structured
+    profile or the narrative markdown profile, and an LLM asked this
+    directly is prone to inventing a plausible-sounding tool name. Fails
+    closed unconditionally -- this is never answered via LLM generation,
+    regardless of confidence. Distinct from "have you built an AI tool"
+    (no "used"/recency cue), which is a different, answerable question.
+    """
+    if "ai" not in text or "tool" not in text or "used" not in text:
+        return False
+    return any(term in text for term in ("regularly", "month", "recent"))
 
 
 def _is_first_name(text: str, field: DiscoveredField) -> bool:

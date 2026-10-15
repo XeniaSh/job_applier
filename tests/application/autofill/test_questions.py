@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.options import ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE
+from app.application.autofill.options import ALREADY_LOCATED_CHOICE, WOULD_RELOCATE_CHOICE, match_years_option
 from app.application.autofill.questions import (
     AGE_DECLINE_INTENT,
     LLM_FORBIDDEN_KINDS,
@@ -200,6 +200,387 @@ def test_salary_and_why_company_stay_unknown() -> None:
     assert salary.fillable is False
     assert why.kind is QuestionKind.WHY_COMPANY
     assert why.fillable is False
+
+
+def test_current_salary_stays_blank_even_with_expected_salary_configured() -> None:
+    """No profile fact represents a *current* salary -- it must stay blank
+    even though `salary_expectations` (an expected/desired figure) is
+    configured and the fill policy permits filling it.
+    """
+    profile = _profile(
+        employment={"salary_expectations": {"amount": 80000, "currency": "EUR", "fill_salary": True}}
+    )
+    mapped = map_question(DiscoveredField(label="What is your Current Salary ?", required=True), profile)
+    assert mapped.kind is QuestionKind.SALARY
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_expected_salary_fills_from_explicit_complete_value_when_policy_permits() -> None:
+    profile = _profile(
+        employment={
+            "salary_expectations": {
+                "amount": 80000,
+                "currency": "EUR",
+                "period": "per year",
+                "fill_salary": True,
+            }
+        }
+    )
+    mapped = map_question(DiscoveredField(label="What is your Expected Salary ?", required=True), profile)
+    assert mapped.kind is QuestionKind.SALARY
+    assert mapped.fillable is True
+    assert mapped.value == "80000 EUR per year"
+
+
+def test_expected_salary_stays_blank_without_fill_salary_policy() -> None:
+    profile = _profile(
+        employment={
+            "salary_expectations": {
+                "amount": 80000,
+                "currency": "EUR",
+                "period": "per year",
+                "fill_salary": False,
+            }
+        }
+    )
+    mapped = map_question(DiscoveredField(label="What is your Expected Salary ?", required=True), profile)
+    assert mapped.kind is QuestionKind.SALARY
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_expected_salary_stays_manual_without_configured_period() -> None:
+    """Amount and currency alone are an ambiguous figure (daily? monthly?
+    annual?) -- a missing period must never be silently omitted from an
+    otherwise-filled answer.
+    """
+    profile = _profile(
+        employment={"salary_expectations": {"amount": 80000, "currency": "EUR", "fill_salary": True}}
+    )
+    mapped = map_question(DiscoveredField(label="What is your Expected Salary ?", required=True), profile)
+    assert mapped.kind is QuestionKind.SALARY
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_expected_salary_stays_manual_without_configured_currency() -> None:
+    profile = _profile(
+        employment={"salary_expectations": {"amount": 80000, "period": "per year", "fill_salary": True}}
+    )
+    mapped = map_question(DiscoveredField(label="What is your Expected Salary ?", required=True), profile)
+    assert mapped.kind is QuestionKind.SALARY
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_current_salary_label_scoping_ignores_unrelated_sibling_context() -> None:
+    """A sibling field's unrelated "current ..." wording living in shared
+    `field.context` must never make an actual "Expected Salary" field itself
+    look like a current-salary question.
+    """
+    profile = _profile(
+        employment={
+            "salary_expectations": {
+                "amount": 80000,
+                "currency": "EUR",
+                "period": "per year",
+                "fill_salary": True,
+            }
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your Expected Salary ?",
+            required=True,
+            context="What is your current location?",
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.SALARY
+    assert mapped.fillable is True
+    assert mapped.value == "80000 EUR per year"
+
+
+def test_current_salary_recognized_from_context_when_label_empty() -> None:
+    """A field with no own label (e.g. a Lever custom question rendered
+    without a direct `<label>`) must still be recognized as current-salary
+    from its own `field.context` -- never silently fall through to the
+    expected-salary branch and fill it from `salary_expectations`, which
+    represents a different question entirely.
+    """
+    profile = _profile(
+        employment={
+            "salary_expectations": {
+                "amount": 80000,
+                "currency": "EUR",
+                "period": "per year",
+                "fill_salary": True,
+            }
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(label="", required=True, context="What is your Current Salary?"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.SALARY
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_notice_period_select_fills_from_explicit_configured_value() -> None:
+    profile = _profile(employment={"notice_period": "30 days"})
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your Notice Period",
+            required=True,
+            field_type="select",
+            options=["Select...", "Immediate", "2 weeks", "30 days", "60 days"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.NOTICE_PERIOD
+    assert mapped.fillable is True
+    assert mapped.value == "30 days"
+
+
+def test_notice_period_select_stays_manual_without_explicit_value() -> None:
+    profile = _profile()
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your Notice Period",
+            required=True,
+            field_type="select",
+            options=["Select...", "Immediate", "2 weeks", "30 days", "60 days"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.NOTICE_PERIOD
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_notice_period_select_stays_manual_on_ambiguous_option_match() -> None:
+    """An explicit fact with no clear/exact matching visible option must stay
+    manual rather than guessing the closest-sounding option.
+    """
+    profile = _profile(employment={"notice_period": "6 weeks"})
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your Notice Period",
+            required=True,
+            field_type="select",
+            options=["Select...", "Immediate", "2 weeks", "30 days", "60 days"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.NOTICE_PERIOD
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_notice_period_text_field_fills_from_explicit_configured_value() -> None:
+    profile = _profile(employment={"notice_period": "4 weeks"})
+    mapped = map_question(DiscoveredField(label="Notice Period", field_type="text"), profile)
+    assert mapped.kind is QuestionKind.NOTICE_PERIOD
+    assert mapped.fillable is True
+    assert mapped.value == "4 weeks"
+
+
+_EVERBRIDGE_NOTICE_PERIOD_OPTIONS = ["0-30 Days", "30-60 Days", "60-90 days"]
+
+
+def test_notice_period_select_stays_manual_on_shared_boundary_everbridge_options() -> None:
+    """Mirrors the verified Everbridge Lever posting's actual notice-period
+    select. "30 days" sits exactly on the boundary shared by "0-30 Days" and
+    "30-60 Days" -- which range it belongs to is genuinely ambiguous, so this
+    must stay manual rather than guessing the first (or any) matching range.
+    """
+    profile = _profile(employment={"notice_period": "30 days"})
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your Notice Period",
+            required=True,
+            field_type="select",
+            options=_EVERBRIDGE_NOTICE_PERIOD_OPTIONS,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.NOTICE_PERIOD
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_notice_period_select_matches_unambiguous_range_everbridge_options() -> None:
+    """A value strictly inside a single range (not on a shared boundary)
+    still resolves -- the fix for the shared-boundary case above must not
+    make every range match unresolved.
+    """
+    profile = _profile(employment={"notice_period": "15 days"})
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your Notice Period",
+            required=True,
+            field_type="select",
+            options=_EVERBRIDGE_NOTICE_PERIOD_OPTIONS,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.NOTICE_PERIOD
+    assert mapped.fillable is True
+    assert mapped.value == "0-30 Days"
+
+
+def test_notice_period_select_stays_manual_on_cross_unit_month_guess_everbridge_options() -> None:
+    """A "1 month" fact must never be guessed as exactly 30 days to resolve
+    against Everbridge's day-denominated ranges -- a month has no single
+    exact day-count, so this conversion would invent a figure the fact never
+    actually stated.
+    """
+    profile = _profile(employment={"notice_period": "1 month"})
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your Notice Period",
+            required=True,
+            field_type="select",
+            options=_EVERBRIDGE_NOTICE_PERIOD_OPTIONS,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.NOTICE_PERIOD
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_notice_period_select_stays_manual_without_explicit_value_everbridge_options() -> None:
+    profile = _profile()
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your Notice Period",
+            required=True,
+            field_type="select",
+            options=_EVERBRIDGE_NOTICE_PERIOD_OPTIONS,
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.NOTICE_PERIOD
+    assert mapped.fillable is False
+    assert mapped.value is None
+
+
+def test_notice_period_is_never_llm_eligible() -> None:
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    profile = _profile()
+    field = DiscoveredField(label="What is your Notice Period", field_type="select", options=["2 weeks"])
+    mapped = map_question(field, profile)
+    assert mapped.fillable is False
+    assert is_llm_eligible_question(field, mapped) is False
+    assert QuestionKind.NOTICE_PERIOD in LLM_FORBIDDEN_KINDS
+
+
+def test_overall_years_experience_select_maps_lever_style_options() -> None:
+    """Mirrors the verified Everbridge Lever posting's required select:
+    "Overall years of Experience" with 0-3/3-5/5-8/8-10/10+ Years options.
+    """
+    profile = _profile(employment={"years_of_experience": 7})
+    mapped = map_question(
+        DiscoveredField(
+            label="Overall years of Experience",
+            required=True,
+            field_type="select",
+            options=["0-3 Years", "3-5 Years", "5-8 Years", "8-10 Years", "10+ Years"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "5-8 Years"
+
+
+def test_overall_years_experience_uses_total_not_relevant_experience() -> None:
+    """"Overall" (never "relevant") must use the explicit total
+    `years_of_experience` fact directly, even when a narrower
+    `years_of_relevant_experience` override is also configured.
+    """
+    profile = _profile(employment={"years_of_experience": 7, "years_of_relevant_experience": 2})
+    mapped = map_question(
+        DiscoveredField(
+            label="Overall years of Experience",
+            required=True,
+            field_type="select",
+            options=["0-3 Years", "3-5 Years", "5-8 Years", "8-10 Years", "10+ Years"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "5-8 Years"
+    # The "relevant" override alone would have mapped to a different option,
+    # proving this used the total figure, not `relevant_experience_years()`.
+    options = ["0-3 Years", "3-5 Years", "5-8 Years", "8-10 Years", "10+ Years"]
+    assert match_years_option(profile.employment.years_of_relevant_experience, options) == "0-3 Years"
+
+
+def test_overall_years_experience_wrong_context_technology_does_not_misclassify() -> None:
+    """A generic "Overall years of Experience" select must stay scoped to its
+    own label only -- an unrelated technology name leaking in via
+    `field.context` (e.g. shared/sibling question text in some ATS DOM
+    shapes) must never misclassify this as a technology-specific question.
+    """
+    profile = _profile(employment={"years_of_experience": 7, "professional_tech_stack": ["Kotlin"]})
+    mapped = map_question(
+        DiscoveredField(
+            label="Overall years of Experience",
+            required=True,
+            field_type="select",
+            options=["0-3 Years", "3-5 Years", "5-8 Years", "8-10 Years", "10+ Years"],
+            context="Kotlin experience (years)",
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "5-8 Years"
+
+
+def test_years_experience_technology_named_only_in_context_stays_scoped_when_label_is_generic() -> None:
+    """A label with no "overall"/"relevant" qualifier of its own (unlike the
+    "Overall years of Experience" case above, which must ignore context)
+    keeps the pre-existing context-aware technology detection -- some ATS
+    DOM shapes only name the technology via shared/group `field.context`,
+    not the field's own label, and that must still be treated as scoped
+    rather than silently answered with the overall/relevant figure.
+    """
+    profile = _profile(
+        employment={"years_of_experience": 7, "years_of_relevant_experience": 7, "professional_tech_stack": ["Kotlin"]}
+    )
+    mapped = map_question(
+        DiscoveredField(label="Years of experience", required=True, field_type="text", context="Kotlin"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is False
+    assert mapped.unresolved_reason is not None
+    assert "Kotlin" in mapped.unresolved_reason
+    assert mapped.value != profile.relevant_experience_years()
+
+
+def test_years_experience_technology_named_only_in_context_fills_when_label_is_generic() -> None:
+    profile = _profile(
+        employment={
+            "years_of_experience": 7,
+            "professional_tech_stack": ["Kotlin"],
+            "technology_years": [{"technology": "Kotlin", "years": 3}],
+        }
+    )
+    mapped = map_question(
+        DiscoveredField(label="Years of experience", required=True, field_type="text", context="Kotlin"),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.YEARS_EXPERIENCE
+    assert mapped.fillable is True
+    assert mapped.value == "3"
 
 
 def test_sponsorship_unset_is_not_fillable() -> None:
@@ -3179,3 +3560,89 @@ def test_sanctions_followup_decoy_option_never_matches() -> None:
 )
 def test_sanctions_kinds_are_llm_forbidden(kind: QuestionKind) -> None:
     assert kind in LLM_FORBIDDEN_KINDS
+
+
+# Verified Everbridge Lever posting ff6eacff-741a-4f60-aff4-a45e89b003a9's seven
+# professional-free-text textareas. Six are answerable (LLM-eligible, carrying
+# richer factual context -- see test_answers.py); the AI-tool-brand-usage one
+# must always fail closed, independent of any LLM confidence signal.
+
+_EVERBRIDGE_BACKEND_LABEL = "Briefly describe hands-on Java and Spring Boot backend experience."
+_EVERBRIDGE_CLOUD_DEVOPS_LABEL = "Briefly describe cloud-native and DevOps experience."
+_EVERBRIDGE_FRONTEND_LABEL = "Briefly describe frontend experience, if any."
+_EVERBRIDGE_AI_TOOLS_LABEL = "Which AI coding or engineering tools have you used regularly in the past 6 months?"
+_EVERBRIDGE_AI_TASK_LABEL = "Describe one real software engineering task where you used AI meaningfully."
+_EVERBRIDGE_AI_VERIFY_LABEL = "How do you verify AI-generated code before merging or deploying it?"
+_EVERBRIDGE_AI_BUILT_LABEL = (
+    "Have you built any AI-powered product feature, internal AI tool, automation, "
+    "RAG system, agent, chatbot, embedding search, or LLM integration?"
+)
+
+_EVERBRIDGE_ANSWERABLE_LABELS = [
+    _EVERBRIDGE_BACKEND_LABEL,
+    _EVERBRIDGE_CLOUD_DEVOPS_LABEL,
+    _EVERBRIDGE_FRONTEND_LABEL,
+    _EVERBRIDGE_AI_TASK_LABEL,
+    _EVERBRIDGE_AI_VERIFY_LABEL,
+    _EVERBRIDGE_AI_BUILT_LABEL,
+]
+
+
+@pytest.mark.parametrize("label", _EVERBRIDGE_ANSWERABLE_LABELS)
+def test_everbridge_professional_free_text_textarea_is_llm_eligible(label: str) -> None:
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    field = DiscoveredField(label=label, field_type="textarea", required=True)
+    mapped = map_question(field, _profile())
+    assert mapped.kind is QuestionKind.PROFESSIONAL_FREE_TEXT
+    assert mapped.fillable is False
+    assert is_llm_eligible_question(field, mapped) is True
+
+
+def test_everbridge_ai_tool_brand_usage_question_fails_closed() -> None:
+    """Which specific AI tool(s) the candidate regularly uses is never backed
+    by an explicit configured fact, and an LLM asked this directly is prone
+    to inventing a plausible-sounding brand name -- this must never reach
+    the LLM at all, regardless of confidence (see test_answers.py for the
+    `ApplicationAnswerGenerator` level assertion that the LLM is never
+    called).
+    """
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    field = DiscoveredField(label=_EVERBRIDGE_AI_TOOLS_LABEL, field_type="textarea", required=True)
+    mapped = map_question(field, _profile())
+    assert mapped.fillable is False
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+def test_recent_reapplication_mention_stays_forbidden_without_override() -> None:
+    """The narrowed 'past 6 months' guard must still block the actual
+    re-application question it exists for.
+    """
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    field = DiscoveredField(
+        label="Have you applied to this company in the past 6 months?",
+        field_type="select",
+        options=["Yes", "No"],
+        required=True,
+    )
+    mapped = map_question(field, _profile())
+    assert is_llm_eligible_question(field, mapped) is False
+
+
+def test_unrelated_recent_months_mention_is_not_misrouted_as_reapplication() -> None:
+    """A professional question that merely shares the same recency window as
+    the re-application question (but is not about re-applying) must not be
+    swept into that unrelated forbidden category.
+    """
+    from app.application.autofill.questions import is_llm_eligible_question
+
+    field = DiscoveredField(
+        label="What have you shipped in the past 6 months?",
+        field_type="textarea",
+        required=False,
+    )
+    mapped = map_question(field, _profile())
+    assert mapped.kind is QuestionKind.PROFESSIONAL_FREE_TEXT
+    assert is_llm_eligible_question(field, mapped) is True

@@ -243,9 +243,15 @@ def test_optional_current_company_never_enriched_via_service_llm_fallback() -> N
         session.close()
 
 
-def test_optional_current_company_stays_blank_with_explicit_current_employer() -> None:
-    """The optional 'Current company' field must never be filled from
-    `employment.current_employer`, even when that fact is set explicitly.
+def test_optional_current_company_stays_blank_without_adjustment_even_with_explicit_employer() -> None:
+    """The shared `classify_field` path alone (never routed through Lever's
+    own `adjust_classified_field` hook) must still never fill the optional
+    'Current company' field from `employment.current_employer` --
+    `CandidateProfile.current_employer_for_autofill` is shared across every
+    ATS and always returns None. See
+    `test_optional_current_company_fills_from_explicit_current_employer_via_lever_adjustment`
+    below for the one Lever-specific exception, which only ever applies
+    through that dedicated hook.
     """
     session = _open(LEVER_FIXTURE)
     try:
@@ -258,6 +264,45 @@ def test_optional_current_company_stays_blank_with_explicit_current_employer() -
         assert classified.fill is False
         assert classified.value is None
         assert adapter.read_back(session.page, current_company) is None
+    finally:
+        session.close()
+
+
+def test_optional_current_company_fills_from_explicit_current_employer_via_lever_adjustment() -> None:
+    """Lever's own `adjust_classified_field` hook opts the optional 'Current
+    company' field (`name="org"`) back into filling, but only from the
+    explicit `employment.current_employer` fact (see `_adjust_current_company`
+    in `app.application.autofill.lever`) -- never a previous-employer
+    inference, never a generated/LLM value. Proven through the real
+    discover -> classify -> adjust -> fill -> read-back pipeline, not just the
+    adjustment function in isolation.
+    """
+    session = _open(LEVER_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        profile = _profile(employment={"current_employer": "Acme Corp"})
+        fields = adapter.discover_fields(session.page)
+        current_company = _field(fields, "Current company")
+        assert current_company.required is False
+        classified = classify_field(current_company, profile)
+        assert classified.fill is False
+        assert classified.value is None
+
+        vacancy = ResolvedVacancy(
+            source="target_company:lever:qonto",
+            external_id="d36db188-ab16-43b6-86a8-47ed9cdd29b1",
+            title="Backend Engineer",
+            company="Qonto",
+            url=LEVER_JOB_URL,
+            application_url=f"{LEVER_JOB_URL}/apply",
+        )
+        adjusted = adapter.adjust_classified_field(classified, profile=profile, vacancy=vacancy)
+        assert adjusted.fill is True
+        assert adjusted.value == "Acme Corp"
+        assert adjusted.generated is False
+
+        assert adapter.fill_field(session.page, adjusted) is True
+        assert adapter.read_back(session.page, current_company) == "Acme Corp"
     finally:
         session.close()
 

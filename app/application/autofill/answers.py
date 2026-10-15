@@ -40,6 +40,17 @@ _CATCH_ALL_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Observed failure (Everbridge): the LLM answered a frontend-experience
+# question with "no frontend experience mentioned in my profile" -- a
+# meta-reference to the profile document itself rather than a natural
+# first-person statement. The prompt now discourages this, but a confident
+# LLM can still return it verbatim, so it is rejected here unconditionally
+# rather than trusted on prompt wording alone.
+_PROFILE_META_REFERENCE_RE = re.compile(
+    r"\b(?:my|the|this|candidate'?s?)\s+(?:candidate\s+)?profile\b",
+    re.IGNORECASE,
+)
+
 _VISA_SENTENCE = (
     "I don't currently live in New Zealand and would need an employer-supported work "
     "visa to take up a role there."
@@ -162,6 +173,8 @@ class ApplicationAnswerGenerator:
         if not answer:
             return None
         if contains_unsupported_education_claim(answer):
+            return None
+        if _PROFILE_META_REFERENCE_RE.search(answer):
             return None
         if field.field_type in {"select", "radio", "combobox", "multiselect"} and field.options:
             if mapped.kind is QuestionKind.TECH_STACK or field.field_type == "multiselect":

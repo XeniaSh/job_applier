@@ -65,7 +65,128 @@ _PLACEHOLDER_OPTION_TEXTS = (
 # shape and existing fixtures built against it.
 _JOB_DETAIL_APPLY_SELECTOR = "a[data-qa='btn-apply-top'], a[data-qa='btn-apply-bottom']"
 
+# A supervised live run showed the optional "Current company" and optional
+# "Other website" fields still ending up populated even though
+# `CandidateProfile.current_employer_for_autofill` always returns None (it is
+# shared across every ATS, so it never discloses `employment.current_employer`
+# on any optional "Current company"-shaped field -- see its docstring).
+# Whatever upstream path produced a value for these two fields on that live
+# run -- a future change to that shared resolver, or a generated/LLM fallback
+# answer that was even misclassified into the wrong semantic `kind` -- this is
+# the final boundary before a Playwright write, so it is the one place that
+# can make the "never write a value this adapter did not itself trust"
+# guarantee hold regardless of how the value was produced upstream or what
+# `classified.kind` says. Recognition therefore happens on the discovered
+# field's own identity, never on `classified.kind` alone:
+#
+# - "org" and "urls[Other]" are Lever's own stable `name` attributes for the
+#   current-employer and "Other website" custom-url fields, present whenever
+#   a posting includes them, independent of label wording.
+# - The normalized-label fallback below is deliberately an exact, narrow
+#   allowlist (not the classifier's broader substring matching) so it cannot
+#   suppress an unrelated optional website field (e.g. "Personal website",
+#   "Portfolio URL").
+#
+# "Other website" has no configured profile fact at all and stays blocked
+# unconditionally whenever optional, exactly as before. "Current company" is
+# the one exception: `adjust_classified_field`/`_adjust_current_company` below
+# opts this adapter's own stable "org" field back in, but only from the
+# explicit `employment.current_employer` fact -- never a previous-employer
+# inference, never a generated/LLM value -- so the guard here still only lets
+# that one trusted case through: `classified.kind` must be the real
+# `CURRENT_EMPLOYER` kind (not misclassified), `classified.generated` must be
+# False (not an LLM/generated fallback that merely landed on that kind), and
+# `classified.value` must equal the exact value `adjust_classified_field`
+# itself read from that explicit fact and cached on the instance -- so a
+# correctly-classified, non-generated field carrying some other, wrong value
+# (e.g. a hypothetical future resolver path that lands on this same
+# kind/generated combination without actually reading the explicit fact)
+# still cannot slip through on kind/generated alone.
+#
+# This is intentionally narrow: only these two fields, and only when the
+# field is optional. Required fields (e.g. a required "Website" a posting
+# could theoretically add) are unaffected, and no other optional field is
+# touched.
+_FINAL_WRITE_BLOCKED_NAMES: dict[str, str] = {
+    "org": "current_company",
+    "urls[Other]": "other_website",
+}
+_FINAL_WRITE_BLOCKED_LABELS: dict[str, str] = {
+    "current company": "current_company",
+    "other website": "other_website",
+}
+
 logger = logging.getLogger(__name__)
+
+
+def _final_write_normalized_label(field: DiscoveredField) -> str | None:
+    """The normalized diagnostic token for the two known live-failure optional
+    fields, recognized from the field's own stable Lever `name` or its exact
+    normalized label -- never from `classified.kind`, which a classifier bug
+    or LLM fallback path could get wrong for this exact field.
+    """
+    by_name = _FINAL_WRITE_BLOCKED_NAMES.get(field.name or "")
+    if by_name is not None:
+        return by_name
+    normalized_label = " ".join(field.label.strip().lower().rstrip("*").split())
+    return _FINAL_WRITE_BLOCKED_LABELS.get(normalized_label)
+
+
+def _log_final_write_diagnostic(classified: ClassifiedField, *, normalized_label: str, action: str) -> None:
+    """Lever-only diagnostic at the final write boundary for the two known
+    live-failure fields. Logs only the normalized label token identified from
+    the field itself, required flag, the *actual* `classified.kind` (even if
+    it disagrees with the recognized field -- that disagreement is itself the
+    signal a misclassification happened), whether the answer came from the
+    deterministic resolver or a generated/LLM fallback, and the fill/skip
+    action -- never the field's value, URL, name, raw page text, or any other
+    candidate data. Skipped fields are logged too, so a later run can tell a
+    code-level skip apart from a value that appears to have been filled by
+    the browser itself (e.g. native autofill) before our code even runs.
+    """
+    logger.warning(
+        "lever_final_write field=%s required=%s kind=%s source=%s action=%s",
+        normalized_label,
+        classified.field.required,
+        classified.kind.value,
+        "generated" if classified.generated else "resolver",
+        action,
+    )
+
+
+def _adjust_current_company(item: ClassifiedField, profile: CandidateProfile) -> ClassifiedField:
+    """Opt Lever's own stable optional "Current company" field (`name="org"`)
+    back into filling, but only from the explicit `employment.current_employer`
+    fact -- never a previous-employer inference, never a generated/LLM value.
+
+    `CandidateProfile.current_employer_for_autofill` is shared across every
+    ATS and always returns None (see its docstring), so the shared
+    `map_question` never resolves a value for this field on its own. This is
+    the one place, scoped to this single field identity, that reads the raw
+    explicit fact directly -- no other ATS and no other field is affected.
+    A no-op unless the shared classifier left the field unfilled (`item.fill`
+    is False) and still classified it as `CURRENT_EMPLOYER`; a misclassified
+    kind must never be force-corrected here. `fill_field`'s own final-write
+    guard still re-checks `kind`/`generated` immediately before the actual
+    Playwright write, so this hook is defense-in-depth, not the only gate.
+    """
+    if item.fill or item.field.required:
+        return item
+    if _final_write_normalized_label(item.field) != "current_company":
+        return item
+    if item.kind is not QuestionKind.CURRENT_EMPLOYER:
+        return item
+    value = profile.employment.current_employer
+    if not value:
+        return item
+    return replace(
+        item,
+        classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+        value=value,
+        fill=True,
+        generated=False,
+        unresolved_reason=None,
+    )
 
 
 def _safe_host(url: object) -> str:
@@ -215,6 +336,12 @@ class LeverAdapter:
     last_cover_letter_error: str | None = None
     last_multiselect_selected: list[str] | None = None
     last_privacy_trace: dict[str, object] | None = None
+    # Set by `adjust_classified_field` only when `_adjust_current_company`
+    # actually opts the field back in from the explicit
+    # `employment.current_employer` fact; `fill_field`'s final-write guard
+    # re-checks `classified.value` against this before ever trusting a
+    # non-generated `CURRENT_EMPLOYER`-kind field for this one field identity.
+    _trusted_current_employer_value: str | None = None
 
     def recognize(self, page: Page) -> bool:
         result, reason = _application_page_check(page)
@@ -305,6 +432,11 @@ class LeverAdapter:
     def discover_fields(self, page: Page) -> list[DiscoveredField]:
         if not self.recognize(page):
             raise LeverFormError("UNSUPPORTED_FORM")
+        # A reused adapter instance must never carry trust from a previous
+        # Prepare run into this one -- each discovery starts a fresh run, so
+        # a second run with no explicit `employment.current_employer` can
+        # never inherit a first run's cached trusted value.
+        self._trusted_current_employer_value = None
         discovery_start = time.monotonic()
         logger.warning("lever_prepare stage=discovery_start")
         form = _application_form(page)
@@ -335,8 +467,112 @@ class LeverAdapter:
         )
         return fields
 
+    def reconcile_discovered_fields(
+        self,
+        page: Page,
+        *,
+        profile: CandidateProfile,
+        fields: list[DiscoveredField],
+    ) -> list[str]:
+        """Clears a stale, untrusted "Current company" value left over from
+        the browser's own autofill (a previous employer, typically) before
+        this adapter's own field-fill loop ever runs.
+
+        Only acts when `employment.current_employer` has no explicit value:
+        when it does, the normal `adjust_classified_field` /
+        `fill_field` path fills the field from that trusted fact later in
+        this same run, overwriting whatever was prefilled anyway, so there
+        is nothing to reconcile here. Recognized the same narrow,
+        name/label-based way `fill_field`'s own final-write guard recognizes
+        this one field (`_final_write_normalized_label`) -- never by
+        `classified.kind`, which this hook runs ahead of classification
+        entirely. Required fields, and every other field, are untouched.
+
+        Clearing is verified via `read_back`, the same read-back this
+        adapter uses everywhere else -- never assumed to have worked just
+        because no exception was raised. A clear that leaves the field
+        non-blank is reported as a warning for manual review rather than
+        silently left showing the wrong employer.
+        """
+        if profile.employment.current_employer:
+            return []
+        warnings: list[str] = []
+        for field in fields:
+            if field.required:
+                continue
+            if _final_write_normalized_label(field) != "current_company":
+                continue
+            if not (field.current_value or "").strip():
+                continue
+            locator = _field_locator(page, field)
+            try:
+                locator.fill("", timeout=3_000)
+            except PlaywrightError:
+                pass
+            if self.read_back(page, field):
+                logger.warning("lever_prefill_reconcile field=current_company action=clear_failed")
+                warnings.append(
+                    "Current company field appears to already contain a value (likely carried "
+                    "over by browser autofill) and could not be cleared automatically; please "
+                    "review and clear it manually before submitting."
+                )
+            else:
+                logger.warning("lever_prefill_reconcile field=current_company action=cleared")
+        return warnings
+
+    def observe_final_fill_plan(self, item: ClassifiedField) -> None:
+        """Lever-only diagnostic hook: the service calls this for every
+        classified field right after `_enrich_unresolved`, before deciding
+        whether to call `fill_field`. `fill_field`'s own final-write guard
+        already logs `lever_final_write` for every field it is actually
+        invoked for -- including the case where it fires only to block a
+        write -- so this hook is a no-op whenever `fill_field` will run
+        (`item.fill=True`), which avoids a duplicate log. The one case
+        `fill_field` can never observe is a field the service has already
+        classified as unfillable (`item.fill=False`, e.g. "Current company"
+        when no explicit `employment.current_employer` fact resolved it):
+        the service never calls `fill_field` for it at all, so without this
+        hook that skip would go silently unlogged. This hook exists only to
+        close that gap.
+        """
+        if item.fill:
+            return
+        normalized_label = _final_write_normalized_label(item.field)
+        if normalized_label is None:
+            return
+        _log_final_write_diagnostic(item, normalized_label=normalized_label, action="skip")
+
     def fill_field(self, page: Page, classified: ClassifiedField) -> bool:
         self.last_multiselect_selected = None
+        final_write_label = _final_write_normalized_label(classified.field)
+        if final_write_label is not None:
+            if classified.field.required:
+                blocked = False
+            elif final_write_label == "current_company":
+                # The one trusted exception: `adjust_classified_field` only
+                # ever sets this exact kind/generated combination -- and
+                # caches the value -- from the explicit
+                # `employment.current_employer` fact, so re-checking kind,
+                # generated, and the cached value here (rather than trusting
+                # `item.fill` alone) still blocks a generated/LLM value, a
+                # misclassified field that merely landed on `fill=True` some
+                # other way, or a correctly-classified, non-generated field
+                # that nonetheless carries a value other than the one this
+                # adapter itself read from the explicit fact.
+                blocked = not (
+                    classified.kind is QuestionKind.CURRENT_EMPLOYER
+                    and not classified.generated
+                    and classified.value is not None
+                    and classified.value == self._trusted_current_employer_value
+                )
+            else:
+                # "Other website" (and any other field this allowlist names)
+                # has no configured profile fact at all; stays blocked
+                # unconditionally whenever optional.
+                blocked = True
+            _log_final_write_diagnostic(classified, normalized_label=final_write_label, action="skip" if blocked else "fill")
+            if blocked:
+                return False
         if not classified.fill or classified.value is None:
             return False
         field = classified.field
@@ -465,53 +701,65 @@ class LeverAdapter:
         """Lever-only narrow post-classification adjustment.
 
         `AutofillService` calls this (when present) right after the shared
-        `classifier.classify_field` pass, before `_enrich_unresolved`. The
-        only control it ever touches is `opportunityLocationId` -- Lever's
-        own "Which location are you applying for?" select, whose options
-        are the hiring team's office choices for *this posting*, not a fact
-        about the candidate. The shared classifier can map this control to
-        `LOCATION` (via its generic "location"-worded label, filling the
-        candidate's own residence -- a value absent from every real option)
-        or to an unresolved `QUESTION_OVERRIDE`; both are replaced here.
+        `classifier.classify_field` pass, before `_enrich_unresolved`. Two
+        controls are ever touched, each independently and narrowly scoped:
 
-        The only safe source of an answer is an explicit
-        `application_policy.question_overrides` string that matches exactly
-        one real, non-placeholder discovered option (case/whitespace/
-        punctuation differences tolerated, never a fuzzy/partial match).
-        Anything else -- no override, a boolean override, no match, or an
-        ambiguous match -- is forced to `UNSUPPORTED`: `AutofillService`'s
-        existing `UNSUPPORTED` branch skips the field before any fill
-        attempt (even if generic answer-generation enrichment would
-        otherwise re-enable `fill`), so this can never reach `fill_field`
-        with a value absent from the live control.
+        - `opportunityLocationId` -- Lever's own "Which location are you
+          applying for?" select, whose options are the hiring team's office
+          choices for *this posting*, not a fact about the candidate. The
+          shared classifier can map this control to `LOCATION` (via its
+          generic "location"-worded label, filling the candidate's own
+          residence -- a value absent from every real option) or to an
+          unresolved `QUESTION_OVERRIDE`; both are replaced here.
+
+          The only safe source of an answer is an explicit
+          `application_policy.question_overrides` string that matches
+          exactly one real, non-placeholder discovered option (case/
+          whitespace/punctuation differences tolerated, never a fuzzy/
+          partial match). Anything else -- no override, a boolean override,
+          no match, or an ambiguous match -- is forced to `UNSUPPORTED`:
+          `AutofillService`'s existing `UNSUPPORTED` branch skips the field
+          before any fill attempt (even if generic answer-generation
+          enrichment would otherwise re-enable `fill`), so this can never
+          reach `fill_field` with a value absent from the live control.
+
+        - "Current company" (`name="org"`) -- see `_adjust_current_company`.
+          Caches the exact value read from the explicit
+          `employment.current_employer` fact whenever that adjustment
+          actually fires, so `fill_field`'s final-write guard can later tie
+          its trust of a `CURRENT_EMPLOYER`-kind, non-generated field to
+          this specific value, not just to the kind/generated combination.
         """
-        if not _is_opportunity_location_select(item.field):
-            return item
-        matched = _matched_opportunity_location_override(item.field, profile)
-        if matched is not None:
+        if _is_opportunity_location_select(item.field):
+            matched = _matched_opportunity_location_override(item.field, profile)
+            if matched is not None:
+                return replace(
+                    item,
+                    classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                    kind=QuestionKind.QUESTION_OVERRIDE,
+                    value=matched,
+                    fill=True,
+                    generated=False,
+                    unresolved_reason=None,
+                )
             return replace(
                 item,
-                classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+                classification=FieldClassification.UNSUPPORTED,
                 kind=QuestionKind.QUESTION_OVERRIDE,
-                value=matched,
-                fill=True,
+                value=None,
+                fill=False,
                 generated=False,
-                unresolved_reason=None,
+                unresolved_reason=(
+                    "Lever application-location choice requires an explicit "
+                    "application_policy.question_overrides string answer that exactly matches "
+                    "one discovered, non-placeholder option; never inferred from current "
+                    "residence, relocation willingness, or fuzzy option matching"
+                ),
             )
-        return replace(
-            item,
-            classification=FieldClassification.UNSUPPORTED,
-            kind=QuestionKind.QUESTION_OVERRIDE,
-            value=None,
-            fill=False,
-            generated=False,
-            unresolved_reason=(
-                "Lever application-location choice requires an explicit "
-                "application_policy.question_overrides string answer that exactly matches "
-                "one discovered, non-placeholder option; never inferred from current "
-                "residence, relocation willingness, or fuzzy option matching"
-            ),
-        )
+        adjusted = _adjust_current_company(item, profile)
+        if adjusted is not item:
+            self._trusted_current_employer_value = adjusted.value
+        return adjusted
 
 
 def _is_opportunity_location_select(field: DiscoveredField) -> bool:
