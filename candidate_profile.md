@@ -68,8 +68,13 @@ AI-adjacent means ordinary backend engineering around AI-enabled products.
 The candidate is not currently positioning herself as:
 - an ML engineer;
 - an AI researcher;
-- an LLM infrastructure expert;
-- a developer with commercial LLM API integration experience.
+- an LLM infrastructure expert.
+
+She does have specific professional experience integrating an LLM through OpenRouter
+as part of an internal tool at her current employer (see "Internal AI automation
+experience" below). This is internal tooling, not a customer-facing or
+production-scale AI product, and must not be expanded into a general claim of
+commercial LLM API integration experience beyond that one internal project.
 
 ## Confirmed commercial experience
 
@@ -137,13 +142,35 @@ for application questions that ask about this:
 - for browser/ATS automation specifically, a human reviews the proposed changes before
   treating a run as final (a supervised application-preparation review step).
 
-Concrete example of meaningful AI use in software engineering, for application questions
-that ask for one: this very automation project ("Job Applier") uses an OpenRouter-based
-LLM integration to analyze and score job vacancies, combined with deterministic
-filtering and application-preparation automation (including this candidate-profile-
-driven autofill). Describe it as a personal automation project the candidate works on,
-verified through the process above, never as a commercially shipped AI product and
-never with an inflated personal-authorship claim beyond "worked on".
+Concrete example of meaningful AI use in a personal project, for application questions
+that ask for one or specifically about personal/side projects: this very automation
+project ("Job Applier") uses an OpenRouter-based LLM integration to analyze and score
+job vacancies, combined with deterministic filtering and application-preparation
+automation (including this candidate-profile-driven autofill). Describe it as a
+personal automation project the candidate works on, verified through the process
+above, never as a commercially shipped AI product and never with an inflated
+personal-authorship claim beyond "worked on".
+
+## Internal AI automation experience
+
+During current employment, the candidate built an internal n8n workflow automation:
+- deployed on Kubernetes;
+- integrates Jira, OpenRouter, and Slack;
+- uses an LLM, integrated through OpenRouter, to classify Jira development tasks into
+  three categories: requires further analysis; ready for development; requirements
+  unclear;
+- purpose: identify tasks that need clarification or analysis before development
+  starts.
+
+This is an internal work project, not a commercial AI product. Do not add
+functionality, measurable business impact, or production-scale claims beyond what is
+stated above.
+
+For application questions about work-based AI integration, AI-powered tooling,
+automation, or meaningful AI engineering work in a professional context, prefer this
+n8n project as the concrete example. The "Job Applier" personal project described
+above is a distinct example: use it for personal-project-specific questions, not as a
+competing answer to the work-based questions this section covers.
 
 ## Never claim
 

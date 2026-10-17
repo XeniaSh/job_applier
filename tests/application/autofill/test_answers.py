@@ -194,6 +194,57 @@ def test_markdown_profile_narrative_facts_reach_llm_payload() -> None:
     assert marker in str(llm.calls[0]["candidate_profile"])
 
 
+def test_tracked_narrative_n8n_automation_facts_reach_llm_payload_for_ai_question() -> None:
+    """The tracked `candidate_profile.md` (loaded for real, not a fake
+    marker) must carry the verified internal n8n/OpenRouter automation
+    facts -- and the boundaries/preference around them -- all the way into
+    the LLM's `candidate_profile` argument for an AI-integration/automation
+    free-text question, alongside the preserved "Job Applier" personal
+    project facts. Exercises the same `markdown_profile` seam `AutofillService`
+    uses in production, but against the real tracked file.
+    """
+    from app.profile_loader import load_candidate_profile
+
+    narrative = load_candidate_profile()
+    llm = _RecordingLLM()
+    generator = ApplicationAnswerGenerator(llm)
+    field = DiscoveredField(
+        label="Describe an internal automation or AI integration you've built in your current role.",
+        field_type="textarea",
+    )
+    mapped = map_question(field, _profile())
+    assert mapped.kind is QuestionKind.PROFESSIONAL_FREE_TEXT
+    assert is_llm_eligible_question(field, mapped) is True
+
+    answer = generator.generate(field, _profile(), markdown_profile=narrative)
+    assert answer is not None
+    assert llm.calls
+    candidate_profile = str(llm.calls[0]["candidate_profile"])
+    # Markdown source-wraps long lines, so whitespace is normalized before
+    # checking multi-word phrases that may span a line break in the file.
+    normalized = " ".join(candidate_profile.split())
+
+    # Verified n8n work-project facts.
+    assert "n8n" in candidate_profile
+    assert "Kubernetes" in candidate_profile
+    assert "Jira" in candidate_profile
+    assert "OpenRouter" in candidate_profile
+    assert "Slack" in candidate_profile
+    assert "requires further analysis" in normalized
+    assert "ready for development" in normalized
+    assert "requirements unclear" in normalized
+    assert "internal work project, not a commercial AI product" in normalized
+    assert "prefer this n8n project as the concrete example" in normalized
+
+    # Preserved, distinct "Job Applier" personal project example.
+    assert "Job Applier" in candidate_profile
+    assert "personal automation project" in normalized
+
+    # Preserved boundaries elsewhere in the profile are untouched.
+    assert "an ML engineer" in normalized
+    assert "production OpenAI or Claude API integrations" in normalized
+
+
 def test_absent_markdown_profile_does_not_add_extra_context() -> None:
     """When no narrative profile text is available (e.g. the file failed to
     load), the candidate_profile payload must be exactly the compact
