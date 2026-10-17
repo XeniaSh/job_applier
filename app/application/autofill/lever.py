@@ -628,19 +628,33 @@ class LeverAdapter:
                 locator.set_input_files(path, timeout=5_000, no_wait_after=True)
         except PlaywrightError:
             pass
-        if _resume_is_attached(page, field, filename):
+        if _wait_for_resume_attached(page, field, filename):
             return True
         if not page.url.startswith("file:"):
-            button = locator.locator("xpath=..").locator('button:not([type="submit"])')
-            if button.count() > 0:
+            trigger = _resume_upload_trigger(locator)
+            if trigger is not None:
                 try:
                     with page.expect_file_chooser(timeout=5_000) as chooser:
-                        button.first.click(timeout=3_000)
+                        trigger.click(timeout=3_000)
                     chooser.value.set_files(path)
                 except PlaywrightError:
                     pass
-            page.wait_for_timeout(500)
+                if _wait_for_resume_attached(page, field, filename):
+                    return True
         return _resume_is_attached(page, field, filename)
+
+    def verify_resume_attached(self, page: Page, field: DiscoveredField, filename: str) -> bool:
+        """Re-check, with a short bounded wait, that the resume control this
+        same Prepare run already uploaded (and verified) earlier is still
+        showing that exact file. Called once more at the very end of
+        Prepare -- after every other field and the optional cover-letter
+        file have been filled -- so a later action elsewhere on the page
+        (e.g. a sibling field's own validation JS) that quietly clears the
+        control is caught instead of trusted on the strength of the
+        upload-time check alone. Never re-uploads; a failure here is only
+        ever reported, not retried.
+        """
+        return _wait_for_resume_attached(page, field, filename, timeout_ms=2_000)
 
     def read_back(self, page: Page, field: DiscoveredField) -> str | None:
         if field.field_type == "file":
@@ -1130,10 +1144,150 @@ def _file_names(page: Page, field: DiscoveredField) -> list[str]:
     return [str(item) for item in found]
 
 
+_RESUME_ATTACHMENT_POLL_TIMEOUT_MS = 5_000
+_RESUME_ATTACHMENT_POLL_INTERVAL_MS = 250
+
+
+class _ResumeUiReadbackFailed:
+    """Sentinel returned by `_resume_filename_ui_text` when the
+    `page.evaluate` call itself raised -- distinct from `None`, which means
+    the call ran fine and found no `.filename` element at all. Only the
+    latter is "no signal, trust the `FileList` alone"; the former means the
+    UI state is simply unknown and `_resume_is_attached` must fail closed
+    rather than silently falling back to a `FileList`-only check.
+    """
+
+
+_RESUME_UI_READBACK_FAILED = _ResumeUiReadbackFailed()
+
+
+def _resume_filename_ui_text(page: Page, field: DiscoveredField) -> str | None | _ResumeUiReadbackFailed:
+    """Lever's own visible filename readback for the resume control (the
+    `<span class="filename">` inside `.visible-resume-upload`), scoped to
+    this field's own question container -- never a page-wide `.filename`
+    match that could pick up an unrelated file control.
+
+    `None` means the field's container has no such element at all (e.g.
+    the plain `<label for="...">` fixtures this adapter already had tests
+    for before the current hosted markup was observed), so callers can
+    tell "no UI readback available" apart from "UI readback says empty".
+    `_RESUME_UI_READBACK_FAILED` means the evaluation itself could not run
+    (e.g. a mid-navigation page) -- that must never be treated the same as
+    "no such element", or a failed readback would silently fall through to
+    a `FileList`-only success.
+    """
+    selector = f'[id="{field.element_id}"]' if field.element_id else 'input[type="file"][name="resume"]'
+    try:
+        text = page.evaluate(
+            """sel => {
+                const el = document.querySelector(sel);
+                if (!el) return null;
+                const container = el.closest('.application-question') || el.closest('li') || el.parentElement;
+                if (!container) return null;
+                const span = container.querySelector('.filename');
+                return span ? span.textContent : null;
+            }""",
+            selector,
+        )
+    except PlaywrightError:
+        return _RESUME_UI_READBACK_FAILED
+    if not isinstance(text, str):
+        return None
+    # Deliberately does not collapse an empty-after-strip string to
+    # `None`: that would make an empty, present `.filename` span
+    # indistinguishable from the span not existing at all, defeating the
+    # one signal `_resume_is_attached` uses to block a transient
+    # "FileList set, UI not yet caught up" false positive.
+    return text.strip()
+
+
+def _normalize_resume_ui_filename(text: str) -> str:
+    """Normalizes Lever's visible `.filename` readback for an exact
+    comparison against the uploaded file's own basename: collapses
+    whitespace and strips any `C:\\fakepath\\`-style path prefix a
+    browser may prepend. Never fuzzy-matches otherwise -- a truncated or
+    simply different filename must still compare unequal.
+    """
+    normalized = " ".join(text.split())
+    for separator in ("\\", "/"):
+        if separator in normalized:
+            normalized = normalized.rsplit(separator, 1)[-1]
+    return normalized
+
+
 def _resume_is_attached(page: Page, field: DiscoveredField, filename: str | None) -> bool:
+    """True only when the exact, discovered resume input's own `FileList`
+    carries `filename`, corroborated by Lever's own visible filename
+    readback whenever that UI element is present in the markup.
+
+    A raw `FileList` read alone can be a transient snapshot taken mid-way
+    through Lever's own asynchronous upload/parse handling (the "working"
+    state before "success"/"failure" resolves): when the markup exposes a
+    `.filename` readback, it must also show that same filename -- an exact
+    match after normalizing only harmless whitespace/path-prefix
+    formatting, never a substring match, since a substring match would
+    also accept a truncated or otherwise-wrong filename. A stale or
+    still-empty `.filename` span blocks a false positive even though
+    `input.files` already lists the file; a readback that could not even
+    be evaluated fails closed rather than falling back to the `FileList`
+    check alone. A "success"/"failure" class is Lever's resume-*parsing*
+    indicator (whether it could extract contact details from the file),
+    not the attachment state, so it is deliberately never read here.
+    """
     names = _file_names(page, field)
-    if filename and filename in names:
+    if filename:
+        if filename not in names:
+            return False
+    elif not names:
+        return False
+    ui_text = _resume_filename_ui_text(page, field)
+    if ui_text is _RESUME_UI_READBACK_FAILED:
+        return False
+    if ui_text is None:
         return True
-    if filename is None:
-        return bool(names)
-    return False
+    if not ui_text:
+        return False
+    if filename:
+        return _normalize_resume_ui_filename(ui_text) == filename
+    return True
+
+
+def _wait_for_resume_attached(
+    page: Page,
+    field: DiscoveredField,
+    filename: str | None,
+    *,
+    timeout_ms: int = _RESUME_ATTACHMENT_POLL_TIMEOUT_MS,
+) -> bool:
+    """Bounded poll (never indefinite) for `_resume_is_attached`, so a slow
+    asynchronous Lever upload/parse cycle is not mistaken for a failed
+    attachment.
+    """
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while True:
+        if _resume_is_attached(page, field, filename):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        page.wait_for_timeout(_RESUME_ATTACHMENT_POLL_INTERVAL_MS)
+
+
+def _resume_upload_trigger(locator: Locator) -> Locator | None:
+    """A clickable control that can open a native file-chooser for the
+    resume input, used only as a fallback when a direct `set_input_files`
+    call did not result in a verified attachment.
+
+    Tries the input's immediate parent first for either a non-submit
+    `<button>` (the legacy template) or an `<a>` (the current
+    `<a class="visible-resume-upload">` template observed live), then
+    falls back to the nearest `.visible-resume-upload`-classed ancestor in
+    case the input is nested deeper than one level.
+    """
+    parent = locator.locator("xpath=..")
+    clickable = parent.locator('button:not([type="submit"]), a')
+    if clickable.count() > 0:
+        return clickable.first
+    ancestor_anchor = locator.locator("xpath=ancestor::a[contains(@class, 'visible-resume-upload')]")
+    if ancestor_anchor.count() > 0:
+        return ancestor_anchor.first
+    return None

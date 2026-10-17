@@ -420,6 +420,58 @@ def test_resume_upload_read_back() -> None:
         session.close()
 
 
+# Mirrors the actual public `jobs.lever.co/<company>/.../apply` resume
+# block: no `required` attribute on the `<input>` itself, wrapped in an
+# `<a class="visible-resume-upload">` (not a plain `<label for=...>`), and
+# an asynchronous `.filename` readback that only appears ~300ms after the
+# native `change` event -- see the fixture file for the full shape and the
+# working/success/failure spans a correct implementation must not confuse
+# with the attachment state itself.
+LEVER_REAL_RESUME_MARKUP_FIXTURE = Path("tests/fixtures/autofill/lever_application_real_resume_markup.html")
+
+
+def test_real_resume_markup_discovers_required_field_without_required_attribute() -> None:
+    session = _open(LEVER_REAL_RESUME_MARKUP_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        resume = _field(adapter.discover_fields(session.page), "Resume")
+        assert resume.field_type == "file"
+        assert resume.required is True
+    finally:
+        session.close()
+
+
+def test_real_resume_markup_upload_waits_for_asynchronous_filename_readback() -> None:
+    """A direct `set_input_files` resolves `input.files` immediately, but
+    the fixture's own JS (modeling Lever's real async handling) only
+    updates the visible `.filename` span ~300ms later. `upload_resume`
+    must ride out that delay via its own bounded wait rather than reporting
+    failure (or a premature, unconfirmed success) before the UI catches up.
+    """
+    session = _open(LEVER_REAL_RESUME_MARKUP_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        resume = _field(adapter.discover_fields(session.page), "Resume")
+        assert adapter.upload_resume(session.page, RESUME_FIXTURE, resume) is True
+        assert adapter.read_back(session.page, resume) == RESUME_FIXTURE.name
+        assert adapter.verify_resume_attached(session.page, resume, RESUME_FIXTURE.name) is True
+    finally:
+        session.close()
+
+
+def test_real_resume_markup_never_attached_without_upload() -> None:
+    """No upload ever happened -- the bounded wait must fail closed, never
+    report success just because Lever's own "working" state toggled.
+    """
+    session = _open(LEVER_REAL_RESUME_MARKUP_FIXTURE)
+    try:
+        adapter = LeverAdapter()
+        resume = _field(adapter.discover_fields(session.page), "Resume")
+        assert adapter.verify_resume_attached(session.page, resume, RESUME_FIXTURE.name) is False
+    finally:
+        session.close()
+
+
 def test_never_submits() -> None:
     session = _open(LEVER_FIXTURE)
     try:

@@ -81,6 +81,14 @@ class AutofillAdapter(Protocol):
     # (currently only `AshbyAdapter` does), so it is deliberately left out
     # of this Protocol and always resolved via
     # `getattr(adapter, "upload_cover_letter_file", None)`.
+    #
+    # `verify_resume_attached(page, field, filename) -> bool` is the same
+    # kind of optional hook (currently only `LeverAdapter` defines it,
+    # resolved via `getattr(adapter, "verify_resume_attached", None)`): a
+    # bounded-wait re-check of a required resume control's attachment at
+    # the very end of `_fill_open_page`, after every other field has had a
+    # chance to run its own page-side JS. Greenhouse/Ashby never define it,
+    # so their result status is unaffected by this re-check.
 
 
 def default_adapter_for_source(source: str) -> AutofillAdapter:
@@ -317,6 +325,7 @@ class AutofillService:
         resume_uploaded = False
         cover_letter_filled = False
         sanctions_none_of_above_confirmed = False
+        resume_attachment_failed_required = False
 
         resume_items: list[ClassifiedField] = []
         observe_final_fill_plan = getattr(adapter, "observe_final_fill_plan", None)
@@ -427,6 +436,22 @@ class AutofillService:
                                 f"Cover letter file was not attached for '{item.field.label}': "
                                 "generation returned no text."
                             )
+                    elif is_lever and item.kind is QuestionKind.RESUME and item.field.required:
+                        # A required Lever resume control that was
+                        # *discovered* but never queued into `resume_items`
+                        # above (e.g. `map_question` couldn't resolve a
+                        # usable resume path for it) must not be allowed to
+                        # silently stay out of `resume_attachment_failed_required`
+                        # -- `_append_unresolved` below already records it
+                        # as unresolved_required, but on its own that never
+                        # escalates `status` past READY_FOR_REVIEW. No
+                        # upload is ever attempted here (never with
+                        # generated text or any other stand-in value).
+                        warnings.append(
+                            f"Resume was not attached for '{item.field.label}': the control was "
+                            "discovered but could not be mapped to an uploadable resume."
+                        )
+                        resume_attachment_failed_required = True
                     _append_unresolved(item, record, unresolved_required, unresolved_optional)
                 continue
             if (
@@ -495,6 +520,8 @@ class AutofillService:
             elif item.kind is not QuestionKind.GITLAB_USERNAME:
                 unresolved_optional.append(record)
 
+        required_resume_items = [item for item in resume_items if item.field.required]
+
         for item in resume_items:
             record = _field_result(item)
             resume_uploaded = _upload_resume_attempt(
@@ -509,6 +536,8 @@ class AutofillService:
             else:
                 unresolved_required.append(record) if item.field.required else unresolved_optional.append(record)
                 warnings.append(f"Resume was not attached for '{item.field.label}'.")
+                if item.field.required:
+                    resume_attachment_failed_required = True
 
         for item in cover_letter_file_items:
             record = _field_result(item)
@@ -532,6 +561,38 @@ class AutofillService:
                 unresolved_required.append(record) if item.field.required else unresolved_optional.append(record)
                 warnings.append(f"Cover letter file was not attached for '{item.field.label}'.")
 
+        verify_resume_attached = getattr(adapter, "verify_resume_attached", None)
+        if verify_resume_attached is not None:
+            # Re-checked once more here, after every other field and the
+            # optional cover-letter file have been filled, so a later
+            # action elsewhere on the page that quietly clears an
+            # already-verified resume control is still caught before this
+            # run is ever reported READY_FOR_REVIEW. Only required resume
+            # items that are still believed attached are worth re-checking;
+            # one already recorded as failed above is already accounted
+            # for.
+            # Identified by `(label, name)`, not label alone, so two
+            # distinct resume controls that happen to share the same
+            # visible label (e.g. a duplicated/ambiguous question on the
+            # page) can't have one's failure removal in `filled` or
+            # dedup-against-`unresolved_required` check accidentally match
+            # the other's unrelated record.
+            already_failed_identities = {(record.label, record.name) for record in unresolved_required}
+            for item in required_resume_items:
+                identity = (item.field.label, item.field.name)
+                if identity in already_failed_identities:
+                    continue
+                if verify_resume_attached(page, item.field, resume_path.name):
+                    continue
+                resume_attachment_failed_required = True
+                resume_uploaded = False
+                filled[:] = [record for record in filled if (record.label, record.name) != identity]
+                unresolved_required.append(_field_result(item))
+                warnings.append(
+                    f"Resume attachment for '{item.field.label}' could not be confirmed at the "
+                    "end of Prepare; please attach it manually before submitting."
+                )
+
         privacy_trace = _build_privacy_acknowledgement_trace(classified, adapter, filled)
         if privacy_trace is not None:
             privacy_report = format_privacy_acknowledgement_report(privacy_trace)
@@ -539,11 +600,17 @@ class AutofillService:
             if _privacy_trace_should_warn(privacy_trace):
                 warnings.append(privacy_report)
 
+        status = (
+            AutofillStatus.NEEDS_MANUAL_INTERVENTION
+            if resume_attachment_failed_required
+            else AutofillStatus.READY_FOR_REVIEW
+        )
+
         return stage1_autofill_result(
             source=vacancy.source,
             external_id=vacancy.external_id,
             application_url=vacancy.application_url,
-            status=AutofillStatus.READY_FOR_REVIEW,
+            status=status,
             filled_fields=filled,
             unresolved_required_fields=unresolved_required,
             unresolved_optional_fields=unresolved_optional,

@@ -75,6 +75,14 @@ class _FakeLeverAdapter(LeverAdapter):
             return self._upload_resume_results.pop(0)
         return False
 
+    def verify_resume_attached(self, page: object, field: object, filename: str) -> bool:
+        # The real `LeverAdapter.verify_resume_attached` is itself
+        # DOM-facing (it re-reads the live page); overridden here like
+        # every other DOM-facing method on this fake so the diagnostics
+        # under test never touch the fake `page` placeholder these tests
+        # use.
+        return True
+
 
 class _StallingFillLeverAdapter(LeverAdapter):
     """`fill_field` never returns in a real stall; a unit test can only

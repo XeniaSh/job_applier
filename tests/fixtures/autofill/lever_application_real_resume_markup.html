@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Apply — Example Corp</title>
+</head>
+<body>
+  <div class="application-page">
+    <h2>Senior Backend Engineer</h2>
+    <form id="application-form" method="post" action="/apply">
+      <div class="section page-centered">
+        <div class="section-wrapper">
+          <ul>
+            <li class="application-question">
+              <label for="name">Full name<span class="required">*</span></label>
+              <input id="name" name="name" type="text" class="app-input" required>
+            </li>
+            <!--
+              Mirrors the real, publicly observed `jobs.lever.co/<company>/.../apply`
+              resume block: the `<input>` itself carries no `required`
+              attribute at all (recognition relies on the surrounding
+              `.required` marker, not the control), is wrapped in an `<a
+              class="visible-resume-upload">` (not a plain `<label for=...>`),
+              and the only attachment signal Lever's own JS exposes is the
+              sibling `<span class="filename">` -- populated asynchronously
+              after the native `change` event, never synchronously. The
+              working/success/failure spans are Lever's resume-*parsing*
+              indicator, never the attachment state, and must never be read
+              as one.
+            -->
+            <li class="application-question resume">
+              <label>
+                <div class="application-label">Resume/CV <span class="required">✱</span></div>
+                <a class="visible-resume-upload">
+                  <span class="filename"></span>
+                  <span class="default-label">ATTACH RESUME/CV</span>
+                  <input
+                    class="application-file-input invisible-resume-upload"
+                    data-qa="input-resume"
+                    id="resume-upload-input"
+                    name="resume"
+                    tabindex="-1"
+                    type="file"
+                  >
+                </a>
+                <span class="resume-upload-working" hidden>Working&hellip;</span>
+                <span class="resume-upload-success" hidden>Resume parsed successfully.</span>
+                <span class="resume-upload-failure" hidden>We could not parse this resume.</span>
+              </label>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </form>
+  </div>
+  <script>
+    // Models Lever's own asynchronous upload/parse handling: the visible
+    // `.filename` readback and the working/success state only appear a
+    // tick after the native `change` event, never synchronously with it --
+    // and the "success" state here is deliberately about *parsing*, not
+    // attachment, so a test asserting on attachment must not key off it.
+    document.getElementById('resume-upload-input').addEventListener('change', function (event) {
+      var file = event.target.files && event.target.files[0];
+      var filenameSpan = document.querySelector('.filename');
+      var working = document.querySelector('.resume-upload-working');
+      var success = document.querySelector('.resume-upload-success');
+      working.hidden = false;
+      setTimeout(function () {
+        if (file) {
+          filenameSpan.textContent = file.name;
+        }
+        working.hidden = true;
+        success.hidden = false;
+      }, 300);
+    });
+  </script>
+</body>
+</html>
