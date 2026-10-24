@@ -79,6 +79,9 @@ work_eligibility:
   current_location_requires_visa_sponsorship: false
 
 application_files:
+  # Retained for schema compatibility only -- actual resume selection always
+  # goes through the four resume_profiles.yaml variants (see README "Resume
+  # Setup"), never this field. Not a fifth required PDF.
   default_resume: resumes/example_java_backend.pdf
   alternative_resumes: []
   cover_letter_strategy: generate

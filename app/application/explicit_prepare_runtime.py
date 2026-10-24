@@ -37,6 +37,10 @@ def build_prepare_application_service(
 
     llm_client = _optional_llm_client()
     candidate_name, cover_letter_language, cover_letter_pdf_font_path = _cover_letter_document_settings()
+    # Loaded eagerly (never swallowed): an invalid/missing resume_profiles.yaml
+    # must fail this call, not silently fall back to the legacy candidate
+    # profile default resume once AutofillService.run resolves a vacancy.
+    resume_profiles = _load_resume_profiles()
     autofill_kwargs: dict[str, object] = {}
     if wait_for_review is not None:
         autofill_kwargs["wait_for_review"] = wait_for_review
@@ -49,9 +53,24 @@ def build_prepare_application_service(
         candidate_name=candidate_name,
         cover_letter_language=cover_letter_language,
         cover_letter_pdf_font_path=cover_letter_pdf_font_path,
+        resume_profiles=resume_profiles,
         **autofill_kwargs,
     )
     return PrepareApplicationService(autofill, lifecycle)
+
+
+def _load_resume_profiles():
+    """The same configured `resume_profiles.yaml` (via `Settings.resume_profiles_path`)
+    used by the production Telegram/LinkedIn paths. Deliberately not wrapped
+    in a try/except: an invalid or missing config must fail this call
+    visibly (the caller in `app.cli` already reports that as a failed
+    Prepare), never silently substitute the legacy candidate-profile
+    default resume.
+    """
+    from app.config import Settings
+    from app.resume_profiles import load_resume_profiles
+
+    return load_resume_profiles(Settings().resume_profiles_path)
 
 
 def _optional_llm_client():

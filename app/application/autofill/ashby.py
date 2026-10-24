@@ -683,6 +683,16 @@ class AshbyAdapter:
     def upload_resume(self, page: Page, resume_path: Path, field: DiscoveredField) -> bool:
         return _upload_file_to_field(page, resume_path, field)
 
+    def verify_resume_attached(self, page: Page, field: DiscoveredField, filename: str) -> bool:
+        """Re-check, with a short bounded wait, that the resume control this
+        same Prepare run already uploaded (and verified) earlier is still
+        showing that exact file -- mirrors `LeverAdapter.verify_resume_attached`,
+        called once more at the very end of Prepare after every other field
+        has had a chance to run its own page-side JS. Never re-uploads; a
+        failure here is only ever reported, not retried.
+        """
+        return _wait_for_file_attached(page, field, filename)
+
     def upload_cover_letter_file(self, page: Page, file_path: Path, field: DiscoveredField) -> bool:
         """Distinct from `upload_resume` in which field it targets (the
         separate, optional Cover Letter control) and in how it verifies
@@ -1893,6 +1903,38 @@ def _file_is_attached(page: Page, field: DiscoveredField, filename: str | None) 
     if filename is None:
         return bool(names)
     return False
+
+
+_RESUME_VERIFY_POLL_TIMEOUT_MS = 3_000
+_RESUME_VERIFY_POLL_INTERVAL_MS = 250
+
+
+def _wait_for_file_attached(
+    page: Page,
+    field: DiscoveredField,
+    filename: str | None,
+    *,
+    timeout_ms: int = _RESUME_VERIFY_POLL_TIMEOUT_MS,
+) -> bool:
+    """Bounded poll (never indefinite) for `_file_is_attached`, so a brief
+    gap between a prior action on the page and this final re-check is not
+    mistaken for a cleared/disappeared attachment.
+
+    This is the final, after-everything-else re-check, with no retry left --
+    a `PlaywrightError` here (e.g. the page/context closed concurrently)
+    must fail this one readback closed (False, "not confirmed"), never
+    bubble out as an unrelated whole-Prepare `UNEXPECTED_ERROR`.
+    """
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while True:
+        try:
+            if _file_is_attached(page, field, filename):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            page.wait_for_timeout(_RESUME_VERIFY_POLL_INTERVAL_MS)
+        except PlaywrightError:
+            return False
 
 
 def _upload_file_to_field(page: Page, file_path: Path, field: DiscoveredField) -> bool:

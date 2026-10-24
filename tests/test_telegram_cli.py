@@ -15,6 +15,7 @@ from app.models import (
 )
 from app.storage.telegram_delivery import STATUS_PREPARE_REQUESTED, STATUS_PREPARED, TelegramDeliveryStorage
 from app.telegram.destinations import TelegramDestination
+from tests.pdf_fixtures import write_alternate_valid_pdf, write_minimal_valid_pdf
 
 
 def _set_base_env(monkeypatch, *, with_telegram: bool = True) -> None:
@@ -1145,8 +1146,8 @@ def test_telegram_cache_resumes_warmup_and_force(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("RESUMES_DIR", str(tmp_path / "resumes"))
     resumes_dir = tmp_path / "resumes"
     resumes_dir.mkdir(parents=True, exist_ok=True)
-    (resumes_dir / "java-backend.pdf").write_bytes(b"%PDF one")
-    (resumes_dir / "java-backend-ai.pdf").write_bytes(b"%PDF two")
+    write_minimal_valid_pdf(resumes_dir / "java-backend.pdf")
+    write_alternate_valid_pdf(resumes_dir / "java-backend-ai.pdf")
     profiles_path = tmp_path / "resume_profiles.yaml"
     profiles_path.write_text(
         """
@@ -1414,7 +1415,7 @@ def test_resume_button_with_real_cache_service_sends_single_reply_pdf(tmp_path) 
     resumes_dir = tmp_path / "resumes"
     resumes_dir.mkdir(parents=True, exist_ok=True)
     pdf = resumes_dir / "java-backend.pdf"
-    pdf.write_bytes(b"%PDF")
+    write_minimal_valid_pdf(pdf)
     db_path = tmp_path / "jobs.db"
     storage = TelegramDeliveryStorage(db_path=db_path)
     storage.save_sent(source="linkedin-email", external_id="1", chat_id="123", message_id=12)

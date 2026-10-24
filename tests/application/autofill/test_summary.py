@@ -112,6 +112,62 @@ def test_summary_skips_blank_labels() -> None:
     assert text.count("- ") >= 1
 
 
+def test_summary_includes_resume_variant_and_file_when_present() -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:agoda",
+        external_id="1",
+        status=AutofillStatus.READY_FOR_REVIEW,
+        resume_uploaded=True,
+    ).model_copy(update={"resume_variant": "ai_backend_nz", "resume_file": "ai-backend-nz.pdf"})
+    text = render_autofill_summary(result)
+    assert "Variant: ai_backend_nz (ai-backend-nz.pdf)" in text
+
+
+def test_summary_includes_variant_reason_when_present() -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:agoda",
+        external_id="1",
+        status=AutofillStatus.READY_FOR_REVIEW,
+        resume_uploaded=True,
+    ).model_copy(
+        update={
+            "resume_variant": "ai_backend",
+            "resume_file": "ai-backend.pdf",
+            "resume_variant_reason": "Hands-on AI/LLM evidence in role or responsibilities ('llm').",
+        }
+    )
+    text = render_autofill_summary(result)
+    assert "Variant reason: Hands-on AI/LLM evidence in role or responsibilities ('llm')." in text
+
+
+def test_summary_includes_location_uncertainty_when_present() -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:agoda",
+        external_id="1",
+        status=AutofillStatus.READY_FOR_REVIEW,
+        resume_uploaded=True,
+    ).model_copy(
+        update={
+            "resume_variant": "java_backend_nz",
+            "resume_file": "java-backend-nz.pdf",
+            "resume_location_warning": "Vacancy location is missing.",
+        }
+    )
+    text = render_autofill_summary(result)
+    assert "Location uncertainty: Vacancy location is missing." in text
+
+
+def test_summary_omits_resume_variant_line_when_absent() -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:agoda",
+        external_id="1",
+        status=AutofillStatus.READY_FOR_REVIEW,
+        resume_uploaded=False,
+    )
+    text = render_autofill_summary(result)
+    assert "Variant:" not in text
+
+
 def test_summary_includes_current_location_sponsorship_reason() -> None:
     result = stage1_autofill_result(
         source="target_company:greenhouse:gitlab",

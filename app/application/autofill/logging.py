@@ -18,12 +18,17 @@ def redact_pii(value: str) -> str:
 
 def log_autofill_result(result: AutofillResult) -> None:
     logger.info(
-        "autofill status=%s source=%s external_id=%s resume_uploaded=%s submit_performed=%s",
+        "autofill status=%s source=%s external_id=%s resume_uploaded=%s submit_performed=%s "
+        "resume_variant=%s resume_file=%s resume_variant_reason=%s resume_location_warning=%s",
         result.status.value,
         result.source,
         result.external_id,
         result.resume_uploaded,
         result.submit_performed,
+        result.resume_variant or "n/a",
+        result.resume_file or "n/a",
+        result.resume_variant_reason or "n/a",
+        result.resume_location_warning or "n/a",
     )
     if result.application_url:
         logger.info("autofill domain=%s", _domain(result.application_url))

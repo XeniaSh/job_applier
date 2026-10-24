@@ -17,7 +17,7 @@ real chain instead:
 
 Only the leaves that would otherwise need a live browser, network, or LLM
 call are replaced: `DefaultVacancyResolver`, `GreenhouseAdapter`,
-`BrowserSession`, `resolve_default_resume_path`, and the LLM client.
+`BrowserSession`, the configured resume profiles, and the LLM client.
 """
 
 from __future__ import annotations
@@ -44,9 +44,11 @@ from app.company_watch.application_recommendation import (
 from app.company_watch.feasibility import ApplicationFeasibility
 from app.company_watch.seniority import SeniorityClassification
 from app.models import Decision, RecommendedCoverTemplate, RecommendedResume, VacancyEvaluation
+from app.resume_profiles import ResumeProfile, ResumeProfiles
 from app.storage.telegram_delivery import TelegramDeliveryStorage
 from app.telegram.client import TelegramRequestError, parse_review_done_session_id
 from app.telegram.models import TelegramMessageRef
+from tests.pdf_fixtures import write_minimal_valid_pdf
 
 SOURCE = "target_company:greenhouse:adyen"
 EXTERNAL_ID = "7938074"
@@ -85,7 +87,8 @@ class _FakeBrowserSession:
     opened_url: str | None = None
     page: object = object()
 
-    def open(self, url: str) -> object:
+    def open(self, url: str, *, is_usable=None) -> object:
+        _ = is_usable
         self.opened_url = url
         return self.page
 
@@ -239,9 +242,10 @@ def _run_real_prepare(
     monkeypatch.setattr("app.application.autofill.resolver.DefaultVacancyResolver", _FakeResolver)
     monkeypatch.setattr("app.application.autofill.service.GreenhouseAdapter", _FakeAdapter)
     monkeypatch.setattr("app.application.autofill.service.BrowserSession", browser_session_cls)
+    resume_pdf = write_minimal_valid_pdf(tmp_path / "resume.pdf")
     monkeypatch.setattr(
-        "app.application.autofill.service.resolve_default_resume_path",
-        lambda profile: Path(__file__),  # any file that exists
+        "app.application.explicit_prepare_runtime._load_resume_profiles",
+        lambda: ResumeProfiles((ResumeProfile("java_backend", "Java backend.", resume_pdf),)),
     )
     monkeypatch.setattr("app.application.explicit_prepare_runtime._optional_llm_client", lambda: None)
 

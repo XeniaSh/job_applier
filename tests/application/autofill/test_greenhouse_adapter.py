@@ -18,6 +18,7 @@ from app.application.candidate_profile import CandidateProfile
 GREENHOUSE_FIXTURE = Path("tests/fixtures/autofill/greenhouse_application.html")
 JOB_BOARDS_FIXTURE = Path("tests/fixtures/autofill/greenhouse_job_boards.html")
 RESUME_BUTTON_FIXTURE = Path("tests/fixtures/autofill/greenhouse_resume_button.html")
+RESUME_TEXTONLY_FIXTURE = Path("tests/fixtures/autofill/greenhouse_resume_textonly.html")
 UNRELATED_FIXTURE = Path("tests/fixtures/autofill/unrelated.html")
 CHALLENGE_FIXTURE = Path("tests/fixtures/autofill/challenge.html")
 RESUME_FIXTURE = Path("tests/fixtures/autofill/resume.txt")
@@ -201,6 +202,48 @@ def test_resume_upload_read_back() -> None:
         resume = _field(adapter.discover_fields(session.page), "Resume")
         assert adapter.upload_resume(session.page, RESUME_FIXTURE, resume) is True
         assert adapter.read_back(session.page, resume) == RESUME_FIXTURE.name
+    finally:
+        session.close()
+
+
+def test_verify_resume_attached_confirms_a_real_upload() -> None:
+    """`verify_resume_attached` -- the final, no-reupload re-check `AutofillService`
+    runs after every other field has been filled -- must confirm a resume
+    that genuinely uploaded, mirroring Lever/Ashby's own `verify_resume_attached`.
+    """
+    session = _open(GREENHOUSE_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _field(adapter.discover_fields(session.page), "Resume")
+        assert adapter.upload_resume(session.page, RESUME_FIXTURE, resume) is True
+        assert adapter.verify_resume_attached(session.page, resume, RESUME_FIXTURE.name) is True
+    finally:
+        session.close()
+
+
+def test_verify_resume_attached_fails_closed_when_never_uploaded() -> None:
+    session = _open(GREENHOUSE_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _field(adapter.discover_fields(session.page), "Resume")
+        assert adapter.verify_resume_attached(session.page, resume, RESUME_FIXTURE.name) is False
+    finally:
+        session.close()
+
+
+def test_resume_body_text_decoy_is_never_mistaken_for_attachment() -> None:
+    """Regression: `_resume_is_attached` must never fall back to scanning
+    the page's visible body text for the filename. A page that merely
+    echoes a filename in unrelated copy (e.g. an upload-rejection toast, or
+    a mention of a previous applicant's file) must stay unattached when the
+    resume input's own `FileList` is empty.
+    """
+    from app.application.autofill.greenhouse import _resume_is_attached
+
+    session = _open(RESUME_TEXTONLY_FIXTURE)
+    try:
+        field = DiscoveredField(label="Resume", field_type="file", element_id="resume")
+        assert _resume_is_attached(session.page, field, "resume.pdf") is False
     finally:
         session.close()
 

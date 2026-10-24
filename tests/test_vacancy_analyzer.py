@@ -1155,3 +1155,154 @@ def test_agoda_java_kotlin_backend_is_not_false_ignore() -> None:
     assert "experience" in reason
     assert "10" in result.decision_reason
     assert "6" in result.decision_reason
+
+
+def _skills() -> CandidateSkillsProfile:
+    return CandidateSkillsProfile(
+        strong_skills=["java", "spring boot"],
+        practical_skills=["kafka"],
+        absent_skills=[],
+        aliases={},
+        experience_years=6,
+        core_skills=["java", "spring boot"],
+        skill_weights={"java": 10, "spring boot": 9, "kafka": 7},
+    )
+
+
+def test_resume_variant_defaults_to_java_backend_without_ai_or_nz_evidence() -> None:
+    class PlainClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["Java", "Spring Boot"],
+                optional_skills=[],
+                responsibilities=["Build backend services"],
+                role_type="Backend Engineer",
+                short_summary="Backend role",
+            )
+
+    analyzer = VacancyAnalyzer(llm_client=PlainClient(), skills_loader=_skills, prompt_loader=lambda: "PROMPT")
+    result = analyzer.analyze(
+        "Title: Backend Engineer\nLocation: Berlin, Germany\nDescription: Backend role",
+        content_completeness="FULL",
+    )
+    assert result.resume_variant == "java_backend"
+    assert result.recommended_resume == RecommendedResume.JAVA
+
+
+def test_resume_variant_selects_ai_backend_from_reliable_extraction() -> None:
+    class AiClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["Java", "LLM integration"],
+                optional_skills=[],
+                responsibilities=["Operate a retrieval augmented generation pipeline"],
+                role_type="Backend Engineer",
+                short_summary="AI automation role",
+            )
+
+    analyzer = VacancyAnalyzer(llm_client=AiClient(), skills_loader=_skills, prompt_loader=lambda: "PROMPT")
+    result = analyzer.analyze(
+        "Title: Backend Engineer\nLocation: Berlin, Germany\nDescription: AI role",
+        content_completeness="FULL",
+    )
+    assert result.resume_variant == "ai_backend"
+    assert result.recommended_resume == RecommendedResume.JAVA_AI
+
+
+def test_resume_variant_does_not_flip_ai_on_casual_marketing_mention() -> None:
+    """Regression guard for the old substring('ai' in role_type) bug: a
+    role_type like 'Retail Backend Engineer' must never select the AI
+    resume just because it contains the substring 'ai'.
+    """
+
+    class RetailClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["Java", "Spring Boot"],
+                optional_skills=[],
+                responsibilities=["Build retail backend services"],
+                role_type="Retail Backend Engineer",
+                short_summary="Retail backend role",
+            )
+
+    analyzer = VacancyAnalyzer(llm_client=RetailClient(), skills_loader=_skills, prompt_loader=lambda: "PROMPT")
+    result = analyzer.analyze(
+        "Title: Retail Backend Engineer\nDescription: Retail backend role",
+        content_completeness="FULL",
+    )
+    assert result.resume_variant == "java_backend"
+    assert result.recommended_resume == RecommendedResume.JAVA
+
+
+def test_resume_variant_selects_nz_variant_from_location_line() -> None:
+    class PlainClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["Java", "Spring Boot"],
+                optional_skills=[],
+                responsibilities=["Build backend services"],
+                role_type="Backend Engineer",
+                short_summary="Backend role",
+            )
+
+    analyzer = VacancyAnalyzer(llm_client=PlainClient(), skills_loader=_skills, prompt_loader=lambda: "PROMPT")
+    result = analyzer.analyze(
+        "Title: Backend Engineer\nLocation: Auckland, New Zealand\nDescription: Backend role",
+        content_completeness="FULL",
+    )
+    assert result.resume_variant == "java_backend_nz"
+    assert result.resume_location_warning is None
+
+
+def test_resume_variant_conflicting_location_falls_back_with_warning() -> None:
+    class PlainClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=["Java", "Spring Boot"],
+                optional_skills=[],
+                responsibilities=["Build backend services"],
+                role_type="Backend Engineer",
+                short_summary="Backend role",
+            )
+
+    analyzer = VacancyAnalyzer(llm_client=PlainClient(), skills_loader=_skills, prompt_loader=lambda: "PROMPT")
+    result = analyzer.analyze(
+        "Title: Backend Engineer\nLocation: New Zealand or Australia\nDescription: Backend role",
+        content_completeness="FULL",
+    )
+    assert result.resume_variant == "java_backend"
+    assert result.resume_location_warning is not None
+    assert "New Zealand" in result.resume_location_warning
+
+
+def test_resume_variant_generic_missing_stack_forces_non_ai() -> None:
+    class AmbiguousAiClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            return VacancyExtraction(
+                mandatory_skills=[],
+                optional_skills=[],
+                responsibilities=["Operate an LLM pipeline"],
+                role_type="Senior Backend Developer",
+                short_summary="Short",
+            )
+
+    analyzer = VacancyAnalyzer(llm_client=AmbiguousAiClient(), skills_loader=_skills, prompt_loader=lambda: "PROMPT")
+    result = analyzer.analyze("Title: Senior Backend Developer", content_completeness="PARTIAL")
+    # generic_missing_stack always forces the legacy enum to JAVA; the
+    # canonical variant must agree rather than silently staying AI.
+    assert result.recommended_resume == RecommendedResume.JAVA
+    assert result.resume_variant == "java_backend"
+
+
+def test_deterministic_title_only_path_keeps_java_but_detects_nz_location() -> None:
+    class UnusedClient(FakeLLMClient):
+        def extract_vacancy(self, prompt: str, vacancy: str) -> VacancyExtraction:
+            raise AssertionError("LLM must not be called for a deterministic JVM title match")
+
+    analyzer = VacancyAnalyzer(llm_client=UnusedClient(), skills_loader=_skills, prompt_loader=lambda: "PROMPT")
+    result = analyzer.analyze(
+        "Title: Senior Java Backend Engineer\nLocation: Wellington, New Zealand",
+        content_completeness="MINIMAL",
+    )
+    assert result.recommended_resume == RecommendedResume.JAVA
+    assert result.resume_variant == "java_backend_nz"

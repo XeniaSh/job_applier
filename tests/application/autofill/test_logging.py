@@ -42,3 +42,48 @@ def test_log_autofill_result_does_not_include_pii(caplog) -> None:
     assert "Email" in combined
     assert "SUPPORTED_DETERMINISTIC" in combined
     assert "ada.example@example.test" not in combined
+
+
+def test_log_autofill_result_includes_resume_variant_and_file(caplog) -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:agoda",
+        external_id="1",
+        status=AutofillStatus.READY_FOR_REVIEW,
+        resume_uploaded=True,
+    ).model_copy(update={"resume_variant": "ai_backend_nz", "resume_file": "ai-backend-nz.pdf"})
+    with caplog.at_level(logging.INFO):
+        log_autofill_result(result)
+    combined = " ".join(record.getMessage() for record in caplog.records)
+    assert "resume_variant=ai_backend_nz" in combined
+    assert "resume_file=ai-backend-nz.pdf" in combined
+
+
+def test_log_autofill_result_includes_resume_variant_reason(caplog) -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:agoda",
+        external_id="1",
+        status=AutofillStatus.READY_FOR_REVIEW,
+        resume_uploaded=True,
+    ).model_copy(
+        update={
+            "resume_variant": "ai_backend",
+            "resume_variant_reason": "Hands-on AI/LLM evidence in role or responsibilities ('llm').",
+        }
+    )
+    with caplog.at_level(logging.INFO):
+        log_autofill_result(result)
+    combined = " ".join(record.getMessage() for record in caplog.records)
+    assert "resume_variant_reason=Hands-on AI/LLM evidence in role or responsibilities ('llm')." in combined
+
+
+def test_log_autofill_result_includes_resume_location_warning(caplog) -> None:
+    result = stage1_autofill_result(
+        source="target_company:greenhouse:agoda",
+        external_id="1",
+        status=AutofillStatus.READY_FOR_REVIEW,
+        resume_uploaded=True,
+    ).model_copy(update={"resume_variant": "java_backend_nz", "resume_location_warning": "Vacancy location is missing."})
+    with caplog.at_level(logging.INFO):
+        log_autofill_result(result)
+    combined = " ".join(record.getMessage() for record in caplog.records)
+    assert "resume_location_warning=Vacancy location is missing." in combined

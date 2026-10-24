@@ -7,6 +7,8 @@ import typer
 
 from app.application.autofill.models import AutofillResult, AutofillStatus
 from app.application.autofill.summary import render_autofill_summary
+from app.resume_policy import RESUME_VARIANT_IDS
+from app.resume_profiles import ResumeProfilesLoadError
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,11 @@ def register_autofill_command(app: typer.Typer) -> None:
             True,
             "--keep-open/--no-keep-open",
             help="Leave the headed browser open until Enter is pressed.",
+        ),
+        resume_variant: str | None = typer.Option(
+            None,
+            "--resume-variant",
+            help=f"Force one resume variant instead of the deterministic policy. One of: {', '.join(RESUME_VARIANT_IDS)}.",
         ),
     ) -> None:
         from app.application.autofill.answers import ApplicationAnswerGenerator
@@ -46,10 +53,15 @@ def register_autofill_command(app: typer.Typer) -> None:
                 candidate_name=candidate_name,
                 cover_letter_language=cover_letter_language,
                 cover_letter_pdf_font_path=cover_letter_pdf_font_path,
+                resume_profiles=_resume_profiles(),
+                resume_variant_override=resume_variant,
             )
             result = service.run(source, external_id, keep_open=keep_open)
         except VacancyResolveError as exc:
             typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        except ResumeProfilesLoadError as exc:
+            typer.echo(f"Resume profiles configuration is invalid: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
         if not shown:
@@ -100,3 +112,19 @@ def _auto_submit_enabled() -> bool:
         return Settings().auto_submit_enabled
     except Exception:
         return False
+
+
+def _resume_profiles():
+    """The same configured `resume_profiles.yaml` (via `Settings.resume_profiles_path`)
+    used by the production Telegram/LinkedIn paths, so this diagnostic command
+    exercises the real resume-variant selection instead of the legacy
+    candidate-profile default. Deliberately not wrapped in a try/except: an
+    invalid or missing config must fail this command visibly, never silently
+    substitute the legacy candidate-profile default resume (which would
+    bypass the selected variant, its PDF validation, and `--resume-variant`).
+    """
+    from app.config import Settings
+    from app.resume_profiles import load_resume_profiles
+
+    settings = Settings()
+    return load_resume_profiles(settings.resume_profiles_path)

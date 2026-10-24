@@ -637,6 +637,17 @@ class GreenhouseAdapter:
     def resume_file_attached(self, page: Page, field: DiscoveredField) -> bool:
         return bool(_file_names(page, field))
 
+    def verify_resume_attached(self, page: Page, field: DiscoveredField, filename: str) -> bool:
+        """Re-check, with a short bounded wait, that the resume control this
+        same Prepare run already uploaded (and verified) earlier is still
+        showing that exact file -- mirrors `LeverAdapter.verify_resume_attached`
+        and `AshbyAdapter.verify_resume_attached`, called once more at the
+        very end of Prepare after every other field has had a chance to run
+        its own page-side JS. Never re-uploads; a failure here is only ever
+        reported, not retried.
+        """
+        return _wait_for_resume_attached(page, field, filename)
+
     def upload_cover_letter_file(self, page: Page, file_path: Path, field: DiscoveredField) -> bool:
         """Uploads a generated cover-letter PDF to Greenhouse's required
         Cover Letter *file* control -- distinct from, and never reusing, the
@@ -1225,13 +1236,23 @@ def _set_resume_files(page: Page, field: DiscoveredField, path: str) -> None:
     # trigger just because the transport is HTTP(S). Only when no resume
     # file input exists in the DOM (a dropzone widget that renders one only
     # after a chooser interaction) do we fall back to clicking an adjacent
-    # non-submit control to open the native file chooser.
-    resume_input = page.locator('input[type="file"]#resume')
-    target = resume_input if resume_input.count() > 0 else _resume_file_locator(page, field)
+    # non-submit control to open the native file chooser. Resolution always
+    # goes through `_resume_file_locator`, which scopes strictly to this
+    # field's own identity -- never a blanket "#resume" lookup performed
+    # ahead of it, which could silently target a *different* input than the
+    # one this field actually identifies.
+    target = _resume_file_locator(page, field)
     if target.count() > 0:
         target.set_input_files(path, timeout=5_000, no_wait_after=True)
         return
     if page.url.startswith("file:"):
+        return
+    # The adjacent-chooser fallback only ever opens the *default* "#resume"
+    # widget's own chooser. A field that explicitly identifies a different,
+    # missing control must stay missing -- it must never fall through to
+    # some other control's nearby chooser button just because one happens to
+    # exist next to "#resume" elsewhere on the page.
+    if field.element_id and field.element_id != "resume":
         return
     # A submit control is never the resume-attach trigger; excluding it keeps
     # this path from ever mistaking a nearby Submit button for one (no submit
@@ -1245,10 +1266,17 @@ def _set_resume_files(page: Page, field: DiscoveredField, path: str) -> None:
 
 
 def _resume_file_locator(page: Page, field: DiscoveredField) -> Locator:
+    # Once the field has a specific, discovered element_id, resolution stays
+    # scoped to that id -- it never falls through to the generic
+    # "#resume"/name*="resume" selector below, which belongs to a *different*
+    # input. A required control explicitly identified this way that is
+    # missing from the DOM must stay missing, never silently resolved to
+    # another input's attachment.
     if field.element_id:
         typed = page.locator(f'input[type="file"][id="{field.element_id}"]')
         if typed.count() > 0:
             return typed.first
+        return _field_locator(page, field).first
     locator = page.locator('input[type="file"][id="resume"], input[type="file"][name*="resume" i]')
     if locator.count() > 0:
         return locator.first
@@ -2393,30 +2421,65 @@ def _resume_is_attached(page: Page, field: DiscoveredField, filename: str | None
     # Scoped to the resume field's own file input (falls back to "#resume"
     # inside _file_names) rather than every file input on the page, so an
     # unrelated file input (e.g. a portfolio upload) can never be mistaken
-    # for a successful resume attachment.
+    # for a successful resume attachment. Never falls back to scanning the
+    # page's visible body text for `filename`: an upload-rejection toast or
+    # error message can legitimately echo the attempted filename back
+    # without the file ever having attached, so only the resume control's
+    # own `.files` state -- read via `_file_names` -- counts as a real
+    # attachment (mirrors `_cover_letter_file_attached` below and Ashby's
+    # `_file_is_attached`).
     names = _file_names(page, field)
-    if filename and filename in names:
-        return True
-    if filename is None:
-        return bool(names)
-    if not filename:
-        return False
-    try:
-        text = page.locator("body").inner_text(timeout=2_000)
-    except PlaywrightError:
-        return False
-    return filename in text
+    if filename:
+        return filename in names
+    return bool(names)
+
+
+_RESUME_VERIFY_POLL_TIMEOUT_MS = 3_000
+_RESUME_VERIFY_POLL_INTERVAL_MS = 250
+
+
+def _wait_for_resume_attached(
+    page: Page,
+    field: DiscoveredField,
+    filename: str | None,
+    *,
+    timeout_ms: int = _RESUME_VERIFY_POLL_TIMEOUT_MS,
+) -> bool:
+    """Bounded poll (never indefinite) for `_resume_is_attached`, so a brief
+    gap between a prior action on the page and this final re-check is not
+    mistaken for a cleared/disappeared attachment.
+
+    This is the final, after-everything-else re-check, with no retry left --
+    a `PlaywrightError` here (e.g. the page/context closed concurrently)
+    must fail this one readback closed (False, "not confirmed"), never
+    bubble out as an unrelated whole-Prepare `UNEXPECTED_ERROR`.
+    """
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while True:
+        try:
+            if _resume_is_attached(page, field, filename):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            page.wait_for_timeout(_RESUME_VERIFY_POLL_INTERVAL_MS)
+        except PlaywrightError:
+            return False
 
 
 def _file_names(page: Page, field: DiscoveredField) -> list[str]:
+    # Scoped strictly to the discovered field's own id (defaulting to
+    # "resume" only when the field has no element_id at all, i.e. no more
+    # specific identity was ever discovered) -- never a secondary fallback
+    # to a *different*, generic "#resume" input once a distinct id has been
+    # identified. Otherwise a required control explicitly identified by a
+    # different id that is genuinely missing/empty could read back another
+    # file input's attachment as its own and wrongly report success.
     element_id = field.element_id or "resume"
     try:
         found = page.evaluate(
             """id => {
                 const exact = document.querySelector(`input[type="file"][id="${id}"]`);
-                const fallback = document.querySelector('input[type="file"][id="resume"]');
-                const el = exact || fallback;
-                return el ? Array.from(el.files || []).map(file => file.name) : [];
+                return exact ? Array.from(exact.files || []).map(file => file.name) : [];
             }""",
             element_id,
         )

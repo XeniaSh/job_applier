@@ -222,6 +222,34 @@ def test_fills_name_email_linkedin_and_uploads_resume() -> None:
     session.close()
 
 
+def test_verify_resume_attached_confirms_a_real_upload() -> None:
+    """`verify_resume_attached` -- the final, no-reupload re-check `AutofillService`
+    runs after every other field has been filled -- must confirm a resume
+    that genuinely uploaded, mirroring `LeverAdapter.verify_resume_attached`.
+    """
+    session = _open(ASHBY_FIXTURE)
+    adapter = AshbyAdapter()
+    profile = _profile()
+    fields = adapter.discover_fields(session.page)
+    resume = next(classify_field(item, profile) for item in fields if item.field_type == "file")
+    resume_path = Path(profile.application_files.default_resume)
+    assert adapter.upload_resume(session.page, resume_path, resume.field) is True
+
+    assert adapter.verify_resume_attached(session.page, resume.field, resume_path.name) is True
+    session.close()
+
+
+def test_verify_resume_attached_fails_closed_when_never_uploaded() -> None:
+    session = _open(ASHBY_FIXTURE)
+    adapter = AshbyAdapter()
+    profile = _profile()
+    fields = adapter.discover_fields(session.page)
+    resume = next(classify_field(item, profile) for item in fields if item.field_type == "file")
+
+    assert adapter.verify_resume_attached(session.page, resume.field, "resume.txt") is False
+    session.close()
+
+
 def test_never_uploads_to_the_autofill_uploader_input() -> None:
     session = _open(ASHBY_FIXTURE)
     adapter = AshbyAdapter()

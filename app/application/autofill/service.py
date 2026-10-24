@@ -39,7 +39,11 @@ from app.application.autofill.resolver import (
     VacancyResolveError,
     VacancyResolver,
 )
-from app.application.autofill.resume import ResumeResolutionError, resolve_default_resume_path
+from app.application.autofill.resume import (
+    AutofillResumeSelection,
+    ResumeResolutionError,
+    resolve_autofill_resume_selection,
+)
 from app.application.autofill.submit import (
     SubmitAdapter,
     attempt_auto_submit,
@@ -49,6 +53,7 @@ from app.application.candidate_profile import CandidateProfile, countries_mentio
 from app.application.candidate_profile_loader import CandidateProfileLoadError, load_structured_candidate_profile
 from app.cover_letter_documents import generate_cover_letter_artifacts
 from app.profile_loader import ProfileLoadError, load_candidate_profile_context
+from app.resume_profiles import ResumeProfiles, ResumeProfilesLoadError, load_resume_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +137,8 @@ class AutofillService:
         candidate_name: str = "",
         cover_letter_language: str = "en",
         cover_letter_pdf_font_path: Path | None = None,
+        resume_profiles: ResumeProfiles | None = None,
+        resume_variant_override: str | None = None,
     ) -> None:
         self._resolver = resolver
         self._profile_loader = profile_loader
@@ -148,16 +155,32 @@ class AutofillService:
         self._candidate_name = candidate_name
         self._cover_letter_language = cover_letter_language
         self._cover_letter_pdf_font_path = cover_letter_pdf_font_path
+        self._resume_profiles = resume_profiles
+        self._resume_variant_override = resume_variant_override
 
     def run(self, source: str, external_id: str, *, keep_open: bool = True) -> AutofillResult:
         session: BrowserSession | None = None
         vacancy: ResolvedVacancy | None = None
         result: AutofillResult
+        resume_selection: AutofillResumeSelection | None = None
         try:
             vacancy = self._resolver.resolve(source, external_id)
             adapter = self._explicit_adapter or self._adapter_for_source(vacancy.source)
             profile = self._profile_loader()
-            resume_path = resolve_default_resume_path(profile)
+            # A configured variant is resolved on every run, injected or not:
+            # when no `resume_profiles` was wired in, the same normal,
+            # Settings-configured `resume_profiles.yaml` that production
+            # already loads (see `_load_resume_profiles` in
+            # `app.application.explicit_prepare_runtime`) is loaded here too
+            # -- never the legacy, unvalidated candidate-profile
+            # `default_resume`.
+            profiles = self._resume_profiles if self._resume_profiles is not None else load_resume_profiles()
+            resume_selection = resolve_autofill_resume_selection(
+                vacancy=vacancy,
+                profiles=profiles,
+                override_variant=self._resume_variant_override,
+            )
+            resume_path = resume_selection.path
             session = self._browser_factory()
             session.keep_open = keep_open
             session.open(vacancy.application_url, is_usable=adapter.recognize)
@@ -183,6 +206,22 @@ class AutofillService:
             )
         except ResumeResolutionError as exc:
             result = _failed(
+                source,
+                external_id,
+                str(exc),
+                vacancy,
+                reason=AutofillFailureReason.RESUME_RESOLUTION_FAILED,
+                resume_variant=exc.variant,
+                resume_file=exc.filename,
+                resume_variant_reason=exc.reason,
+                resume_location_warning=exc.location_warning,
+            )
+        except ResumeProfilesLoadError as exc:
+            # The resume_profiles.yaml configuration itself (not a single
+            # variant's PDF) could not be loaded -- no browser has opened
+            # yet at this call site, so this is a clean, normal failure
+            # rather than the generic unexpected-error branch below.
+            result = _failed(
                 source, external_id, str(exc), vacancy, reason=AutofillFailureReason.RESUME_RESOLUTION_FAILED
             )
         except BrowserSetupError as exc:
@@ -202,6 +241,13 @@ class AutofillService:
                 vacancy,
                 reason=AutofillFailureReason.UNEXPECTED_ERROR,
             )
+
+        if resume_selection is not None:
+            # Attached here, after the whole try/except, so a resume variant
+            # resolved before a *later* failure (e.g. browser setup, an
+            # unsupported form, or any unexpected error during fill) still
+            # reaches the final result -- never only on the success path.
+            result = _attach_resume_selection(result, resume_selection)
 
         if session is not None:
             should_handoff = keep_open and result.status in {
@@ -323,6 +369,11 @@ class AutofillService:
         generated: list[AutofillFieldResult] = []
         warnings: list[str] = list(prefill_reconciliation_warnings)
         resume_uploaded = False
+        # Tracks whether *any* resume item actually uploaded, kept separate
+        # from `resume_attachment_failed_required` so a later successful
+        # *optional* resume field on the same page can never overwrite an
+        # earlier required resume's failure in the final reported status.
+        resume_uploaded_any = False
         cover_letter_filled = False
         sanctions_none_of_above_confirmed = False
         resume_attachment_failed_required = False
@@ -383,6 +434,12 @@ class AutofillService:
                 unsupported.append(record)
                 if item.field.required:
                     unresolved_required.append(record)
+                    if item.kind is QuestionKind.RESUME:
+                        # A required resume control the classifier could not
+                        # support at all is exactly as incomplete as one that
+                        # was discovered but failed to upload -- never just a
+                        # generic unsupported field.
+                        resume_attachment_failed_required = True
                 continue
             if item.field.field_type == "file":
                 # A file control is never driven through the generic fill
@@ -436,17 +493,18 @@ class AutofillService:
                                 f"Cover letter file was not attached for '{item.field.label}': "
                                 "generation returned no text."
                             )
-                    elif is_lever and item.kind is QuestionKind.RESUME and item.field.required:
-                        # A required Lever resume control that was
-                        # *discovered* but never queued into `resume_items`
-                        # above (e.g. `map_question` couldn't resolve a
-                        # usable resume path for it) must not be allowed to
-                        # silently stay out of `resume_attachment_failed_required`
-                        # -- `_append_unresolved` below already records it
-                        # as unresolved_required, but on its own that never
-                        # escalates `status` past READY_FOR_REVIEW. No
-                        # upload is ever attempted here (never with
-                        # generated text or any other stand-in value).
+                    elif item.kind is QuestionKind.RESUME and item.field.required:
+                        # A required resume control that was *discovered*
+                        # but never queued into `resume_items` above (e.g.
+                        # `map_question` couldn't resolve a usable resume
+                        # path for it) must not be allowed to silently stay
+                        # out of `resume_attachment_failed_required` -- on
+                        # any adapter, not just Lever. `_append_unresolved`
+                        # below already records it as unresolved_required,
+                        # but on its own that never escalates `status` past
+                        # READY_FOR_REVIEW. No upload is ever attempted here
+                        # (never with generated text or any other stand-in
+                        # value).
                         warnings.append(
                             f"Resume was not attached for '{item.field.label}': the control was "
                             "discovered but could not be mapped to an uploadable resume."
@@ -533,6 +591,7 @@ class AutofillService:
                 )
             if resume_uploaded:
                 filled.append(record)
+                resume_uploaded_any = True
             else:
                 unresolved_required.append(record) if item.field.required else unresolved_optional.append(record)
                 warnings.append(f"Resume was not attached for '{item.field.label}'.")
@@ -585,7 +644,6 @@ class AutofillService:
                 if verify_resume_attached(page, item.field, resume_path.name):
                     continue
                 resume_attachment_failed_required = True
-                resume_uploaded = False
                 filled[:] = [record for record in filled if (record.label, record.name) != identity]
                 unresolved_required.append(_field_result(item))
                 warnings.append(
@@ -618,7 +676,8 @@ class AutofillService:
             unsupported_fields=unsupported,
             generated_fields=generated,
             warnings=warnings,
-            resume_uploaded=resume_uploaded,
+            resume_uploaded=resume_uploaded_any and not resume_attachment_failed_required,
+            resume_attachment_incomplete=resume_attachment_failed_required,
             cover_letter_filled=cover_letter_filled,
             submit_performed=False,
         )
@@ -945,6 +1004,24 @@ def _safe_host(url: object) -> str:
         return ""
 
 
+def _attach_resume_selection(
+    result: AutofillResult, selection: AutofillResumeSelection
+) -> AutofillResult:
+    """Record the resolved resume variant/filename/reason on `result`, and
+    any location uncertainty (missing/ambiguous/conflicting location) as the
+    typed `resume_location_warning` field -- never silently dropped, and
+    never something a caller has to parse back out of `warnings`.
+    """
+    return result.model_copy(
+        update={
+            "resume_variant": selection.variant,
+            "resume_file": selection.path.name,
+            "resume_variant_reason": selection.reason,
+            "resume_location_warning": selection.location_warning,
+        }
+    )
+
+
 def _failed(
     source: str,
     external_id: str,
@@ -952,14 +1029,23 @@ def _failed(
     vacancy: ResolvedVacancy | None,
     *,
     reason: AutofillFailureReason,
+    extra_warnings: list[str] | None = None,
+    resume_variant: str | None = None,
+    resume_file: str | None = None,
+    resume_variant_reason: str | None = None,
+    resume_location_warning: str | None = None,
 ) -> AutofillResult:
     return stage1_autofill_result(
         source=source,
         external_id=external_id,
         application_url=None if vacancy is None else vacancy.application_url,
         status=AutofillStatus.FAILED,
-        warnings=[warning],
+        warnings=[warning, *(extra_warnings or [])],
         failure_reason=reason,
+        resume_variant=resume_variant,
+        resume_file=resume_file,
+        resume_variant_reason=resume_variant_reason,
+        resume_location_warning=resume_location_warning,
     )
 
 

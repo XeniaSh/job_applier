@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import logging
-import re
 from time import perf_counter
 from typing import Any, Protocol
 
@@ -17,7 +16,18 @@ from app.cover_letter_documents import CoverLetterArtifacts, generate_cover_lett
 from app.llm_client import LLMClient
 from app.models import CoverLetterResult, VacancyEvaluation
 from app.profile_loader import CandidateProfileContext, load_candidate_profile_context
-from app.resume_selector import ResumeSelector
+from app.resume_policy import (
+    RESUME_VARIANT_IDS,
+    ResumePolicyInput,
+    decide_resume_variant,
+    normalize_resume_variant_id,
+)
+from app.resume_profiles import (
+    ResumeProfiles,
+    ResumeProfilesLoadError,
+    load_resume_profiles,
+    resolve_configured_resume_variant,
+)
 from app.vacancy_analyzer import VacancyAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -50,12 +60,29 @@ class PreparedApplication:
     language: str
     cover_letter_txt_path: str | None = None
     cover_letter_pdf_path: str | None = None
+    resume_variant_reason: str | None = None
     warnings: list[str] = field(default_factory=list)
     timing_breakdown: dict[str, Any] = field(default_factory=dict)
 
 
 class ApplicationPreparationError(Exception):
-    """Raised when preparation cannot continue."""
+    """Raised when preparation cannot continue.
+
+    Carries the same typed resume variant/location-warning context a
+    successful selection would, so a caller (Telegram/CLI) can show which
+    variant was selected and why without parsing this error's message text.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resume_variant: str | None = None,
+        resume_location_warning: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.resume_variant = resume_variant
+        self.resume_location_warning = resume_location_warning
 
 
 class PrepareCacheStore(Protocol):
@@ -100,11 +127,14 @@ class PreparationService:
         grammatical_gender: str = "neutral",
         prepare_cache: PrepareCacheStore | None = None,
         allow_imap_fallback: bool = True,
-        resume_selector: ResumeSelector | None = None,
+        resume_profiles: ResumeProfiles | None = None,
     ) -> None:
         self._analyzer = analyzer
         self._llm_client = llm_client
         self._email_client = email_client
+        # Kept for caller compatibility only -- resume selection always
+        # resolves a configured `resume_profiles.yaml` variant now (see
+        # `prepare`'s resume_selection phase), never this legacy directory.
         self._resumes_dir = resumes_dir
         self._artifacts_dir = artifacts_dir
         self._candidate_name = candidate_name
@@ -113,7 +143,7 @@ class PreparationService:
         self._grammatical_gender = grammatical_gender
         self._prepare_cache = prepare_cache
         self._allow_imap_fallback = allow_imap_fallback
-        self._resume_selector = resume_selector
+        self._resume_profiles = resume_profiles
         self._profile_context: CandidateProfileContext | None = None
 
     def prepare(self, source: str, external_id: str) -> PreparedApplication:
@@ -220,14 +250,87 @@ class PreparationService:
 
         logger.info("START resume_selection")
         selection_started = perf_counter()
-        if self._resume_selector is not None:
-            selection = self._resume_selector.select(analysis_text)
-            selected_profile = self._resume_selector.selected_profile(selection)
-            recommended_resume = selected_profile.id
-            resume_path, resume_warning = resolve_configured_resume_path(selected_profile.pdf)
+        legacy_variant_recomputed = False
+        if self._resume_profiles is not None:
+            profiles = self._resume_profiles
         else:
-            recommended_resume = analysis.recommended_resume.value
-            resume_path, resume_warning = resolve_resume_path(self._resumes_dir, recommended_resume)
+            # A configured variant is resolved on every Prepare, injected or
+            # not: the same normal, Settings-configured `resume_profiles.yaml`
+            # production already loads is loaded here too -- never the
+            # legacy, unvalidated `resumes_dir`/`{name}.pdf` lookup.
+            try:
+                profiles = load_resume_profiles()
+            except ResumeProfilesLoadError as exc:
+                raise ApplicationPreparationError(
+                    f"Resume profiles configuration could not be loaded: {exc}"
+                ) from exc
+
+        variant_id = analysis.resume_variant
+        if variant_id:
+            # An existing canonical choice is still validated against the
+            # four known variants (honoring legacy aliases), never trusted
+            # and passed through as an arbitrary string -- and never
+            # silently substituted with a default on mismatch.
+            normalized_variant_id = normalize_resume_variant_id(variant_id)
+            if normalized_variant_id is None:
+                raise ApplicationPreparationError(
+                    f"Cached resume variant {variant_id!r} is not one of the four canonical "
+                    f"resume variants (expected one of: {', '.join(RESUME_VARIANT_IDS)})."
+                )
+            variant_id = normalized_variant_id
+        else:
+            # A pre-migration (or fake-analyzer) evaluation has no computed
+            # canonical variant at all -- never silently default to
+            # java_backend, and never trust the legacy `recommended_resume`
+            # enum: it only matched a bare "ai" substring in `role_type`
+            # (e.g. "Retail" contains "ai") and never reliably analyzed
+            # responsibilities, so it is an automated legacy guess, not a
+            # manual override that deserves deference. Both the AI and the
+            # New Zealand dimensions are instead recomputed here through the
+            # same shared, deterministic policy used everywhere else (never
+            # the LLM) from the cached title/description and STRUCTURED
+            # location -- never free-form text. The recomputed choice is
+            # persisted back onto `analysis` (and, below, onto the prepare
+            # cache) so this vacancy is never recomputed again.
+            decision = decide_resume_variant(
+                ResumePolicyInput(
+                    title=vacancy_meta.title,
+                    description=analysis_text,
+                    location=vacancy_meta.location,
+                )
+            )
+            variant_id = decision.variant.value
+            analysis = analysis.model_copy(
+                update={
+                    "resume_variant": variant_id,
+                    "resume_variant_reason": (
+                        "Legacy cached evaluation had no canonical resume variant; recomputed from "
+                        f"title/description/location. {decision.reason}"
+                    ),
+                    "resume_location_warning": decision.location_warning,
+                }
+            )
+            legacy_variant_recomputed = True
+
+        _profile, resume_path, resume_warning = resolve_configured_resume_variant(profiles, variant_id)
+        if resume_path is None:
+            # The selected resume variant is configured but unusable (or not
+            # configured at all): never report this Prepare as PREPARED with
+            # no resume attached. Stop here with the actionable,
+            # variant-naming warning already produced by
+            # `resolve_configured_resume_variant`.
+            raise ApplicationPreparationError(
+                resume_warning or f"Resume variant '{variant_id}' is unavailable.",
+                resume_variant=variant_id,
+                resume_location_warning=analysis.resume_location_warning,
+            )
+        recommended_resume = variant_id
+        if analysis.resume_location_warning:
+            resume_warning = (
+                f"{resume_warning} {analysis.resume_location_warning}"
+                if resume_warning
+                else analysis.resume_location_warning
+            )
         phase_ms["resume_selection"] = int((perf_counter() - selection_started) * 1000)
         logger.info("END resume_selection +%dms", phase_ms["resume_selection"])
 
@@ -257,7 +360,7 @@ class PreparationService:
             language=cover_result.language,
             cover_letter=cover_result.cover_letter,
         )
-        if not analysis_cached or used_imap_fallback:
+        if not analysis_cached or used_imap_fallback or legacy_variant_recomputed:
             self._store_prepare_cache(
                 source=source,
                 external_id=external_id,
@@ -332,6 +435,7 @@ class PreparationService:
             language=cover_result.language,
             cover_letter_txt_path=str(artifact_result.txt_path) if artifact_result.txt_path is not None else None,
             cover_letter_pdf_path=str(artifact_result.pdf_path) if artifact_result.pdf_path is not None else None,
+            resume_variant_reason=analysis.resume_variant_reason,
             warnings=_dedupe_preserve(warnings),
             timing_breakdown=timing_breakdown,
         )
@@ -472,30 +576,6 @@ class _VacancyMeta:
     parser_source: str | None = None
     visible_text: str | None = None
     vacancy_json: str | None = None
-
-
-def resolve_resume_path(resumes_dir: Path, resume_name: str) -> tuple[Path | None, str | None]:
-    safe_name = resume_name.strip().lower()
-    if not re.fullmatch(r"[a-z0-9-]+", safe_name):
-        return None, f"Resume file missing: {resumes_dir.as_posix()}/{safe_name}.pdf"
-
-    root = resumes_dir.resolve()
-    candidate = (resumes_dir / f"{safe_name}.pdf").resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return None, f"Resume file missing: {resumes_dir.as_posix()}/{safe_name}.pdf"
-
-    if candidate.exists() and candidate.is_file():
-        return candidate, None
-    return None, f"Resume file missing: {resumes_dir.as_posix()}/{safe_name}.pdf"
-
-
-def resolve_configured_resume_path(pdf_path: Path) -> tuple[Path | None, str | None]:
-    candidate = pdf_path.resolve()
-    if candidate.exists() and candidate.is_file():
-        return candidate, None
-    return None, f"Resume file missing: {pdf_path.as_posix()}"
 
 
 def _cache_has_usable_vacancy(cached: dict | None) -> bool:

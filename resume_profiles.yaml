@@ -1,12 +1,28 @@
 profiles:
-  - id: java
+  - id: java_backend
     description: |
-      General Java backend profile.
+      General Java/Kotlin/Spring backend profile.
       Emphasizes banking, distributed systems, microservices and backend engineering.
+      Use for a Java/Kotlin/Spring backend position located outside New Zealand.
     pdf: resumes/java-backend.pdf
 
-  - id: java_ai
+  - id: ai_backend
     description: |
       Same backend experience plus an AI-powered workflow automation project.
-      Best suited for positions where AI, LLMs, GenAI or engineering automation are relevant.
-    pdf: resumes/java-backend-ai.pdf
+      Use only when the vacancy requires substantial, hands-on AI/LLM
+      integration or automation work -- not a casual employer AI mention,
+      an AI-assisted coding tool, or an optional/nice-to-have AI skill.
+      Use for such a position located outside New Zealand.
+    pdf: resumes/ai-backend.pdf
+
+  - id: java_backend_nz
+    description: |
+      Same as java_backend, for a Java/Kotlin/Spring backend position whose
+      actual location is New Zealand.
+    pdf: resumes/java-backend-nz.pdf
+
+  - id: ai_backend_nz
+    description: |
+      Same as ai_backend, for a substantial AI/LLM-integration position whose
+      actual location is New Zealand.
+    pdf: resumes/ai-backend-nz.pdf

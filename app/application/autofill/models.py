@@ -62,9 +62,31 @@ class AutofillResult(BaseModel):
     generated_fields: list[AutofillFieldResult] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     resume_uploaded: bool = False
+    # True whenever a *required* resume control could not be filled,
+    # mapped as UNSUPPORTED/unfillable, or failed its final attachment
+    # re-check -- set once, from this one typed field, instead of a caller
+    # pattern-matching free-text `warnings` for "resume"/"not attached"/
+    # "could not be confirmed" substrings.
+    resume_attachment_incomplete: bool = False
     cover_letter_filled: bool = False
     submit_performed: bool = False
     failure_reason: AutofillFailureReason | None = None
+    # Canonical resume variant id (java_backend/ai_backend/java_backend_nz/
+    # ai_backend_nz) and uploaded filename (basename only, never an absolute
+    # path) -- set whenever the run resolved a resume variant through the
+    # configured resume_profiles.yaml variants (see
+    # app.application.autofill.resume.resolve_autofill_resume_selection),
+    # including on a later failure (e.g. browser setup) after resolution
+    # already succeeded.
+    resume_variant: str | None = None
+    resume_file: str | None = None
+    # Why that variant was selected (AI/New Zealand policy reasoning), and
+    # any location uncertainty (missing/ambiguous/conflicting vacancy
+    # location) the selection carries -- the same typed facts
+    # `app.application.preparation_service.PreparedApplication` reports, so
+    # callers never have to parse `warnings` text to recover them.
+    resume_variant_reason: str | None = None
+    resume_location_warning: str | None = None
 
 
 def stage1_autofill_result(
@@ -81,9 +103,14 @@ def stage1_autofill_result(
     generated_fields: list[AutofillFieldResult] | None = None,
     warnings: list[str] | None = None,
     resume_uploaded: bool = False,
+    resume_attachment_incomplete: bool = False,
     cover_letter_filled: bool = False,
     submit_performed: bool = False,
     failure_reason: AutofillFailureReason | None = None,
+    resume_variant: str | None = None,
+    resume_file: str | None = None,
+    resume_variant_reason: str | None = None,
+    resume_location_warning: str | None = None,
 ) -> AutofillResult:
     """Build a Stage 1 result. Submit is always false."""
     _ = submit_performed
@@ -100,9 +127,14 @@ def stage1_autofill_result(
         generated_fields=generated_fields or [],
         warnings=warnings or [],
         resume_uploaded=resume_uploaded,
+        resume_attachment_incomplete=resume_attachment_incomplete,
         cover_letter_filled=cover_letter_filled,
         submit_performed=False,
         failure_reason=failure_reason,
+        resume_variant=resume_variant,
+        resume_file=resume_file,
+        resume_variant_reason=resume_variant_reason,
+        resume_location_warning=resume_location_warning,
     )
 
 

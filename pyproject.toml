@@ -12,6 +12,7 @@ dependencies = [
   "python-dotenv>=1.1.0",
   "pyyaml",
   "fpdf2>=2.8.8",
+  "pypdf>=5.0.0",
   "playwright>=1.49.0",
 ]
 
@@ -24,6 +25,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [build-system]
 requires = ["setuptools>=68"]

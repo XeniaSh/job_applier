@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,6 @@ import pytest
 from app.application.preparation_service import (
     ApplicationPreparationError,
     PreparationService,
-    resolve_resume_path,
 )
 from app.collectors.email_imap_client import RawEmailMessage
 from app.collectors.linkedin_models import ContentCompleteness, LinkedInEmailVacancy
@@ -21,7 +21,35 @@ from app.models import (
     VacancyEvaluation,
 )
 from app.resume_profiles import ResumeProfile, ResumeProfiles
-from app.resume_selector import ResumeSelector
+from tests.pdf_fixtures import write_minimal_valid_pdf
+
+_VARIANT_IDS = ("java_backend", "ai_backend", "java_backend_nz", "ai_backend_nz")
+
+
+@pytest.fixture(autouse=True)
+def _default_resume_profiles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ResumeProfiles:
+    """`PreparationService.prepare`, when constructed without an explicit
+    `resume_profiles=` (most tests in this module), now loads the normal
+    configured profiles via `app.resume_profiles.load_resume_profiles` at
+    that same seam -- never the legacy `resumes_dir`/`{name}.pdf` lookup.
+    Most tests here have no real `resume_profiles.yaml`/PDF set up, so this
+    autouse fixture stands in at that seam with four synthetic, structurally
+    valid PDFs. A test that wants a missing/invalid selected PDF on the
+    no-injection path overrides this with its own
+    `monkeypatch.setattr(module, "load_resume_profiles", ...)` afterward.
+    """
+    profiles = ResumeProfiles(
+        tuple(
+            ResumeProfile(
+                variant_id,
+                f"{variant_id} description.",
+                write_minimal_valid_pdf(tmp_path / f"{variant_id}.pdf"),
+            )
+            for variant_id in _VARIANT_IDS
+        )
+    )
+    monkeypatch.setattr("app.application.preparation_service.load_resume_profiles", lambda: profiles)
+    return profiles
 
 
 def _raw_message() -> RawEmailMessage:
@@ -135,19 +163,6 @@ class _FakePrepareCache:
 class _FailingEmailClient:
     def fetch_linkedin_messages(self):
         raise AssertionError("IMAP must not be called when prepare cache hits")
-
-
-def test_resolve_resume_path_safe(tmp_path: Path) -> None:
-    resumes_dir = tmp_path / "resumes"
-    resumes_dir.mkdir(parents=True, exist_ok=True)
-    (resumes_dir / "java-backend.pdf").write_bytes(b"pdf")
-    path, warning = resolve_resume_path(resumes_dir, "java-backend")
-    assert path is not None
-    assert warning is None
-
-    path2, warning2 = resolve_resume_path(resumes_dir, "../etc/passwd")
-    assert path2 is None
-    assert warning2 is not None
 
 
 def test_prepare_uses_cached_analysis_and_skips_imap(tmp_path: Path, monkeypatch, caplog) -> None:
@@ -294,7 +309,14 @@ def test_prepare_without_cache_raises_when_imap_fallback_disabled(tmp_path: Path
         service.prepare("linkedin-email", "999")
 
 
-def test_missing_resume_warning(tmp_path: Path, monkeypatch) -> None:
+def test_missing_configured_resume_fails_closed_before_package(tmp_path: Path, monkeypatch) -> None:
+    """The no-injection path must load the normal configured profiles and
+    fail closed -- never report a PREPARED package with no resume attached,
+    and never silently fall back to the legacy `resumes_dir`/`{name}.pdf`
+    lookup. `resumes_dir` deliberately still has a valid, readable
+    `java-backend.pdf` here so a generic setup that quietly kept using that
+    legacy lookup could not make this test pass for the wrong reason.
+    """
     from app.application import preparation_service as module
 
     monkeypatch.setattr(
@@ -314,15 +336,20 @@ def test_missing_resume_warning(tmp_path: Path, monkeypatch) -> None:
             )
         ],
     )
+    resumes_dir = tmp_path / "resumes"
+    write_minimal_valid_pdf(resumes_dir / "java-backend.pdf")
+    broken_profiles = ResumeProfiles((ResumeProfile("java_backend", "desc", tmp_path / "missing.pdf"),))
+    monkeypatch.setattr(module, "load_resume_profiles", lambda: broken_profiles)
     service = PreparationService(
         analyzer=_FakeAnalyzer(),
         llm_client=_FakeLLM(language="ru", text="Короткий текст без Redis и Senior."),
         email_client=_FakeEmailClient(messages=[_raw_message()]),
-        resumes_dir=tmp_path / "resumes",
+        resumes_dir=resumes_dir,
     )
-    prepared = service.prepare("linkedin-email", "123")
-    assert prepared.resume_path is None
-    assert any("Resume file missing:" in warning for warning in prepared.warnings)
+    with pytest.raises(ApplicationPreparationError) as exc_info:
+        service.prepare("linkedin-email", "123")
+    assert "java_backend" in str(exc_info.value)
+    assert exc_info.value.resume_variant == "java_backend"
 
 
 def test_vacancy_not_found_raises(monkeypatch, tmp_path: Path) -> None:
@@ -471,7 +498,12 @@ def test_prepare_keeps_default_cover_letter_for_australia(tmp_path: Path, monkey
     assert "Cover letter profile: default" in log_text
 
 
-def test_prepare_uses_selected_profile_pdf_for_package(tmp_path: Path, monkeypatch) -> None:
+def test_prepare_uses_configured_variant_pdf_for_package(tmp_path: Path, monkeypatch) -> None:
+    """Resume selection now reads the canonical variant already decided by
+    `VacancyAnalyzer` (shared `app.resume_policy` logic) off the cached
+    evaluation, resolves it through `resume_profiles.yaml`, and makes no
+    second LLM call -- there is no production `ResumeSelector` call left.
+    """
     from app.application import preparation_service as module
 
     monkeypatch.setattr(
@@ -483,22 +515,24 @@ def test_prepare_uses_selected_profile_pdf_for_package(tmp_path: Path, monkeypat
             grammatical_gender="neutral",
         ),
     )
-    ai_resume = tmp_path / "resumes" / "java_ai.pdf"
-    ai_resume.parent.mkdir()
-    ai_resume.write_bytes(b"%PDF")
+    ai_resume = write_minimal_valid_pdf(tmp_path / "resumes" / "ai-backend.pdf")
+    java_resume = write_minimal_valid_pdf(tmp_path / "resumes" / "java-backend.pdf")
     profiles = ResumeProfiles(
         (
-            ResumeProfile("java", "General Java backend.", tmp_path / "resumes/java.pdf"),
-            ResumeProfile("java_ai", "Java backend plus AI automation.", ai_resume),
+            ResumeProfile("java_backend", "General Java backend.", java_resume),
+            ResumeProfile("ai_backend", "Java backend plus AI automation.", ai_resume),
         )
     )
     llm = _FakeLLM(language="en", text="I have around seven years of Java backend experience.")
-    selector = ResumeSelector(
-        llm_client=llm,
-        profiles=profiles,
-        prompt_template="{{ resume_profiles }}\n{{ job_description }}",
+    evaluation = VacancyEvaluation(
+        decision=Decision.POTENTIAL_MATCH,
+        summary="AI automation platform",
+        matched_points=["java"],
+        recommended_resume=RecommendedResume.JAVA_AI,
+        recommended_cover_template=RecommendedCoverTemplate.GENERIC,
+        resume_variant="ai_backend",
+        resume_variant_reason="Hands-on AI/LLM evidence in role or responsibilities ('llm').",
     )
-    evaluation = _evaluation()
     service = PreparationService(
         analyzer=_FakeAnalyzer(),
         llm_client=llm,
@@ -515,14 +549,327 @@ def test_prepare_uses_selected_profile_pdf_for_package(tmp_path: Path, monkeypat
                 "content_completeness": "FULL",
             }
         ),
-        resume_selector=selector,
+        resume_profiles=profiles,
     )
 
     prepared = service.prepare("linkedin-email", "ai-1")
 
-    assert prepared.recommended_resume == "java_ai"
+    assert prepared.recommended_resume == "ai_backend"
     assert prepared.resume_path == str(ai_resume.resolve())
-    assert prepared.timing_breakdown["llm_calls"] == 2
+    assert prepared.resume_variant_reason == evaluation.resume_variant_reason
+    assert prepared.timing_breakdown["llm_calls"] == 1
+
+
+def test_prepare_rejects_unrecognized_cached_resume_variant(tmp_path: Path, monkeypatch) -> None:
+    """An existing cached `resume_variant` is validated against the four
+    canonical ids (honoring legacy aliases) -- never trusted as an arbitrary
+    string and never silently substituted with a default variant.
+    """
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    llm = _FakeLLM(language="en", text="I have around seven years of Java backend experience.")
+    legacy_evaluation_json = json.dumps(
+        {
+            "decision": "POTENTIAL_MATCH",
+            "summary": "role summary",
+            "matched_points": ["java"],
+            "recommended_resume": "java",
+            "recommended_cover_template": "generic",
+            "resume_variant": "not_a_real_variant",
+        }
+    )
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=_FakePrepareCache(
+            {
+                "evaluation_json": legacy_evaluation_json,
+                "analysis_text": "Java backend role",
+                "title": "Java Engineer",
+                "company": "ACME",
+                "location": "Remote",
+                "url": "https://example.com/job",
+                "content_completeness": "FULL",
+            }
+        ),
+    )
+
+    with pytest.raises(ApplicationPreparationError, match="not_a_real_variant"):
+        service.prepare("linkedin-email", "invalid-variant-1")
+
+
+def _legacy_profiles(tmp_path: Path) -> ResumeProfiles:
+    return ResumeProfiles(
+        tuple(
+            ResumeProfile(
+                variant_id,
+                f"{variant_id} description.",
+                write_minimal_valid_pdf(tmp_path / "resumes" / f"{variant_id}.pdf"),
+            )
+            for variant_id in _VARIANT_IDS
+        )
+    )
+
+
+def _legacy_cached_evaluation(
+    *, recommended_resume: str, analysis_text: str, title: str, location: str
+) -> tuple[dict, str]:
+    legacy_evaluation_json = json.dumps(
+        {
+            "decision": "POTENTIAL_MATCH",
+            "summary": "role summary",
+            "matched_points": ["java"],
+            "recommended_resume": recommended_resume,
+            "recommended_cover_template": "generic",
+            # No `resume_variant` key at all -- the pre-migration shape.
+        }
+    )
+    cache_payload = {
+        "evaluation_json": legacy_evaluation_json,
+        "analysis_text": analysis_text,
+        "title": title,
+        "company": "ACME",
+        "location": location,
+        "url": "https://example.com/job",
+        "content_completeness": "FULL",
+    }
+    return cache_payload, legacy_evaluation_json
+
+
+def test_prepare_derives_legacy_variant_from_full_decision_not_recommended_resume(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pre-migration cached evaluation has no `resume_variant` at all --
+    it must never silently default to the Java variant, and it must never
+    trust the legacy `recommended_resume` enum (which only matched a bare
+    "ai" substring and never reliably analyzed responsibilities). It must
+    instead recompute the full AI x New Zealand decision from the cached
+    title/description/location. Here `recommended_resume` is explicitly the
+    non-AI legacy value, yet genuine hands-on AI evidence in the cached
+    description must still select the AI variant.
+    """
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    profiles = _legacy_profiles(tmp_path)
+    llm = _FakeLLM(language="en", text="I have around seven years of Java backend experience.")
+    cache_payload, _ = _legacy_cached_evaluation(
+        recommended_resume="java",
+        analysis_text="Build LLM integrations and automation workflows for our internal tooling platform.",
+        title="Java Engineer",
+        location="Remote",
+    )
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=_FakePrepareCache(cache_payload),
+        resume_profiles=profiles,
+    )
+
+    prepared = service.prepare("linkedin-email", "ai-legacy-1")
+
+    assert prepared.recommended_resume == "ai_backend"
+
+
+def test_prepare_ignores_incidental_legacy_ai_recommendation_without_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The old `recommended_resume` enum matched a bare "ai" substring in
+    `role_type` (e.g. "Retail" contains "ai"), so a persisted `java_ai` value
+    is not reliable evidence on its own. With no genuine hands-on AI/LLM
+    evidence in the cached title/description, the recomputed decision must
+    select the plain Java variant regardless of that legacy value.
+    """
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    profiles = _legacy_profiles(tmp_path)
+    llm = _FakeLLM(language="en", text="I have around seven years of Java backend experience.")
+    cache_payload, _ = _legacy_cached_evaluation(
+        recommended_resume="java_ai",
+        analysis_text="Retail Java backend engineer maintaining checkout services.",
+        title="Retail Backend Engineer",
+        location="Remote",
+    )
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=_FakePrepareCache(cache_payload),
+        resume_profiles=profiles,
+    )
+
+    prepared = service.prepare("linkedin-email", "retail-legacy-1")
+
+    assert prepared.recommended_resume == "java_backend"
+
+
+def test_prepare_derives_legacy_variant_ai_in_new_zealand(tmp_path: Path, monkeypatch) -> None:
+    """Both dimensions are recomputed together: genuine hands-on AI evidence
+    plus a New Zealand location must select the combined `ai_backend_nz`
+    variant from a legacy cached evaluation with no `resume_variant`.
+    """
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    profiles = _legacy_profiles(tmp_path)
+    llm = _FakeLLM(language="en", text="I have around seven years of Java backend experience.")
+    cache_payload, _ = _legacy_cached_evaluation(
+        recommended_resume="java",
+        analysis_text="Build LLM integrations and automation workflows for our internal tooling platform.",
+        title="Java Engineer",
+        location="Auckland, New Zealand",
+    )
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=_FakePrepareCache(cache_payload),
+        resume_profiles=profiles,
+    )
+
+    prepared = service.prepare("linkedin-email", "ai-nz-legacy-1")
+
+    assert prepared.recommended_resume == "ai_backend_nz"
+
+
+def test_prepare_recomputes_and_persists_legacy_nz_variant(tmp_path: Path, monkeypatch) -> None:
+    """A legacy cached evaluation with no canonical `resume_variant` at all
+    must have both its AI and New Zealand dimensions recomputed through the
+    shared, deterministic `app.resume_policy` (never the LLM, and never the
+    legacy `recommended_resume` enum) from the cached title/description and
+    STRUCTURED location -- and that recomputed canonical choice must be
+    persisted back onto the existing prepare-cache JSON, even though a cache
+    hit with an already-parsed evaluation would otherwise never be
+    re-persisted.
+    """
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    evaluation = _evaluation()  # recommended_resume=JAVA, no resume_variant at all
+    cache = _FakePrepareCache(
+        {
+            "evaluation_json": evaluation.model_dump_json(),
+            "analysis_text": "Title: Java Backend Engineer\nLocation: Auckland, New Zealand",
+            "title": "Java Backend Engineer",
+            "company": "ACME",
+            "location": "Auckland, New Zealand",
+            "url": "https://www.linkedin.com/jobs/view/nz-legacy/",
+            "content_completeness": "PARTIAL",
+            "snippet": "Snippet",
+            "vacancy_json": '{"title":"Java Backend Engineer"}',
+        }
+    )
+    llm = _FakeLLM(language="en", text="I have around seven years of Java backend experience.")
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=cache,
+    )
+
+    prepared = service.prepare("linkedin-email", "nz-legacy")
+
+    assert prepared.recommended_resume == "java_backend_nz"
+    assert cache.saved is not None
+    persisted = json.loads(cache.saved["evaluation_json"])
+    assert persisted["resume_variant"] == "java_backend_nz"
+    assert persisted["resume_variant_reason"]
+
+
+def test_prepare_fails_visible_warning_when_configured_variant_pdf_is_invalid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An invalid configured PDF for the selected variant must stop this
+    Prepare outright with a clear, variant-naming error -- never report a
+    PREPARED package with no resume attached, and never a silent
+    substitution to a different profile's file.
+    """
+    from app.application import preparation_service as module
+
+    monkeypatch.setattr(
+        module,
+        "load_candidate_profile_context",
+        lambda preferred_language="en", grammatical_gender="neutral": SimpleNamespace(
+            text="Java Backend Engineer with around seven years of experience.",
+            preferred_language="en",
+            grammatical_gender="neutral",
+        ),
+    )
+    truncated_resume = tmp_path / "resumes" / "java-backend.pdf"
+    truncated_resume.parent.mkdir(parents=True)
+    truncated_resume.write_bytes(b"%PDF-1.4\nnot actually a pdf body")
+    profiles = ResumeProfiles((ResumeProfile("java_backend", "General Java backend.", truncated_resume),))
+    llm = _FakeLLM(language="en", text="I have around seven years of Java backend experience.")
+    service = PreparationService(
+        analyzer=_FakeAnalyzer(),
+        llm_client=llm,
+        email_client=_FailingEmailClient(),
+        resumes_dir=tmp_path / "resumes",
+        prepare_cache=_FakePrepareCache(
+            {
+                "evaluation_json": _evaluation().model_dump_json(),
+                "analysis_text": "Java backend role",
+                "title": "Java Engineer",
+                "company": "ACME",
+                "location": "Remote",
+                "url": "https://example.com/job",
+                "content_completeness": "FULL",
+            }
+        ),
+        resume_profiles=profiles,
+    )
+
+    with pytest.raises(ApplicationPreparationError, match="java_backend"):
+        service.prepare("linkedin-email", "invalid-pdf-1")
 
 
 def test_prepare_writes_cover_letter_artifacts_once(tmp_path: Path, monkeypatch) -> None:

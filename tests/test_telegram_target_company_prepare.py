@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import app.cli as cli_module
 from app.application.autofill.models import (
@@ -567,7 +566,12 @@ def test_unsupported_form_outcome_send_recovers_after_transient_connection_failu
     )
     assert runner.calls == [(SOURCE, EXTERNAL_ID, True)]
     expected_text = format_application_prepare_failed_text(
-        SimpleNamespace(failure_reason=AutofillFailureReason.UNSUPPORTED_FORM)
+        stage1_autofill_result(
+            source=SOURCE,
+            external_id=EXTERNAL_ID,
+            status=AutofillStatus.FAILED,
+            failure_reason=AutofillFailureReason.UNSUPPORTED_FORM,
+        )
     )
     # Exactly one delivered message -- the retry recovered the same outcome,
     # it never produced a second, duplicate delivery.

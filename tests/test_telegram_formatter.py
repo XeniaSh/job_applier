@@ -121,3 +121,15 @@ def test_prepared_layout_russian_cover_letter_header_and_resume_mapping() -> Non
     assert "<b>📄 Сопроводительное письмо</b>" in rendered
     assert "FinTech Backend" in rendered
     assert "• ⚠️ Уточнить локацию" in rendered
+
+
+def test_prepared_layout_maps_canonical_resume_variant_ids_to_human_labels() -> None:
+    rendered = format_prepared_application_html(
+        title="Backend Engineer",
+        company=None,
+        language="en",
+        recommended_resume="ai_backend_nz",
+        cover_letter="Cover letter text.",
+        warnings=[],
+    )
+    assert "Software Engineer | Backend &amp; AI Integration (New Zealand)" in rendered

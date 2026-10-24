@@ -83,22 +83,50 @@ def format_application_prepare_failed_text(result: AutofillResult | None = None)
     """
     if result is None or result.failure_reason is None:
         return FAILED_TEXT
-    return _FAILURE_REASON_TEXT.get(result.failure_reason, FAILED_TEXT)
+    text = _FAILURE_REASON_TEXT.get(result.failure_reason, FAILED_TEXT)
+    if result.failure_reason is AutofillFailureReason.RESUME_RESOLUTION_FAILED:
+        text = f"{text} Check the resume_profiles.yaml configuration and prepare again."
+    # The resume variant/filename/location-uncertainty context is attached to
+    # `result` whenever a variant was resolved before the run's eventual
+    # failure (see `AutofillRunner._attach_resume_selection`'s unconditional
+    # post-try/except call) -- not only on `RESUME_RESOLUTION_FAILED`. A
+    # `BROWSER_SETUP_FAILED` after a successful resume selection, for
+    # example, must surface the same typed uncertainty here too.
+    if result.resume_variant:
+        variant_line = f"Selected resume variant: {result.resume_variant}"
+        if result.resume_file:
+            variant_line += f" ({result.resume_file})"
+        text = f"{text}\n{variant_line}"
+    if result.resume_location_warning:
+        text = f"{text}\n{result.resume_location_warning}"
+    return text
 
 
 def format_application_prepare_completed_text(result: AutofillResult) -> str:
+    heading = (
+        "Preparation incomplete: the required resume attachment could not be confirmed."
+        if result.resume_attachment_incomplete
+        else "Preparation completed."
+    )
     lines = [
-        "Preparation completed.",
+        heading,
         f"Filled fields: {len(result.filled_fields)}",
         f"Unresolved required fields: {len(result.unresolved_required_fields)}",
     ]
+    if result.resume_variant:
+        resume_line = f"Resume variant: {result.resume_variant}"
+        if result.resume_file:
+            resume_line += f" ({result.resume_file})"
+        lines.append(resume_line)
+    if result.resume_location_warning:
+        lines.append(f"Location uncertainty: {result.resume_location_warning}")
     if result.status in {
         AutofillStatus.READY_FOR_REVIEW,
         AutofillStatus.NEEDS_MANUAL_INTERVENTION,
     }:
         lines.append("Manual review needed.")
     if result.status is AutofillStatus.NEEDS_MANUAL_INTERVENTION:
-        lines.append(f"Reason: {_challenge_label(result.warnings)} was detected in the browser.")
+        lines.append(f"Reason: {_manual_intervention_reason(result)}")
     if _has_residence_country_unconfirmed_warning(result.warnings):
         lines.append(RESIDENCE_COUNTRY_UNCONFIRMED_TEXT)
     lines.append("Submit was not performed.")
@@ -113,12 +141,38 @@ def _has_residence_country_unconfirmed_warning(warnings: list[str]) -> bool:
     )
 
 
-def _challenge_label(warnings: list[str]) -> str:
+def _challenge_label(warnings: list[str]) -> str | None:
+    """A security/login challenge label, or None when `warnings` names no
+    such challenge. Must never be defaulted to a generic challenge label:
+    `NEEDS_MANUAL_INTERVENTION` can also be caused by a required resume
+    attachment that could not be confirmed, which is not a challenge at all.
+    """
     for warning in warnings:
         if warning.startswith(_CHALLENGE_WARNING_PREFIX):
             token = warning[len(_CHALLENGE_WARNING_PREFIX) :].strip()
             return _CHALLENGE_LABELS.get(token, "a security/login challenge")
-    return "a security/login challenge"
+    return None
+
+
+def _manual_intervention_reason(result: AutofillResult) -> str:
+    """An actionable, accurate reason for a `NEEDS_MANUAL_INTERVENTION`
+    result -- never claims a security challenge was detected unless
+    `warnings` actually names one (see `_challenge_label`), and never
+    pattern-matches `warnings` text to detect an incomplete resume
+    attachment (see the typed `resume_attachment_incomplete` field instead).
+    """
+    challenge = _challenge_label(result.warnings)
+    if challenge is not None:
+        return f"{challenge} was detected in the browser."
+    if result.resume_attachment_incomplete:
+        reason = "the required resume attachment could not be confirmed; attach it manually before submitting."
+        if result.resume_variant:
+            variant_note = f"Selected resume variant: {result.resume_variant}"
+            if result.resume_file:
+                variant_note += f" ({result.resume_file})"
+            reason = f"{reason} {variant_note}."
+        return reason
+    return "manual action is required before this application can be submitted."
 
 
 _REVIEW_DONE_RESPONSE_TEXT: dict[ReviewSessionCloseOutcome, str] = {

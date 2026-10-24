@@ -184,6 +184,25 @@ class VacancyEvaluation(BaseModel):
     evidence_sufficient: bool = False
     recommended_resume: RecommendedResume
     recommended_cover_template: RecommendedCoverTemplate
+    # Canonical four-variant resume id (java_backend/ai_backend/
+    # java_backend_nz/ai_backend_nz) from the shared app.resume_policy
+    # decision -- recorded separately from the legacy, role-focused
+    # `recommended_resume` enum above so persisted java/java_ai values keep
+    # their meaning. See app.resume_policy.decide_resume_variant.
+    #
+    # Deliberately defaults to "" (never a guessed canonical id) so a
+    # pre-migration cached payload with no `resume_variant` key is
+    # distinguishable from one that was actually computed -- callers must
+    # recompute the full decision via `app.resume_policy.decide_resume_variant`
+    # (never trust `recommended_resume`, which only matched a bare "ai"
+    # substring and never reliably analyzed responsibilities) instead of
+    # silently treating an absent field as "java_backend".
+    resume_variant: str = ""
+    resume_variant_reason: str = ""
+    # Set only when the vacancy's location was missing, unparsable, or named
+    # New Zealand alongside another location -- never set for an ordinary
+    # non-NZ location. See app.resume_policy.ResumeVariantDecision.
+    resume_location_warning: str | None = None
     warning_signals: list[dict[str, str]] = Field(default_factory=list)
     visa_sponsorship: str = "unknown"
     relocation_support: str = "unknown"

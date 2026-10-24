@@ -89,9 +89,8 @@ from app.config import Settings
 from app.formatter import format_evaluation_ru
 from app.llm_client import CoverLetterValidationError, LLMClient, LLMRequestError, LLMResponseError
 from app.models import Decision, VacancyEvaluation
-from app.prompt_loader import PromptLoadError, load_analysis_prompt, load_resume_selector_prompt
+from app.prompt_loader import PromptLoadError, load_analysis_prompt
 from app.resume_profiles import ResumeProfiles, load_resume_profiles
-from app.resume_selector import ResumeSelector
 from app.skills_profile_loader import SkillsProfileLoadError, load_candidate_skills
 from app.storage.seen_jobs import SeenJobsStorage
 from app.storage.imap_checkpoint import ImapCheckpointStorage
@@ -194,18 +193,6 @@ def build_analyzer(settings: Settings) -> VacancyAnalyzer:
 
 def _load_configured_resume_profiles(settings: Settings) -> ResumeProfiles:
     return load_resume_profiles(settings.resume_profiles_path)
-
-
-def _build_resume_selector(
-    *,
-    llm_client: LLMClient,
-    profiles: ResumeProfiles,
-) -> ResumeSelector:
-    return ResumeSelector(
-        llm_client=llm_client,
-        profiles=profiles,
-        prompt_template=load_resume_selector_prompt(),
-    )
 
 
 @app.command("review")
@@ -2442,10 +2429,6 @@ def prepare_telegram_applications(
         model=settings.llm_model,
     )
     resume_profiles = _load_configured_resume_profiles(settings)
-    resume_selector = _build_resume_selector(
-        llm_client=llm_client,
-        profiles=resume_profiles,
-    )
     email_client = EmailIMAPClient(
         host=settings.linkedin_email_imap_host,
         port=settings.linkedin_email_imap_port,
@@ -2467,7 +2450,7 @@ def prepare_telegram_applications(
         preferred_language=settings.candidate_preferred_language,
         grammatical_gender=settings.candidate_grammatical_gender,
         prepare_cache=storage,
-        resume_selector=resume_selector,
+        resume_profiles=resume_profiles,
     )
     result = _prepare_requested_applications(
         settings=settings,
@@ -2517,10 +2500,6 @@ def run_pipeline(
         model=settings.llm_model,
     )
     resume_profiles = _load_configured_resume_profiles(settings)
-    resume_selector = _build_resume_selector(
-        llm_client=llm_client,
-        profiles=resume_profiles,
-    )
     email_client = EmailIMAPClient(
         host=settings.linkedin_email_imap_host,
         port=settings.linkedin_email_imap_port,
@@ -2572,7 +2551,7 @@ def run_pipeline(
         preferred_language=settings.candidate_preferred_language,
         grammatical_gender=settings.candidate_grammatical_gender,
         prepare_cache=deliveries,
-        resume_selector=resume_selector,
+        resume_profiles=resume_profiles,
     )
 
     interval = max(1, int(settings.pipeline_interval_seconds))
@@ -4958,10 +4937,20 @@ def _process_callback_update(
                         if resumes_dir is None:
                             answer_once("Resume PDF not found.")
                         else:
+                            # No cache service was injected (e.g. the
+                            # standalone poll-telegram-actions command) --
+                            # load the same configured resume_profiles.yaml
+                            # the main pipeline uses, never a resumes_dir-only
+                            # resolution that skips configured/validated
+                            # variant paths.
+                            configured_profiles = _load_configured_resume_profiles(Settings())
                             cache = ResumeCacheService(
                                 resumes_dir=resumes_dir,
                                 storage=storage,
                                 telegram_client=client,
+                                resume_paths={
+                                    profile.id: profile.pdf for profile in configured_profiles.profiles
+                                },
                             )
                     if cache is not None:
                         resume_result = cache.get_or_upload(
@@ -4970,7 +4959,7 @@ def _process_callback_update(
                             upload_if_missing=False,
                         )
                         if resume_result.missing:
-                            answer_once("Resume PDF not found.")
+                            answer_once(getattr(resume_result, "warning", None) or "Resume PDF not found.")
                         else:
                             caption = _build_resume_caption(
                                 resume_name=prep.resume_name,
@@ -4989,34 +4978,37 @@ def _process_callback_update(
                                 except TelegramRequestError:
                                     sent_doc = None
                             if sent_doc is None:
-                                if resumes_dir is None:
+                                # `resume_result.missing` is already False here,
+                                # which means `get_or_upload` just validated this
+                                # path as a real, usable PDF -- no separate
+                                # is_file()-only recheck.
+                                if resume_result.resume_path is None:
                                     answer_once("Resume PDF not found.")
                                 else:
-                                    resume_path = (
-                                        Path(resume_result.resume_path)
-                                        if resume_result.resume_path
-                                        else None
+                                    resume_path = Path(resume_result.resume_path)
+                                    sent_doc = client.send_document(
+                                        file_path=str(resume_path),
+                                        caption=caption,
+                                        chat_id=configured_chat_id,
+                                        reply_to_message_id=message_id if message_id > 0 else None,
                                     )
-                                    if resume_path is None or not resume_path.is_file():
-                                        answer_once("Resume PDF not found.")
-                                    else:
-                                        sent_doc = client.send_document(
+                                    stat = resume_path.stat()
+                                    save_cache = getattr(storage, "save_resume_cache", None)
+                                    if callable(save_cache):
+                                        save_cache(
+                                            # `resume_result.resume_name` is the
+                                            # canonical variant id the service
+                                            # keys its own cache lookups by --
+                                            # falls back to the raw requested
+                                            # name only for cache-service test
+                                            # doubles that omit the attribute.
+                                            resume_name=getattr(resume_result, "resume_name", prep.resume_name),
                                             file_path=str(resume_path),
-                                            caption=caption,
-                                            chat_id=configured_chat_id,
-                                            reply_to_message_id=message_id if message_id > 0 else None,
+                                            file_mtime_ns=int(stat.st_mtime_ns),
+                                            file_size=int(stat.st_size),
+                                            telegram_file_id=sent_doc.file_id,
+                                            telegram_file_unique_id=sent_doc.file_unique_id,
                                         )
-                                        stat = resume_path.stat()
-                                        save_cache = getattr(storage, "save_resume_cache", None)
-                                        if callable(save_cache):
-                                            save_cache(
-                                                resume_name=prep.resume_name,
-                                                file_path=str(resume_path),
-                                                file_mtime_ns=int(stat.st_mtime_ns),
-                                                file_size=int(stat.st_size),
-                                                telegram_file_id=sent_doc.file_id,
-                                                telegram_file_unique_id=sent_doc.file_unique_id,
-                                            )
                             if sent_doc is not None:
                                 set_aux = getattr(storage, "set_preparation_aux_message_id", None)
                                 if callable(set_aux):
@@ -7291,7 +7283,11 @@ def _prepare_one_application(
                     source=source,
                     external_id=external_id,
                     error_message=str(exc),
-                    resume_name=None,
+                    # The selected resume variant, read off the typed
+                    # exception attribute when available (see
+                    # `ApplicationPreparationError`) -- never parsed back out
+                    # of `error_message`.
+                    resume_name=getattr(exc, "resume_variant", None),
                     language=None,
                     cover_letter=None,
                     cover_letter_txt_path=None,

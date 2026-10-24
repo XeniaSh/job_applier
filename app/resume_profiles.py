@@ -6,9 +6,16 @@ import re
 
 import yaml
 
+from app.pdf_validation import InvalidPdfError, validate_pdf_file
+from app.resume_policy import (
+    LEGACY_RESUME_VARIANT_ALIASES_BY_CANONICAL,
+    RESUME_VARIANT_IDS,
+    normalize_resume_variant_id,
+)
+
 
 DEFAULT_RESUME_PROFILES_PATH = Path("resume_profiles.yaml")
-DEFAULT_RESUME_PROFILE_ID = "java"
+DEFAULT_RESUME_PROFILE_ID = "java_backend"
 
 
 class ResumeProfilesLoadError(Exception):
@@ -28,8 +35,30 @@ class ResumeProfiles:
     default_profile_id: str = DEFAULT_RESUME_PROFILE_ID
 
     def get(self, profile_id: str) -> ResumeProfile | None:
+        """Look up a profile by its configured id, honoring legacy
+        pre-migration aliases bidirectionally -- an old persisted/configured
+        value ('java') resolves to a canonically-labeled profile
+        ('java_backend') after the migration, and a canonical lookup
+        ('java_backend') also finds a still legacy-labeled configured entry
+        ('java') -- never a silent substitution to the default or any other
+        profile.
+        """
         normalized = profile_id.strip()
-        return next((profile for profile in self.profiles if profile.id == normalized), None)
+        found = next((profile for profile in self.profiles if profile.id == normalized), None)
+        if found is not None:
+            return found
+        canonical = normalize_resume_variant_id(normalized)
+        if canonical is None:
+            return None
+        if canonical != normalized:
+            found = next((profile for profile in self.profiles if profile.id == canonical), None)
+            if found is not None:
+                return found
+        for legacy_id in LEGACY_RESUME_VARIANT_ALIASES_BY_CANONICAL.get(canonical, ()):
+            found = next((profile for profile in self.profiles if profile.id == legacy_id), None)
+            if found is not None:
+                return found
+        return None
 
     @property
     def default(self) -> ResumeProfile:
@@ -100,3 +129,39 @@ def load_resume_profiles(
     loaded = ResumeProfiles(tuple(profiles), default_profile_id=default_profile_id)
     _ = loaded.default
     return loaded
+
+
+def resolve_validated_resume_path(profile: ResumeProfile) -> tuple[Path | None, str | None]:
+    """Resolve and strictly validate a configured profile's PDF.
+
+    Returns `(path, None)` only when the file exists and passes structural
+    PDF validation (see `app.pdf_validation`) -- never `is_file()`/extension
+    alone, and never a truncated file or text merely named `.pdf`. On any
+    failure, returns `(None, warning)` with an actionable message naming the
+    profile and path; callers must never substitute a default or legacy
+    candidate resume on this failure.
+    """
+    try:
+        validate_pdf_file(profile.pdf)
+    except InvalidPdfError as exc:
+        return None, f"Resume for profile '{profile.id}' is unusable: {exc}"
+    return profile.pdf.resolve(), None
+
+
+def resolve_configured_resume_variant(
+    profiles: ResumeProfiles,
+    variant_id: str,
+) -> tuple[ResumeProfile | None, Path | None, str | None]:
+    """Resolve one of the four canonical variant ids (or a legacy alias) to
+    its configured, strictly validated PDF. Fails closed with an actionable
+    warning naming the missing/invalid variant -- never substitutes the
+    default profile or any other variant.
+    """
+    profile = profiles.get(variant_id)
+    if profile is None:
+        return None, None, (
+            f"Resume variant '{variant_id}' is not configured in the resume profiles "
+            f"(expected one of: {', '.join(RESUME_VARIANT_IDS)})."
+        )
+    path, warning = resolve_validated_resume_path(profile)
+    return profile, path, warning

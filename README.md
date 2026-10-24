@@ -151,6 +151,7 @@ Never commit real secrets in `.env`.
 | `TELEGRAM__LINKEDIN_CHAT_ID` | Telegram LinkedIn flow | `123456789` | Chat ID for LinkedIn/current discovery messages | Potentially |
 | `TELEGRAM__TARGET_COMPANIES_CHAT_ID` | Telegram Target Companies flow | `987654321` | Chat ID for Target Companies messages; no silent fallback to LinkedIn | Potentially |
 | `RESUMES_DIR` | Preparation pipeline | `resumes` | Directory with local resume PDFs | No |
+| `RESUME_PROFILES_PATH` | Resume variant selection | `resume_profiles.yaml` | Path to the four-variant resume config, shared by LinkedIn preparation, Target Company ATS autofill, and the diagnostic `autofill` CLI | No |
 | `CANDIDATE_PREFERRED_LANGUAGE` | Cover letter generation | `en` | Preferred language when vacancy language is ambiguous | No |
 | `CANDIDATE_GRAMMATICAL_GENDER` | RU cover letter grammar | `neutral` | Gender setting used for language checks | No |
 | `PIPELINE_INTERVAL_SECONDS` | `run` service | `300` | Main collection/send cycle interval | No |
@@ -234,29 +235,154 @@ Buttons and statuses:
 
 ## Resume Setup
 
-Resume variants are configured in `resume_profiles.yaml`. Each profile has an
-identifier, a short description used by the resume selector, and the path to
-its local PDF. Add another profile by adding another YAML entry; no code change
-is required.
+There are exactly four canonical resume variants, configured in
+`resume_profiles.yaml` under these four keys/filenames:
 
-The default configuration expects:
+| Key | Expected file | Resume title |
+| --- | --- | --- |
+| `java_backend` | `resumes/java-backend.pdf` | Java Backend Engineer |
+| `ai_backend` | `resumes/ai-backend.pdf` | Software Engineer \| AI Automation & LLM Integration |
+| `java_backend_nz` | `resumes/java-backend-nz.pdf` | Java Backend Engineer (New Zealand) |
+| `ai_backend_nz` | `resumes/ai-backend-nz.pdf` | Software Engineer \| Backend & AI Integration (New Zealand) |
 
-- `resumes/java-backend.pdf`
-- `resumes/ai-adjacent-backend.pdf`
+Each profile entry has an `id`, a short `description`, and a relative `pdf`
+path. The four keys above are relied on by code (`app.resume_policy`); do not
+rename or remove one without updating the policy's canonical variant ids.
+
+The variant is chosen deterministically by `app.resume_policy.decide_resume_variant`
+from two independent dimensions — never by a second LLM call:
+
+- **AI dimension** — `ai_backend*` is selected only when the role involves
+  *substantial, hands-on* AI/LLM integration or automation work. Matching is
+  whole-token (e.g. `llm` never matches inside an unrelated word like
+  "fulfillment") and sentence-scoped: a marker from the reliable extracted
+  role type/responsibilities/mandatory skills is sufficient on its own, but a
+  marker found only in raw title/description text (ATS autofill, which never
+  runs LLM extraction) additionally requires a hands-on engineering verb
+  (build/develop/implement/integrate/...) in that same sentence — so "We are
+  an LLM-powered company. You will maintain Java APIs." never qualifies. Any
+  marker is also discarded when its sentence contains a nice-to-have/optional
+  qualifier, an AI coding-assistant mention (Copilot etc.), or a negation. A
+  casual employer AI mention, an optional/nice-to-have AI skill, or a broad
+  model-training/ML/data-science keyword alone never forces the AI variant on
+  its own.
+- **New Zealand dimension** — `*_nz` is selected only when the vacancy's own
+  structured location positively and unambiguously names New Zealand (by
+  country label `New Zealand`/`NZ` or a city such as
+  Auckland/Wellington/Christchurch/Dunedin/Queenstown/Tauranga). An
+  employer-office mention or "worldwide remote" marketing elsewhere in the
+  vacancy text is never used — only the structured location. **If the
+  structured location is missing or empty, the general (non-NZ) variant is
+  always used, with the existing uncertainty warning — even if the
+  vacancy's description or extracted `location_restrictions` text mentions
+  New Zealand explicitly** (e.g. "must reside in New Zealand"), **or mentions
+  it alongside another country** (e.g. "must reside in Australia and
+  employer has offices in New Zealand", "must reside in New Zealand or
+  Australia"). That free-form text is never parsed for this decision: fuzzy
+  inference over extracted/free-form restriction text cannot safely affirm
+  the position's actual country. **Conservative fallback (non-NZ + an
+  explicit warning, never a guess) applies to:** a missing or unparsable
+  location; a bare "Remote" with no geography at all; a
+  conflicting/multiple-country location (e.g. "New Zealand or Australia",
+  "NZ - Australia"); New Zealand named alongside a broader
+  remote/worldwide scope with no explicit "only" restriction (e.g. "Remote
+  Worldwide (New Zealand)", "New Zealand or Remote Worldwide" — contrast
+  with "Remote (New Zealand only)", which *does* qualify); and a city name
+  that is not unique to New Zealand on its own, with no confirming country
+  (e.g. "Hamilton" alone — "Hamilton, New Zealand" still confirms). An
+  explicitly negated mention ("Not New Zealand") or a location that plainly
+  names a different country with no New Zealand mention at all resolves to
+  the non-NZ variant too, but **without** a warning — the signal is
+  unambiguous, so there is nothing to ask a human to verify.
+
+**Persistence:** the LinkedIn path persists its chosen variant the same way
+it always persisted `recommended_resume` — in the existing prepare-cache
+row's serialized evaluation (`VacancyEvaluation.resume_variant`), so a cached
+vacancy's package consistently reuses the same decision. The ATS (Target
+Company) autofill path does not write the chosen variant into
+`application_history` or any other table; it is deterministically
+*recomputed* on every Prepare run from the vacancy's own title/location/
+description (see `AutofillResult.resume_variant`/`resume_file` for what was
+actually used on that run, visible in logs, the CLI summary, and the
+Telegram Prepare result). The one limitation this implies: if
+`resume_profiles.yaml` changes between two Prepare runs for the same
+vacancy, a later run can select a different file for the same variant id.
+This was judged acceptable rather than adding a new persistence subsystem,
+since the existing `AutofillResult` fields already make the actual per-run
+choice visible for review before Submit.
+
+This same policy and the same `resume_profiles.yaml` (via
+`Settings.resume_profiles_path`, which also sets `RESUME_PROFILES_PATH`) feed
+both the LinkedIn preparation path and the ATS (Target Company) autofill
+path, plus the diagnostic `autofill` CLI — there is one shared decision, not
+duplicated per path.
+
+**Migration from the old two-profile config:** the previous `java`/`java_ai`
+profile ids and `resumes/java-backend.pdf` / `resumes/java-backend-ai.pdf`
+filenames are still accepted as legacy aliases wherever a profile id is
+looked up, bidirectionally — looking up the old id (`java`, `java_ai`)
+resolves to the new canonical profile (`java_backend`, `ai_backend`) if one
+is configured, and looking up the new canonical id also finds a
+still-legacy-labeled profile if that's what `resume_profiles.yaml` still
+has — so an old persisted `recommended_resume` value, and a cached
+evaluation with no `resume_variant` at all (pre-migration shape), both keep
+resolving to the same role rather than silently defaulting to
+`java_backend`. `resume_profiles.yaml` itself should still be migrated to the
+four new keys/filenames above when convenient; the loader does not
+synthesize the two newer `*_nz` entries for you.
+
+**Overriding the autofill variant:** the diagnostic ATS command supports
+`--resume-variant`, which bypasses the policy and forces one of the four ids:
+
+```bash
+uv run python -m app autofill target_company:greenhouse:agoda 12345 --resume-variant ai_backend_nz
+```
+
+The override is validated against the same four ids and goes through the
+same strict PDF validation below; an unknown value is rejected before a
+browser opens.
+
+**Strict PDF validation, never a silent substitution:** every configured
+profile PDF is parsed with `pypdf` (`app.pdf_validation`, no
+`Path.is_file()`/extension check and no substring-only header/marker scan) —
+rejecting a missing file, an empty/truncated/unparsable file, an
+encrypted/password-protected PDF, a zero-page PDF, and plain text merely
+named `.pdf`. If the variant selected for a vacancy has no configured
+profile, or its PDF fails this check, Stage 1 autofill fails that Prepare
+run visibly (`RESUME_RESOLUTION_FAILED`, before any browser opens, with the
+selected variant and filename still reported) and the LinkedIn preparation
+itself stops with an actionable error — neither path ever reports a
+PREPARED/READY_FOR_REVIEW result with no resume attached, or substitutes the
+default profile, another variant, or the legacy Candidate Profile
+`default_resume`.
 
 Notes:
 
 - Resume files stay local.
-- The LLM selects a configured profile after vacancy analysis and before cover-letter generation.
-- Invalid model selections fall back to the `java` profile.
-- Missing PDF does not block cover-letter generation.
 - PDFs may include personal data and should be ignored by git.
 - Keep optional placeholder file: `resumes/.gitkeep`.
 - Telegram upload caching:
+  - the PDF path comes from the same configured `resume_profiles.yaml` mapping used everywhere else above — never a guessed `resumes_dir/<variant>.pdf` filename, and never the legacy Candidate Profile `default_resume`; a variant with no configured path fails closed with no cached or uploaded file sent;
+  - the same strict PDF validation described above runs before any cached `file_id` is used — an invalid/missing PDF fails closed instead of silently reusing a stale cache entry;
   - first send uploads local PDF and stores Telegram `file_id`;
   - next sends reuse `file_id` without uploading bytes;
   - if local PDF changes (mtime/size), cache is invalidated and file uploads again.
-- This resume cache is about Telegram delivery from `resume_profiles.yaml` (LinkedIn package flow / `send-linkedin-telegram`); it does not touch any ATS. Final submission on LinkedIn or an external ATS always stays manual — but Greenhouse Stage 1 autofill does automatically upload your `default_resume` (a separate file from the Candidate Profile YAML, see below) into the application form itself; only the final Submit click remains manual there.
+- This resume cache is about Telegram delivery from `resume_profiles.yaml` (LinkedIn package flow / `send-linkedin-telegram`); it does not touch any ATS. Final submission on LinkedIn or an external ATS always stays manual — Greenhouse/Lever/Ashby Stage 1 autofill now also resolves and uploads one of the four `resume_profiles.yaml` variants (via the same policy above) directly into the application form; only the final Submit click remains manual there.
+
+### Short supervised verification plan
+
+A minimal manual check after changing `resume_profiles.yaml` or the policy:
+
+1. A Java/Kotlin/Spring vacancy with no AI evidence and a non-NZ location ->
+   expect `java_backend` selected end to end (LinkedIn package and/or ATS
+   autofill), with the correct PDF attached/uploaded.
+2. A vacancy with substantial, hands-on AI/LLM responsibilities -> expect
+   `ai_backend` (or `ai_backend_nz` if also located in New Zealand).
+3. A New Zealand-located vacancy (e.g. Auckland/Wellington) on each of the
+   three supported ATS (Greenhouse, Lever, Ashby) -> expect the `*_nz`
+   variant uploaded and confirmed attached at the end of Prepare; a
+   deliberately broken/missing PDF for that variant must fail visibly
+   before the browser opens, never fall back silently.
 
 ## Target Companies (Greenhouse) Setup
 
@@ -362,7 +488,7 @@ Resume cache commands:
 ```bash
 uv run python -m app telegram-cache-resumes
 uv run python -m app telegram-resume-cache
-uv run python -m app telegram-clear-resume-cache java-backend
+uv run python -m app telegram-clear-resume-cache java_backend
 ```
 
 Application history commands:

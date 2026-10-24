@@ -258,6 +258,11 @@ def _human_resume_name(value: str) -> str:
     mapping = {
         "java": "Java Backend",
         "java_ai": "Java Backend + AI",
+        # Canonical four-variant resume_profiles.yaml ids (app.resume_policy).
+        "java_backend": "Java Backend Engineer",
+        "ai_backend": "Software Engineer | AI Automation & LLM Integration",
+        "java_backend_nz": "Java Backend Engineer (New Zealand)",
+        "ai_backend_nz": "Software Engineer | Backend & AI Integration (New Zealand)",
         # Persisted records created before resume profiles used profile IDs.
         "java-backend": "Java Backend",
         "kotlin-backend": "Kotlin Backend",

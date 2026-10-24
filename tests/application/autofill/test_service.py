@@ -21,6 +21,7 @@ from app.application.autofill.resolver import ResolvedVacancy, VacancyResolveErr
 from app.application.autofill.service import AutofillService, _enrich_unresolved, default_adapter_for_source
 from app.application.candidate_profile import CandidateProfile
 from app.collectors.vacancy_collector import NormalizedVacancy
+from app.resume_profiles import ResumeProfiles
 
 
 def test_anticipated_work_country_checkbox_uses_one_vacancy_country() -> None:
@@ -312,7 +313,7 @@ class _KayakGenuineResumeAdapter(_FakeAdapter):
         return None
 
 
-def test_ashby_genuine_resume_file_field_uploads_via_upload_resume_path() -> None:
+def test_ashby_genuine_resume_file_field_uploads_via_upload_resume_path(default_resume_profiles) -> None:
     session = _FakeSession()
     adapter = _KayakGenuineResumeAdapter()
     service = AutofillService(
@@ -329,8 +330,71 @@ def test_ashby_genuine_resume_file_field_uploads_via_upload_resume_path() -> Non
     assert len(adapter.upload_resume_calls) == 1
     resume_path, field = adapter.upload_resume_calls[0]
     assert field.context == "_systemfield_resume"
-    assert str(resume_path) == "tests/fixtures/autofill/resume.txt"
+    # No-injection path: `AutofillService.run` loaded the normal configured
+    # profiles (here, the autouse `default_resume_profiles` fixture standing
+    # in at that seam) and resolved them to the "Backend Engineer"/no-location
+    # vacancy's default variant -- never the legacy candidate-profile
+    # `default_resume`.
+    assert resume_path == default_resume_profiles.get("java_backend").pdf.resolve()
     assert any(item.label == "Resume/CV" for item in result.filled_fields)
+
+
+class _TwoResumeFieldsAdapter(_FakeAdapter):
+    """Two separate resume-kind file controls on the same page: a required
+    one whose upload never succeeds, and an optional one that does. Proves a
+    later successful *optional* resume upload can never overwrite the
+    earlier required resume's failure in the final reported result.
+    """
+
+    def __init__(self) -> None:
+        self.upload_resume_calls: list[object] = []
+
+    def discover_fields(self, page: object) -> list[DiscoveredField]:
+        _ = page
+        return [
+            DiscoveredField(
+                label="Resume/CV",
+                name="required_resume",
+                field_type="file",
+                required=True,
+                context="_systemfield_resume",
+            ),
+            DiscoveredField(
+                label="Additional Resume",
+                name="optional_resume",
+                field_type="file",
+                required=False,
+                context="_systemfield_resume",
+            ),
+        ]
+
+    def upload_resume(self, page: object, resume_path: object, field: object) -> bool:
+        _ = page, resume_path
+        self.upload_resume_calls.append(field)
+        return field.label != "Resume/CV"
+
+    def read_back(self, page: object, field: DiscoveredField) -> str | None:
+        _ = page, field
+        return None
+
+
+def test_later_optional_resume_success_does_not_mask_earlier_required_failure() -> None:
+    session = _FakeSession()
+    adapter = _TwoResumeFieldsAdapter()
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.NEEDS_MANUAL_INTERVENTION
+    assert result.resume_attachment_incomplete is True
+    assert result.resume_uploaded is False
+    assert any(item.label == "Additional Resume" for item in result.filled_fields)
+    assert any(item.label == "Resume/CV" for item in result.unresolved_required_fields)
 
 
 class _AshbyCoverLetterFileAdapter(_FakeAdapter):
@@ -850,6 +914,12 @@ def test_service_browser_setup_failure_sets_failure_reason() -> None:
     result = service.run("target_company:greenhouse:agoda", "1", keep_open=True)
     assert result.status is AutofillStatus.FAILED
     assert result.failure_reason is AutofillFailureReason.BROWSER_SETUP_FAILED
+    # The resume variant was already resolved before the browser failed to
+    # start -- that context must still reach this failed result, never only
+    # a successful run.
+    assert result.resume_variant == "java_backend"
+    assert result.resume_file == "java_backend.pdf"
+    assert result.resume_variant_reason
 
 
 def test_service_opens_with_adapter_recognize_as_usability_check() -> None:
@@ -2558,3 +2628,272 @@ def test_load_markdown_profile_returns_empty_string_on_profile_load_error(monkey
 
     monkeypatch.setattr("app.application.autofill.service.load_candidate_profile_context", _raise)
     assert _load_markdown_profile() == ""
+
+
+def _resume_profiles_for(tmp_path: Path, **pdfs: bytes | None) -> ResumeProfiles:
+    from app.resume_profiles import ResumeProfile
+    from tests.pdf_fixtures import write_minimal_valid_pdf
+
+    profiles = []
+    for variant_id in ("java_backend", "ai_backend", "java_backend_nz", "ai_backend_nz"):
+        path = tmp_path / f"{variant_id}.pdf"
+        if variant_id in pdfs and pdfs[variant_id] is not None:
+            path.write_bytes(pdfs[variant_id])
+        else:
+            write_minimal_valid_pdf(path)
+        profiles.append(ResumeProfile(variant_id, f"{variant_id} description.", path))
+    return ResumeProfiles(tuple(profiles))
+
+
+def test_configured_resume_profiles_path_reaches_ats_adapter(tmp_path: Path) -> None:
+    """The configured, strictly validated PDF for the deterministically
+    chosen variant must be exactly what `upload_resume` receives -- never
+    the legacy candidate-profile default once `resume_profiles` is set.
+    """
+    session = _FakeSession()
+    adapter = _KayakGenuineResumeAdapter()
+    resume_profiles = _resume_profiles_for(tmp_path)
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        resume_profiles=resume_profiles,
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert len(adapter.upload_resume_calls) == 1
+    uploaded_path, _field = adapter.upload_resume_calls[0]
+    assert uploaded_path == (tmp_path / "java_backend.pdf").resolve()
+    assert result.resume_variant == "java_backend"
+    assert result.resume_file == "java_backend.pdf"
+
+
+def test_resume_variant_override_forces_specific_variant_upload(tmp_path: Path) -> None:
+    session = _FakeSession()
+    adapter = _KayakGenuineResumeAdapter()
+    resume_profiles = _resume_profiles_for(tmp_path)
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: session,
+        wait_for_review=lambda: None,
+        resume_profiles=resume_profiles,
+        resume_variant_override="ai_backend_nz",
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    uploaded_path, _field = adapter.upload_resume_calls[0]
+    assert uploaded_path == (tmp_path / "ai_backend_nz.pdf").resolve()
+    assert result.resume_variant == "ai_backend_nz"
+
+
+def test_invalid_configured_resume_pdf_fails_closed_before_browser_opens(tmp_path: Path) -> None:
+    """An invalid/truncated configured PDF must fail visibly without ever
+    opening the browser -- never fall back to a different variant or the
+    legacy candidate-profile default.
+    """
+    from app.resume_profiles import ResumeProfile, ResumeProfiles
+
+    resume_profiles = ResumeProfiles(
+        (ResumeProfile("java_backend", "desc", tmp_path / "truncated.pdf"),)
+    )
+    (tmp_path / "truncated.pdf").write_bytes(b"%PDF-1.4\nnot a real pdf body")
+
+    browser_factory_calls: list[bool] = []
+
+    def _browser_factory() -> _FakeSession:
+        browser_factory_calls.append(True)
+        return _FakeSession()
+
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile,
+        adapter=_FakeAdapter(),
+        browser_factory=_browser_factory,
+        wait_for_review=lambda: None,
+        resume_profiles=resume_profiles,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.FAILED
+    assert result.failure_reason is AutofillFailureReason.RESUME_RESOLUTION_FAILED
+    assert not browser_factory_calls
+    assert any("java_backend" in warning for warning in result.warnings)
+    # Typed variant/filename metadata must survive even on this failure --
+    # never just a raw warning string the caller has to parse.
+    assert result.resume_variant == "java_backend"
+    assert result.resume_file == "truncated.pdf"
+
+
+def test_unconfigured_resume_variant_fails_closed_before_browser_opens(tmp_path: Path) -> None:
+    """A deterministically chosen variant that has no matching entry in
+    resume_profiles.yaml must fail closed rather than substitute another
+    variant's file.
+    """
+    from app.resume_profiles import ResumeProfile, ResumeProfiles
+    from tests.pdf_fixtures import write_minimal_valid_pdf
+
+    resume_profiles = ResumeProfiles(
+        (ResumeProfile("java_backend", "desc", write_minimal_valid_pdf(tmp_path / "java_backend.pdf")),)
+    )
+
+    class _NzLocationResolver:
+        def resolve(self, source: str, external_id: str):
+            return ResolvedVacancy(
+                source=source,
+                external_id=external_id,
+                title="Backend Engineer",
+                company="Example",
+                url="https://job-boards.greenhouse.io/agoda/jobs/1",
+                application_url="https://job-boards.greenhouse.io/agoda/jobs/1",
+                vacancy=NormalizedVacancy(
+                    source=source,
+                    external_id=external_id,
+                    title="Backend Engineer",
+                    company="Example",
+                    location="Auckland, New Zealand",
+                    employment=None,
+                    description="",
+                    url="https://job-boards.greenhouse.io/agoda/jobs/1",
+                    published_at=None,
+                ),
+            )
+
+    browser_factory_calls: list[bool] = []
+
+    def _browser_factory() -> _FakeSession:
+        browser_factory_calls.append(True)
+        return _FakeSession()
+
+    service = AutofillService(
+        resolver=_NzLocationResolver(),
+        profile_loader=_profile,
+        adapter=_FakeAdapter(),
+        browser_factory=_browser_factory,
+        wait_for_review=lambda: None,
+        resume_profiles=resume_profiles,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.FAILED
+    assert result.failure_reason is AutofillFailureReason.RESUME_RESOLUTION_FAILED
+    assert not browser_factory_calls
+    assert result.resume_variant == "java_backend_nz"
+
+
+def test_default_no_injection_resume_fails_closed_before_browser_opens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, default_resume_profiles: ResumeProfiles
+) -> None:
+    """The no-injection path (no `resume_profiles=` passed to
+    `AutofillService`) must load the normal configured profiles and fail
+    closed exactly like the explicit-injection path above when the selected
+    variant's PDF is missing/invalid -- it must never silently fall back to
+    the legacy candidate-profile `default_resume`. The legacy `default_resume`
+    here is deliberately a real, structurally valid synthetic PDF (not a
+    fake `.txt` file): if the code ever regressed to using that legacy
+    fallback, `upload_resume` would succeed and this run would reach
+    READY_FOR_REVIEW with the browser opened, so this test would then
+    actually fail -- a fake/invalid legacy file would make this test pass
+    for the wrong reason regardless of whether the fallback was used.
+    """
+    from app.resume_profiles import ResumeProfile, ResumeProfiles
+    from tests.pdf_fixtures import write_minimal_valid_pdf
+
+    legacy_default = write_minimal_valid_pdf(tmp_path / "legacy_default_resume.pdf")
+
+    def _profile_with_valid_legacy_default() -> CandidateProfile:
+        profile = _profile()
+        return profile.model_copy(
+            update={
+                "application_files": profile.application_files.model_copy(
+                    update={"default_resume": str(legacy_default)}
+                )
+            }
+        )
+
+    broken_profiles = ResumeProfiles(
+        (ResumeProfile("java_backend", "desc", tmp_path / "missing.pdf"),)
+    )
+    monkeypatch.setattr("app.application.autofill.service.load_resume_profiles", lambda: broken_profiles)
+
+    browser_factory_calls: list[bool] = []
+
+    def _browser_factory() -> _FakeSession:
+        browser_factory_calls.append(True)
+        return _FakeSession()
+
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_profile_with_valid_legacy_default,
+        adapter=_FakeAdapter(),
+        browser_factory=_browser_factory,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.FAILED
+    assert result.failure_reason is AutofillFailureReason.RESUME_RESOLUTION_FAILED
+    assert not browser_factory_calls
+    assert result.resume_variant == "java_backend"
+
+
+@pytest.mark.parametrize(
+    ("title", "location", "expected_variant"),
+    [
+        ("Backend Engineer", "Berlin, Germany", "java_backend"),
+        ("Backend Engineer building LLM integrations", "Berlin, Germany", "ai_backend"),
+        ("Backend Engineer", "Auckland, New Zealand", "java_backend_nz"),
+        ("Backend Engineer building LLM integrations", "Auckland, New Zealand", "ai_backend_nz"),
+    ],
+)
+def test_four_resume_variant_combinations_reach_upload_path(
+    title: str, location: str, expected_variant: str, default_resume_profiles: ResumeProfiles
+) -> None:
+    """Every one of the four AI x New Zealand combinations must reach
+    `upload_resume` with exactly that variant's configured PDF path -- never
+    a different variant's file and never the legacy candidate-profile
+    default.
+    """
+
+    class _VariantResolver:
+        def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
+            return ResolvedVacancy(
+                source=source,
+                external_id=external_id,
+                title=title,
+                company="Example",
+                url="https://job-boards.greenhouse.io/agoda/jobs/1",
+                application_url="https://job-boards.greenhouse.io/agoda/jobs/1",
+                vacancy=NormalizedVacancy(
+                    source=source,
+                    external_id=external_id,
+                    title=title,
+                    company="Example",
+                    location=location,
+                    employment=None,
+                    description=title,
+                    url="https://job-boards.greenhouse.io/agoda/jobs/1",
+                    published_at=None,
+                ),
+            )
+
+    adapter = _KayakGenuineResumeAdapter()
+    service = AutofillService(
+        resolver=_VariantResolver(),
+        profile_loader=_profile,
+        adapter=adapter,
+        browser_factory=lambda: _FakeSession(),
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:ashby:kayak", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.READY_FOR_REVIEW
+    assert len(adapter.upload_resume_calls) == 1
+    uploaded_path, _field = adapter.upload_resume_calls[0]
+    assert uploaded_path == default_resume_profiles.get(expected_variant).pdf.resolve()
+    assert result.resume_variant == expected_variant

@@ -15,6 +15,7 @@ from app.requirement_matcher import (
     _contains_any,
     compare_requirements,
 )
+from app.resume_policy import ResumePolicyInput, decide_resume_variant, force_non_ai
 from app.skills_profile_loader import CandidateSkillsProfile
 from app.title_rules import (
     RULE_EXPLICIT_JVM_BACKEND,
@@ -68,6 +69,7 @@ class VacancyAnalyzer:
                 classification=title_class,
                 content_completeness=completeness,
                 title=title_from_text or "",
+                vacancy_text=vacancy,
             )
         if title_from_text:
             log_classification_rule(
@@ -114,7 +116,20 @@ class VacancyAnalyzer:
         total_possible_score = comparison.total_possible_score
         explicit_skill_count = _count_explicit_skills(extraction)
         evidence_sufficient = True
-        recommended_resume = _recommend_resume(extraction.role_type)
+        vacancy_location = _extract_location_from_vacancy_text(vacancy)
+        resume_decision = decide_resume_variant(
+            ResumePolicyInput(
+                role_type=extraction.role_type,
+                responsibilities=extraction.responsibilities,
+                mandatory_skills=extraction.mandatory_skills,
+                optional_skills=extraction.optional_skills,
+                title=title_from_text or extraction.role_type,
+                description=vacancy,
+                location=vacancy_location,
+                location_restrictions=extraction.location_restrictions,
+            )
+        )
+        recommended_resume = RecommendedResume.JAVA_AI if resume_decision.is_ai else RecommendedResume.JAVA
 
         title_text = title_from_text or extraction.role_type
         alert_query = _extract_alert_query(vacancy)
@@ -198,6 +213,13 @@ class VacancyAnalyzer:
                 match_percentage = None
                 gaps = []
                 recommended_resume = RecommendedResume.JAVA
+                resume_decision = force_non_ai(
+                    resume_decision,
+                    reason=(
+                        "Technology stack is unknown in this incomplete email card; "
+                        "defaulting to the Java/Kotlin backend resume."
+                    ),
+                )
             if incomplete_title_class == "hard_negative":
                 decision = Decision.IGNORE
             if incomplete_title_class in {"java_qa", "java_android"}:
@@ -269,6 +291,9 @@ class VacancyAnalyzer:
             evidence_sufficient=evidence_sufficient,
             recommended_resume=recommended_resume,
             recommended_cover_template=_recommend_cover_template(extraction.role_type, extraction.short_summary),
+            resume_variant=resume_decision.variant.value,
+            resume_variant_reason=resume_decision.reason,
+            resume_location_warning=resume_decision.location_warning,
             warning_signals=warning_signals,
             visa_sponsorship=extraction.visa_sponsorship,
             relocation_support=extraction.relocation_support,
@@ -284,6 +309,7 @@ def _build_deterministic_evaluation(
     classification,
     content_completeness: str,
     title: str,
+    vacancy_text: str = "",
 ) -> VacancyEvaluation:
     decision = classification.match_strength
     assert decision is not None
@@ -306,6 +332,15 @@ def _build_deterministic_evaluation(
     }[decision]
 
     recommended = RecommendedResume.JAVA
+    resume_decision = force_non_ai(
+        decide_resume_variant(
+            ResumePolicyInput(
+                title=title,
+                location=_extract_location_from_vacancy_text(vacancy_text),
+            )
+        ),
+        reason="Deterministic title-only classification always uses the Java/Kotlin backend resume.",
+    )
     return VacancyEvaluation(
         decision=decision,
         summary=summary,
@@ -321,6 +356,9 @@ def _build_deterministic_evaluation(
         evidence_sufficient=decision == Decision.STRONG_MATCH,
         recommended_resume=recommended,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
+        resume_variant=resume_decision.variant.value,
+        resume_variant_reason=resume_decision.reason,
+        resume_location_warning=resume_decision.location_warning,
         warning_signals=[],
     )
 
@@ -466,13 +504,6 @@ def _select_gaps_for_output(
         key=lambda skill: (-optional_missing_weights.get(skill, 1), skill),
     )
     return ranked_optional[:3]
-
-
-def _recommend_resume(role_type: str) -> RecommendedResume:
-    role = role_type.lower()
-    if "ai" in role:
-        return RecommendedResume.JAVA_AI
-    return RecommendedResume.JAVA
 
 
 def _recommend_cover_template(role_type: str, summary: str) -> RecommendedCoverTemplate:
@@ -907,6 +938,14 @@ def _extract_title_from_vacancy_text(vacancy_text: str) -> str | None:
 def _extract_alert_query(vacancy_text: str) -> str | None:
     for line in vacancy_text.splitlines():
         if line.lower().startswith("alert query:"):
+            value = " ".join(line.split(":", 1)[1].strip().split())
+            return value or None
+    return None
+
+
+def _extract_location_from_vacancy_text(vacancy_text: str) -> str | None:
+    for line in vacancy_text.splitlines():
+        if line.lower().startswith("location:"):
             value = " ".join(line.split(":", 1)[1].strip().split())
             return value or None
     return None

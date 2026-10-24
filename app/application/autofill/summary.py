@@ -29,6 +29,21 @@ def render_autofill_summary(result: AutofillResult) -> str:
         "",
         "Resume:",
         "Uploaded successfully" if result.resume_uploaded else "Not uploaded",
+        *(
+            [f"Variant: {result.resume_variant}" + (f" ({result.resume_file})" if result.resume_file else "")]
+            if result.resume_variant
+            else []
+        ),
+        *(
+            [f"Variant reason: {result.resume_variant_reason}"]
+            if result.resume_variant_reason
+            else []
+        ),
+        *(
+            [f"Location uncertainty: {result.resume_location_warning}"]
+            if result.resume_location_warning
+            else []
+        ),
         "",
         "Cover letter:",
         "Filled" if result.cover_letter_filled else "Not filled",
