@@ -1,4 +1,5 @@
 from app.collectors.vacancy_collector import NormalizedVacancy
+from app.company_watch.config_loader import DEFAULT_TARGET_COMPANIES_PATH, load_target_companies_config
 from app.company_watch.models import TargetCompany
 from app.company_watch.prefilter import passes_role_prefilter
 
@@ -151,3 +152,74 @@ def test_target_seniority_titles_still_pass() -> None:
 def test_engineering_manager_still_excluded_by_default_list() -> None:
     company = _company(role_title_keywords=["engineering manager"])
     assert passes_role_prefilter(_vacancy(title="Engineering Manager"), company) is False
+
+
+def _halter_vacancy(title: str) -> NormalizedVacancy:
+    return NormalizedVacancy(
+        source="target_company:ashby:halter",
+        external_id="47506f11-a952-4b34-9672-75195b50566c",
+        title=title,
+        company="Halter",
+        location="Auckland, New Zealand",
+        employment=None,
+        description="",
+        url="https://jobs.ashbyhq.com/halter/47506f11-a952-4b34-9672-75195b50566c",
+        published_at=None,
+    )
+
+
+def test_halter_senior_engineers_product_and_engineering_listing_passes() -> None:
+    config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
+    halter = next(company for company in config.companies if company.name == "Halter")
+
+    assert passes_role_prefilter(
+        _halter_vacancy("Senior Engineers - Product & Engineering"), halter
+    ) is True
+    # Punctuation/case-normalized equivalent of the same real listing title.
+    assert passes_role_prefilter(
+        _halter_vacancy("SENIOR ENGINEERS: PRODUCT & ENGINEERING!"), halter
+    ) is True
+
+
+def test_halter_existing_title_keywords_still_pass() -> None:
+    config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
+    halter = next(company for company in config.companies if company.name == "Halter")
+
+    for title in ("Software Engineer, Backend", "Senior Java Engineer", "Backend Engineer"):
+        assert passes_role_prefilter(_halter_vacancy(title), halter) is True, title
+
+
+def test_halter_still_excludes_unrelated_and_unverified_titles() -> None:
+    config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
+    halter = next(company for company in config.companies if company.name == "Halter")
+
+    cases = (
+        "Junior Software Engineer",
+        "Graduate Software Engineer",
+        "Engineering Manager",
+        "iOS Engineer",
+        "Hardware Engineer",
+        "Data Engineer",
+        "NetSuite Administrator",
+        "Account Executive",
+    )
+    for title in cases:
+        assert passes_role_prefilter(_halter_vacancy(title), halter) is False, title
+
+
+def test_halter_extra_phrase_does_not_leak_into_other_companies() -> None:
+    config = load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH)
+    partly = next(company for company in config.companies if company.name == "Partly")
+
+    vacancy = NormalizedVacancy(
+        source="target_company:ashby:partly.com",
+        external_id="1",
+        title="Senior Engineers - Product & Engineering",
+        company="Partly",
+        location="Auckland, New Zealand",
+        employment=None,
+        description="",
+        url="https://jobs.ashbyhq.com/partly.com/1",
+        published_at=None,
+    )
+    assert passes_role_prefilter(vacancy, partly) is False

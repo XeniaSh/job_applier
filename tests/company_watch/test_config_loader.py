@@ -144,9 +144,21 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
         if company.name not in {"TravelPerk / Perk", "Airwallex"}
     ]
     assert len(newly_added_ashby_companies) == 17
+
+    # Halter is the sole explicit exception: its public "Senior Engineers -
+    # Product & Engineering" listing (job 47506f11-a952-4b34-9672-75195b50566c)
+    # only matches hiring criteria via one extra, Halter-specific full-title
+    # phrase appended after the standard keywords; every other Ashby board
+    # still uses the standard list verbatim.
     for company in newly_added_ashby_companies:
         assert company.relocation_status in {"mixed_check_per_role", "remote_global"}
-        assert company.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
+        if company.name == "Halter":
+            assert company.role_title_keywords == [
+                *_STANDARD_ROLE_TITLE_KEYWORDS,
+                "senior engineers - product & engineering",
+            ]
+        else:
+            assert company.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
 
     airwallex = next(company for company in ashby_companies if company.name == "Airwallex")
     assert airwallex.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
@@ -159,7 +171,10 @@ def test_ashby_boards_cover_verified_companies_with_unique_slugs() -> None:
 
     halter = next(company for company in ashby_companies if company.name == "Halter")
     assert halter.relocation_status == "mixed_check_per_role"
-    assert halter.role_title_keywords == _STANDARD_ROLE_TITLE_KEYWORDS
+    assert halter.role_title_keywords == [
+        *_STANDARD_ROLE_TITLE_KEYWORDS,
+        "senior engineers - product & engineering",
+    ]
     assert halter.job_board_url == "https://jobs.ashbyhq.com/halter"
     assert halter.known_hiring_locations == ["Auckland, New Zealand"]
 
