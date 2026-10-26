@@ -18,7 +18,7 @@ from app.application.autofill.browser import (
     wait_for_manual_review,
 )
 from app.application.autofill.classifier import ClassifiedField, classify_field
-from app.application.autofill.greenhouse import GreenhouseAdapter, GreenhouseFormError
+from app.application.autofill.greenhouse import GreenhouseAdapter, GreenhouseFormError, _bounded_log_token
 from app.application.autofill.lever import LeverAdapter, LeverFormError
 from app.application.autofill.logging import log_autofill_result
 from app.application.autofill.summary import format_privacy_acknowledgement_report
@@ -181,6 +181,20 @@ class AutofillService:
                 override_variant=self._resume_variant_override,
             )
             resume_path = resume_selection.path
+            if isinstance(adapter, GreenhouseAdapter):
+                # Emitted once here, before browser handoff, so the selected
+                # variant/basename is visible even when the run never
+                # reaches the (INFO-level, post-handoff) adapter trace --
+                # e.g. the browser setup itself fails. Never the full path
+                # or any other profile data.
+                logger.warning(
+                    "greenhouse_resume_selection stage=pre_handoff source=%s external_id=%s "
+                    "variant=%s configured_basename=%s",
+                    source,
+                    external_id,
+                    resume_selection.variant,
+                    _bounded_log_token(resume_path.name),
+                )
             session = self._browser_factory()
             session.keep_open = keep_open
             session.open(vacancy.application_url, is_usable=adapter.recognize)
@@ -505,10 +519,21 @@ class AutofillService:
                         # READY_FOR_REVIEW. No upload is ever attempted here
                         # (never with generated text or any other stand-in
                         # value).
-                        warnings.append(
-                            f"Resume was not attached for '{item.field.label}': the control was "
-                            "discovered but could not be mapped to an uploadable resume."
-                        )
+                        if isinstance(adapter, GreenhouseAdapter):
+                            # No upload was ever attempted for this control --
+                            # never a "was not attached" claim, which would
+                            # assert knowledge of an existing attachment this
+                            # branch never actually checked.
+                            warnings.append(
+                                f"Resume upload was not attempted for '{item.field.label}': the "
+                                "control was discovered but could not be mapped to an uploadable "
+                                "resume; check its current attachment/filename before submitting."
+                            )
+                        else:
+                            warnings.append(
+                                f"Resume was not attached for '{item.field.label}': the control was "
+                                "discovered but could not be mapped to an uploadable resume."
+                            )
                         resume_attachment_failed_required = True
                     _append_unresolved(item, record, unresolved_required, unresolved_optional)
                 continue
@@ -594,7 +619,18 @@ class AutofillService:
                 resume_uploaded_any = True
             else:
                 unresolved_required.append(record) if item.field.required else unresolved_optional.append(record)
-                warnings.append(f"Resume was not attached for '{item.field.label}'.")
+                if isinstance(adapter, GreenhouseAdapter):
+                    # The modern widget's own completion signal could not be
+                    # confirmed -- never a definitive "was not attached":
+                    # the upload may in fact have gone through, so the
+                    # warning tells the reviewer to check the control's
+                    # current state rather than assume it is empty.
+                    warnings.append(
+                        f"Resume attachment for '{item.field.label}' could not be confirmed; "
+                        "check its current attachment/filename before replacing it or submitting."
+                    )
+                else:
+                    warnings.append(f"Resume was not attached for '{item.field.label}'.")
                 if item.field.required:
                     resume_attachment_failed_required = True
 
@@ -646,10 +682,21 @@ class AutofillService:
                 resume_attachment_failed_required = True
                 filled[:] = [record for record in filled if (record.label, record.name) != identity]
                 unresolved_required.append(_field_result(item))
-                warnings.append(
-                    f"Resume attachment for '{item.field.label}' could not be confirmed at the "
-                    "end of Prepare; please attach it manually before submitting."
-                )
+                if isinstance(adapter, GreenhouseAdapter):
+                    # Same uncertainty as the upload-attempt warning above:
+                    # this re-check could not confirm the attachment, which
+                    # is never the same as proving it absent, so this never
+                    # instructs a manual re-attach outright.
+                    warnings.append(
+                        f"Resume attachment for '{item.field.label}' could not be confirmed at "
+                        "the end of Prepare; check its current attachment/filename before "
+                        "replacing it or submitting."
+                    )
+                else:
+                    warnings.append(
+                        f"Resume attachment for '{item.field.label}' could not be confirmed at the "
+                        "end of Prepare; please attach it manually before submitting."
+                    )
 
         privacy_trace = _build_privacy_acknowledgement_trace(classified, adapter, filled)
         if privacy_trace is not None:

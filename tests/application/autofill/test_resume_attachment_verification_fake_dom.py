@@ -15,13 +15,19 @@ fail this one readback closed, never bubble out as an unrelated
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
+import pytest
 from playwright.sync_api import Error as PlaywrightError
 
 from app.application.autofill.ashby import _file_is_attached, _wait_for_file_attached
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.greenhouse import (
+    GreenhouseAdapter,
     _resume_file_locator,
     _resume_is_attached,
+    _resume_widget_status,
     _set_resume_files,
     _wait_for_resume_attached,
 )
@@ -112,6 +118,299 @@ def test_greenhouse_wait_for_resume_attached_fails_closed_on_wait_for_timeout_er
         raise_after_waits=0,
     )
     assert _wait_for_resume_attached(page, _gh_field(), "resume.pdf", timeout_ms=10_000) is False
+
+
+# --- Modern widget status (script-aware fake, no Chromium) -----------------
+
+
+class FakeWidgetStatusPage:
+    """Double that distinguishes `_RESUME_WIDGET_STATUS_JS` calls from
+    `_file_names`'s own legacy `.files` evaluate by the one substring unique
+    to each (`"completedFilename"` only appears in the widget-status
+    script) -- so `_resume_is_attached`'s "modern group found -> trust it;
+    otherwise fall back to legacy `.files`" branching can be exercised
+    without a real browser.
+    """
+
+    def __init__(
+        self,
+        *,
+        widget_status: dict[str, object] | None = None,
+        legacy_files: list[str] | None = None,
+        widget_status_error: Exception | None = None,
+    ) -> None:
+        self._widget_status = widget_status
+        self._legacy_files = legacy_files or []
+        self._widget_status_error = widget_status_error
+
+    def evaluate(self, script: str, arg: object = None) -> object:
+        _ = arg
+        if "completedFilename" in script:
+            if self._widget_status_error is not None:
+                raise self._widget_status_error
+            return self._widget_status
+        return list(self._legacy_files)
+
+
+def test_widget_status_none_when_no_modern_group_present() -> None:
+    page = FakeWidgetStatusPage(widget_status=None, legacy_files=["resume.pdf"])
+    status, observation_failed = _resume_widget_status(page, _gh_field())
+    assert status is None
+    assert observation_failed is False
+
+
+def test_widget_status_observation_failed_when_script_raises() -> None:
+    """The widget-status script itself raising (e.g. the page/context
+    closed concurrently) must be reported distinctly from a genuine "no
+    modern group here" -- callers must never treat the two as the same
+    thing.
+    """
+    page = FakeWidgetStatusPage(
+        widget_status=None,
+        widget_status_error=PlaywrightError("Target page, context or browser has been closed"),
+    )
+    status, observation_failed = _resume_widget_status(page, _gh_field())
+    assert status is None
+    assert observation_failed is True
+
+
+def test_resume_is_attached_fails_closed_on_widget_observation_error_even_with_native_files() -> None:
+    """Regression: a fake page that raises on the widget-status script but
+    still answers the legacy `_file_names` script with a real-looking
+    `["resume.pdf"]` used to make `_resume_is_attached` report True -- the
+    failed widget read was silently treated as "no modern group", falling
+    through to the legacy native-input check. A failed observation must
+    fail this check closed instead, leaving the bounded poll in
+    `_wait_for_resume_attached` to retry.
+    """
+    page = FakeWidgetStatusPage(
+        widget_status=None,
+        legacy_files=["resume.pdf"],
+        widget_status_error=PlaywrightError("Target page, context or browser has been closed"),
+    )
+    assert _resume_is_attached(page, _gh_field(), "resume.pdf") is False
+
+
+def test_read_back_returns_none_on_widget_observation_error_even_with_native_files() -> None:
+    """Mirrors the `_resume_is_attached` regression above: `read_back` must
+    also fail closed (None) on a failed widget-status observation, never
+    report the legacy native input's filename as if the modern group had
+    genuinely been proven absent.
+    """
+    page = FakeWidgetStatusPage(
+        widget_status=None,
+        legacy_files=["resume.pdf"],
+        widget_status_error=PlaywrightError("Target page, context or browser has been closed"),
+    )
+    assert GreenhouseAdapter().read_back(page, _gh_field()) is None
+
+
+def test_resume_is_attached_falls_back_to_legacy_files_when_no_modern_group() -> None:
+    page = FakeWidgetStatusPage(widget_status=None, legacy_files=["resume.pdf"])
+    assert _resume_is_attached(page, _gh_field(), "resume.pdf") is True
+
+
+def test_resume_is_attached_true_on_completed_modern_widget() -> None:
+    page = FakeWidgetStatusPage(
+        widget_status={
+            "nativeInputPresent": False,
+            "completedFilename": "resume.pdf",
+            "pending": False,
+            "error": False,
+        }
+    )
+    assert _resume_is_attached(page, _gh_field(), "resume.pdf") is True
+
+
+def test_resume_is_attached_false_while_modern_widget_pending() -> None:
+    """A stale legacy `.files` value must never be accepted once a modern
+    group exists and reports `pending` -- the modern group's own state is
+    authoritative, so this must fail closed even if `legacy_files` still
+    shows the file (e.g. the native input briefly coexists mid-transition).
+    """
+    page = FakeWidgetStatusPage(
+        widget_status={
+            "nativeInputPresent": False,
+            "completedFilename": None,
+            "pending": True,
+            "error": False,
+        },
+        legacy_files=["resume.pdf"],
+    )
+    assert _resume_is_attached(page, _gh_field(), "resume.pdf") is False
+
+
+def test_resume_is_attached_false_on_modern_widget_error_even_with_stale_legacy_files() -> None:
+    page = FakeWidgetStatusPage(
+        widget_status={
+            "nativeInputPresent": True,
+            "completedFilename": None,
+            "pending": False,
+            "error": True,
+        },
+        legacy_files=["resume.pdf"],
+    )
+    assert _resume_is_attached(page, _gh_field(), "resume.pdf") is False
+
+
+def test_resume_is_attached_false_when_completed_filename_coexists_with_pending() -> None:
+    """Regression: a stale `completedFilename` must never be trusted once the
+    same group also reports `pending` -- unlike the existing
+    `completedFilename=None` pending test above, this is the case where the
+    readout text is genuinely present but a fresh upload is simultaneously
+    in flight for the same group.
+    """
+    page = FakeWidgetStatusPage(
+        widget_status={
+            "nativeInputPresent": False,
+            "completedFilename": "resume.pdf",
+            "pending": True,
+            "error": False,
+        }
+    )
+    assert _resume_is_attached(page, _gh_field(), "resume.pdf") is False
+
+
+def test_resume_is_attached_false_when_completed_filename_coexists_with_error() -> None:
+    page = FakeWidgetStatusPage(
+        widget_status={
+            "nativeInputPresent": False,
+            "completedFilename": "resume.pdf",
+            "pending": False,
+            "error": True,
+        }
+    )
+    assert _resume_is_attached(page, _gh_field(), "resume.pdf") is False
+
+
+def test_resume_is_attached_exact_basename_not_substring_on_modern_widget() -> None:
+    """`completedFilename` containing the expected basename as a substring
+    (e.g. a longer, unrelated filename) must never match -- only an exact
+    basename counts.
+    """
+    page = FakeWidgetStatusPage(
+        widget_status={
+            "nativeInputPresent": False,
+            "completedFilename": "not_resume.pdf",
+            "pending": False,
+            "error": False,
+        }
+    )
+    assert _resume_is_attached(page, _gh_field(), "resume.pdf") is False
+
+
+# --- Upload diagnostics log bounding (script-aware fake, no Chromium) ------
+
+
+class _FakeKeyboard:
+    def press(self, _key: str) -> None:
+        pass
+
+
+class _FakeRejectingFileLocator:
+    """Minimal `Locator` double whose `set_input_files` raises a configured
+    error -- drives `GreenhouseAdapter.upload_resume`'s own
+    `except PlaywrightError as exc: set_files_error = type(exc).__name__`
+    branch without a real browser.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    @property
+    def first(self) -> "_FakeRejectingFileLocator":
+        return self
+
+    def count(self) -> int:
+        return 1
+
+    def set_input_files(self, *args: object, **kwargs: object) -> None:
+        raise self._error
+
+
+class FakeUploadDiagnosticsPage:
+    """Full double for the two DOM calls `GreenhouseAdapter.upload_resume`
+    itself makes (`_set_resume_files`'s locator write, the widget-status
+    poll inside `_wait_for_resume_attached`) -- no real browser -- so the
+    production `greenhouse_resume stage=upload_attempt` log line can be
+    inspected end-to-end for leakage.
+    """
+
+    keyboard = _FakeKeyboard()
+
+    def __init__(self, *, set_files_error: Exception, completed_filename: str) -> None:
+        self._set_files_error = set_files_error
+        self._completed_filename = completed_filename
+
+    def locator(self, _selector: str) -> _FakeRejectingFileLocator:
+        return _FakeRejectingFileLocator(self._set_files_error)
+
+    def evaluate(self, script: str, _arg: object = None) -> dict[str, object]:
+        _ = script
+        return {
+            "nativeInputPresent": False,
+            "completedFilename": self._completed_filename,
+            "pending": False,
+            "error": False,
+        }
+
+    def wait_for_timeout(self, _ms: int) -> None:
+        pass
+
+
+def test_upload_resume_diagnostic_log_is_bounded_and_never_leaks_raw_error_or_path(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression: a rejected `set_input_files` write (a real Playwright
+    error whose own message can carry a full filesystem path or other
+    sensitive detail) together with a completed-filename readout that
+    itself contains a newline and is far longer than any real basename --
+    the `upload_resume` diagnostic log line must stay one bounded line that
+    names only the error's *class*, never its message, and never any
+    filesystem path (not even this call's own resume path, only its
+    basename). The expected and observed (widget-reported) basenames are
+    the same here only so `_wait_for_resume_attached` confirms on its very
+    first check -- this test is about the log line's shape, not the
+    boolean outcome, and a real per-call timeout override (as other tests
+    in this module use) is not available through this public method.
+    """
+    sensitive_message = (
+        "Timeout 5000ms exceeded.\n=== logs ===\nwaiting for locator "
+        '"input"\n/Users/ada/Secret Employer Names/resume_final.pdf'
+    )
+    basename = "expected\nand-observed-basename-" + "x" * 200 + ".pdf"
+    page = FakeUploadDiagnosticsPage(
+        set_files_error=PlaywrightError(sensitive_message),
+        completed_filename=basename,
+    )
+    field = DiscoveredField(label="Resume/CV", field_type="file", required=True, element_id="resume")
+
+    with caplog.at_level(logging.WARNING, logger="app.application.autofill.greenhouse"):
+        result = GreenhouseAdapter().upload_resume(
+            page, Path("/private/tmp/some-run") / basename, field
+        )
+
+    assert result is True
+    traces = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("greenhouse_resume stage=upload_attempt")
+    ]
+    assert len(traces) == 1
+    message = traces[0]
+
+    assert "\n" not in message
+    # `type(exc).__name__` on `playwright.sync_api.Error` (imported here,
+    # like in `greenhouse.py`/`ashby.py`, as `PlaywrightError`) is the real
+    # class name "Error" -- never the local import alias -- matching the
+    # existing `click_raised=Error` precedent elsewhere in this test suite
+    # (e.g. test_greenhouse_prepare_diagnostics.py).
+    assert "set_files_error_class=Error" in message
+    assert sensitive_message not in message
+    assert "Timeout 5000ms exceeded" not in message
+    assert "/Users/ada/Secret Employer Names" not in message
+    assert "/private/tmp/some-run" not in message
+    assert message.count("...(truncated)") == 2
 
 
 # --- Ashby -----------------------------------------------------------------

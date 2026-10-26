@@ -198,3 +198,82 @@ uv run python -m app autofill target_company:greenhouse:adyen 7342887
 
 Do **not** click Submit. Coding agents must not run this live headed browser
 unless you ask. Report remaining unresolved required fields after visual check.
+
+## Resume attachment false-negative warning (fixed)
+
+Live runs against Elastic (`8315564`), Stripe (`8301379`), and Asana
+(`8319678`) logged `Resume was not attached for 'Attach'.` even though the
+candidate submitted successfully without manually re-attaching. Confirmed
+root cause, from Greenhouse's own public job-application pages (e.g.
+`https://job-boards.greenhouse.io/embed/job_app?for=elastic&token=8315564`)
+and their bundled `entry.client-*.js`: the current React file-upload widget
+removes the original `<input type="file">` entirely once an upload
+completes, replacing it with a `.file-upload__filename` readout inside the
+same `[role="group"][aria-labelledby="upload-label-{id}"]` wrapper (a
+progressbar appears while pending; an `upload-label--error` class / own
+`{id}-error` text appears on rejection). The previous verifier
+(`_resume_is_attached` in `app/application/autofill/greenhouse.py`) only
+ever read the input's `.files`, so it reported a false negative on every
+successful modern upload, including after the *second* retry. The actual
+reported status of the three live runs above was never captured in logs
+available to inspect, so this is a plausible explanation for the warning,
+not a confirmed account of what those three runs actually did or reported.
+
+The verifier now also reads the group's own rendered state
+(`_resume_widget_status`), scoped strictly to the field's own id — never a
+generic `#resume` fallback or another field's group (e.g. Cover Letter,
+which renders identical markup) — and falls back to the legacy `.files`
+check only when no such group exists at all. This is a confirmed DOM
+mechanism, verified against Greenhouse's actual public markup/JS; it does
+**not** prove what the three live runs above actually submitted, so treat
+the original three incidents as explained, not re-verified.
+
+See `tests/fixtures/autofill/greenhouse_resume_modern_widget.html` and the
+`test_modern_widget_*` tests in `tests/application/autofill/test_greenhouse_adapter.py`
+for the covered lifecycle (pending, delayed completion, rejection echoing
+the attempted filename, wrong/other-field filename, scoping, removal after
+success, exact-basename matching).
+
+### Follow-up: failed observation vs. proven absence, and uncertain wording
+
+A fake-DOM regression test found a second false-negative/false-positive
+edge in the fix above: `_resume_widget_status`'s own read of the modern
+widget could fail (a raised `PlaywrightError`, e.g. a transient page
+hiccup) and that was indistinguishable from "no modern group exists at
+all" -- which then fell back to trusting the legacy native `<input>`'s
+`.files`, possibly reporting a false positive. `_resume_widget_status` now
+returns `(status, observation_failed)`; a failed observation fails that
+one readback closed (never a whole-Prepare `UNEXPECTED_ERROR`) and leaves
+the existing bounded poll in `_wait_for_resume_attached` to retry on the
+next tick. See `test_resume_is_attached_fails_closed_on_widget_observation_error_even_with_native_files`
+and `test_read_back_returns_none_on_widget_observation_error_even_with_native_files`
+in `tests/application/autofill/test_resume_attachment_verification_fake_dom.py`.
+
+The resume diagnostic log lines (`greenhouse_resume stage=upload_attempt` /
+`stage=final_verify`) now bound and escape every filename/basename they
+print (newlines and overlong names can no longer break a log line into
+fake-looking entries) and tag each read with an `evidence_kind` of
+`modern`, `legacy`, or `unavailable` instead of a bare `widget_found`
+boolean. Bounding is for safe single-line logging only -- a resume
+basename can still carry a candidate's own name, so this is never a claim
+that the log line is free of personal data.
+
+Greenhouse-only resume warnings that previously asserted a definitive
+negative (`Resume was not attached for '...'`, `...please attach it
+manually before submitting.`) now say the attachment **could not be
+confirmed** and ask the reviewer to check the control's current
+attachment/filename before replacing it or submitting -- an unconfirmed
+read (upload rejected, final re-check mismatch/disappearance, or a
+required resume control that was discovered but never mapped to an
+uploadable file) is never the same as having proven the control empty.
+Lever/Ashby wording is unchanged. A new warning-level
+`greenhouse_resume_selection stage=pre_handoff` log line in
+`AutofillService.run` also records the selected variant and configured PDF
+basename (never the full path) right after resume resolution, before the
+browser even opens, so the selection is visible even on a run that never
+reaches the browser at all.
+
+See `tests/application/autofill/test_greenhouse_service_resume_attachment.py`
+for real-browser, real-`GreenhouseAdapter` acceptance coverage of all four
+forced resume variants, an upload rejected by the widget, a post-upload
+removal, and a post-upload filename mismatch.

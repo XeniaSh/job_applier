@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — Modern Widget Co</title>
+</head>
+<body>
+  <form id="application_form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+
+    <label for="last_name">Last Name</label>
+    <input id="last_name" name="job_application[last_name]" type="text" required>
+
+    <label for="email">Email</label>
+    <input id="email" name="job_application[email]" type="email" required>
+
+    <!--
+      Markup below mirrors Greenhouse's current React embed
+      (job-boards.cdn.greenhouse.io/assets/entry.client-*.js) exactly, as
+      confirmed from its public job-application pages (e.g.
+      job-boards.greenhouse.io/embed/job_app?for=elastic&token=8315564):
+      a `[role="group"]` wrapper keyed by `aria-labelledby="upload-label-{id}"`,
+      a `.file-upload__filename` readout (with its own "Remove file" button)
+      replacing the native `<input type="file">` on a completed upload, a
+      `[role="progressbar"]` while uploading, and an `upload-label--error`
+      class / `{id}-error` helper paragraph on rejection. The inline script
+      below drives those same state transitions on command -- it is not the
+      real bundle, just its rendered shapes -- so tests can exercise the
+      adapter's real DOM-reading code against real lifecycle transitions
+      without vendoring/hosting Greenhouse's JS.
+    -->
+    <div class="field-wrapper">
+      <div role="group" aria-labelledby="upload-label-resume" aria-required="true" class="file-upload" data-allow-s3="false">
+        <div id="upload-label-resume" class="label upload-label">Resume/CV<span class="required">*</span></div>
+        <div class="file-upload__wrapper" id="resume-wrapper">
+          <div class="button-container">
+            <div class="secondary-button">
+              <div>
+                <button type="button" class="btn btn--pill">Attach</button>
+                <label class="visually-hidden" for="resume">Attach</label>
+                <input id="resume" class="visually-hidden" type="file" accept=".pdf,.doc,.docx,.txt,.rtf">
+              </div>
+            </div>
+            <p id="accepted-filetypes" class="file-upload__filetypes">Accepted file types: pdf, doc, docx, txt, rtf</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="field-wrapper">
+      <div role="group" aria-labelledby="upload-label-cover_letter" aria-required="false" class="file-upload" data-allow-s3="false">
+        <div id="upload-label-cover_letter" class="label upload-label">Cover Letter</div>
+        <div class="file-upload__wrapper" id="cover_letter-wrapper">
+          <div class="button-container">
+            <div class="secondary-button">
+              <div>
+                <button type="button" class="btn btn--pill">Attach</button>
+                <label class="visually-hidden" for="cover_letter">Attach</label>
+                <input id="cover_letter" class="visually-hidden" type="file" accept=".pdf,.doc,.docx,.txt,.rtf">
+              </div>
+            </div>
+            <p id="accepted-filetypes" class="file-upload__filetypes">Accepted file types: pdf, doc, docx, txt, rtf</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button type="submit" id="submit_app">Submit application</button>
+  </form>
+  <script>
+    window.__submitClicked = false;
+    document.getElementById("submit_app").addEventListener("click", function (event) {
+      event.preventDefault();
+      window.__submitClicked = true;
+    });
+
+    function ghWrapper(id) { return document.getElementById(id + "-wrapper"); }
+    function ghLabel(id) { return document.getElementById("upload-label-" + id); }
+
+    // Simulates the real widget's onChange handler for a fast, successful
+    // upload: a native `input[type=file]` selection unmounts the input
+    // immediately and shows the completed `.file-upload__filename` readout
+    // for the selected file's own name, matching the confirmed render
+    // condition `!i && r` (filename readout only once upload resolves).
+    // Tests that need the pending/error/wrong-file states instead drive
+    // them explicitly via `window.__ghSetPending`/`__ghSetError` after
+    // restoring the input with `window.__ghRestoreInput`.
+    function ghArmNativeInput(id) {
+      var input = document.getElementById(id);
+      if (!input) return;
+      input.addEventListener("change", function () {
+        window.__ghChangeCount = (window.__ghChangeCount || 0) + 1;
+        var file = input.files && input.files[0];
+        window.__ghSetCompleted(file ? file.name : "", id);
+      });
+    }
+    ghArmNativeInput("resume");
+    ghArmNativeInput("cover_letter");
+
+    // Replaces the default immediate-completion listener armed above with one
+    // that mirrors a genuine network round-trip: the widget goes `pending`
+    // on selection and only reaches `completedFilename` after a real
+    // `setTimeout`, so a verifier must actually keep polling across that gap
+    // rather than sampling once right after the write. Swaps in a fresh input
+    // node (via `cloneNode`) so the fast listener armed above never also
+    // fires for the same selection.
+    window.__ghArmDelayedUpload = function (id, delayMs) {
+      id = id || "resume";
+      var input = document.getElementById(id);
+      if (!input) return;
+      var fresh = input.cloneNode(true);
+      input.parentNode.replaceChild(fresh, input);
+      fresh.addEventListener("change", function () {
+        window.__ghChangeCount = (window.__ghChangeCount || 0) + 1;
+        var file = fresh.files && fresh.files[0];
+        window.__ghSetPending(id);
+        setTimeout(function () {
+          window.__ghSetCompleted(file ? file.name : "", id);
+        }, delayMs || 300);
+      });
+    };
+
+    window.__ghSetPending = function (id) {
+      id = id || "resume";
+      ghWrapper(id).innerHTML =
+        '<div role="progressbar" aria-valuenow="40" aria-valuemin="0" aria-valuemax="100" ' +
+        'class="file-upload__progressbar"><span style="width:40%"></span></div>';
+    };
+
+    window.__ghSetCompleted = function (filename, id) {
+      id = id || "resume";
+      var wrapper = ghWrapper(id);
+      wrapper.innerHTML =
+        '<div class="file-upload__filename"><svg></svg><p class="body body__secondary"></p>' +
+        '<button type="button" aria-label="Remove file">x</button></div>';
+      wrapper.querySelector("p").textContent = filename;
+    };
+
+    window.__ghSetError = function (id, message) {
+      id = id || "resume";
+      var label = ghLabel(id);
+      label.classList.add("upload-label--error");
+      var existing = document.getElementById(id + "-error");
+      if (existing) existing.remove();
+      var error = document.createElement("p");
+      error.id = id + "-error";
+      error.className = "helper-text helper-text--error";
+      error.textContent = message || "That file could not be uploaded.";
+      label.parentElement.appendChild(error);
+      window.__ghRestoreInput(id);
+    };
+
+    window.__ghRestoreInput = function (id) {
+      id = id || "resume";
+      ghWrapper(id).innerHTML =
+        '<div class="button-container"><div class="secondary-button"><div>' +
+        '<button type="button" class="btn btn--pill">Attach</button>' +
+        '<label class="visually-hidden" for="' + id + '">Attach</label>' +
+        '<input id="' + id + '" class="visually-hidden" type="file" accept=".pdf,.doc,.docx,.txt,.rtf">' +
+        '</div></div><p id="accepted-filetypes" class="file-upload__filetypes">' +
+        "Accepted file types: pdf, doc, docx, txt, rtf</p></div>";
+      ghArmNativeInput(id);
+    };
+  </script>
+</body>
+</html>

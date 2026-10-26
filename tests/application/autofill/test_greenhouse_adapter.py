@@ -11,7 +11,12 @@ import pytest
 from app.application.autofill.browser import BrowserSession, chromium_executable_available
 from app.application.autofill.classifier import ClassifiedField, classify_field
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.greenhouse import GreenhouseAdapter, GreenhouseFormError
+from app.application.autofill.greenhouse import (
+    GreenhouseAdapter,
+    GreenhouseFormError,
+    _resume_is_attached,
+    _resume_widget_status,
+)
 from app.application.autofill.models import FieldClassification
 from app.application.candidate_profile import CandidateProfile
 
@@ -19,6 +24,7 @@ GREENHOUSE_FIXTURE = Path("tests/fixtures/autofill/greenhouse_application.html")
 JOB_BOARDS_FIXTURE = Path("tests/fixtures/autofill/greenhouse_job_boards.html")
 RESUME_BUTTON_FIXTURE = Path("tests/fixtures/autofill/greenhouse_resume_button.html")
 RESUME_TEXTONLY_FIXTURE = Path("tests/fixtures/autofill/greenhouse_resume_textonly.html")
+MODERN_WIDGET_FIXTURE = Path("tests/fixtures/autofill/greenhouse_resume_modern_widget.html")
 UNRELATED_FIXTURE = Path("tests/fixtures/autofill/unrelated.html")
 CHALLENGE_FIXTURE = Path("tests/fixtures/autofill/challenge.html")
 RESUME_FIXTURE = Path("tests/fixtures/autofill/resume.txt")
@@ -393,5 +399,367 @@ def test_job_boards_fills_identity_country_location_phone_and_resume() -> None:
         assert read_news.lower().startswith("no") or read_news.lower() == "no"
         assert session.page.evaluate("window.__submitClicked") is False
         assert session.page.evaluate("window.__formSubmitted") is False
+    finally:
+        session.close()
+
+
+# --- Modern (current) Greenhouse file-upload widget -----------------------
+#
+# `MODERN_WIDGET_FIXTURE` reproduces, in markup and lifecycle, the
+# `[role="group"][aria-labelledby="upload-label-{id}"]` widget confirmed from
+# Greenhouse's own public embed pages (job-boards.greenhouse.io/embed/job_app)
+# and bundled `entry.client-*.js`: the native `<input type="file">` is
+# removed on a completed upload, replaced by a `.file-upload__filename`
+# readout; a `[role="progressbar"]` appears while uploading; an
+# `upload-label--error` class and `{id}-error` paragraph appear on rejection.
+# These tests exercise the adapter's real DOM-reading code (`upload_resume`,
+# `_resume_is_attached`, `_resume_widget_status`, `read_back`,
+# `verify_resume_attached`, `resume_file_attached`) against those actual
+# transitions in a real browser -- not a Python fake standing in for a
+# chosen boolean.
+
+
+def _modern_resume_field(fields: list[DiscoveredField]) -> DiscoveredField:
+    return next(item for item in fields if item.element_id == "resume")
+
+
+def test_modern_widget_upload_removes_input_and_still_confirms_attachment() -> None:
+    """The core regression: a genuinely successful upload removes `#resume`
+    entirely (see the fixture's `ghArmNativeInput`), so a verifier that only
+    ever reads a (by-then-gone) input's `.files` must not report this as a
+    false negative.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        assert adapter.upload_resume(session.page, RESUME_FIXTURE, resume) is True
+        assert session.page.locator("#resume").count() == 0
+        assert adapter.read_back(session.page, resume) == RESUME_FIXTURE.name
+        assert adapter.verify_resume_attached(session.page, resume, RESUME_FIXTURE.name) is True
+        assert adapter.resume_file_attached(session.page, resume) is True
+    finally:
+        session.close()
+
+
+def test_modern_widget_pending_upload_is_not_yet_attached() -> None:
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate("window.__ghSetPending('resume')")
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is False
+        assert adapter.resume_file_attached(session.page, resume) is False
+        status, observation_failed = _resume_widget_status(session.page, resume)
+        assert observation_failed is False
+        assert status is not None
+        assert status["pending"] is True
+        assert status["completedFilename"] is None
+    finally:
+        session.close()
+
+
+def test_modern_widget_delayed_completion_after_pending_is_confirmed() -> None:
+    """A slow upload: pending at the first read, completed by the time the
+    bounded re-check runs -- mirrors the real network round-trip this widget
+    waits on.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate("window.__ghSetPending('resume')")
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is False
+        session.page.evaluate(f"window.__ghSetCompleted({RESUME_FIXTURE.name!r})")
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is True
+        assert adapter.verify_resume_attached(session.page, resume, RESUME_FIXTURE.name) is True
+    finally:
+        session.close()
+
+
+def test_modern_widget_rejection_echoing_filename_is_not_attached() -> None:
+    """An upload-rejection error may legitimately echo the attempted
+    filename back in its own message -- that must never be mistaken for a
+    real attachment (mirrors `test_resume_body_text_decoy_is_never_mistaken_for_attachment`).
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate(
+            f"window.__ghSetError('resume', {('Could not upload ' + RESUME_FIXTURE.name)!r})"
+        )
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is False
+        status, observation_failed = _resume_widget_status(session.page, resume)
+        assert observation_failed is False
+        assert status is not None
+        assert status["error"] is True
+        assert status["completedFilename"] is None
+    finally:
+        session.close()
+
+
+def test_modern_widget_wrong_filename_is_not_attached() -> None:
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate("window.__ghSetCompleted('unexpected-other-file.pdf')")
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is False
+    finally:
+        session.close()
+
+
+def test_modern_widget_filename_match_is_exact_not_substring() -> None:
+    """A completed filename that *contains* the expected basename as a
+    substring (or vice versa) must never match -- only an exact basename
+    counts. Also proves special characters round-trip through the readout
+    untouched.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate("window.__ghSetCompleted('not_resume.pdf')")
+        assert _resume_is_attached(session.page, resume, "resume.pdf") is False
+
+        special_name = "Ada Example — Résumé (final) #2.pdf"
+        session.page.evaluate("(name) => window.__ghSetCompleted(name)", special_name)
+        assert _resume_is_attached(session.page, resume, special_name) is True
+        assert _resume_is_attached(session.page, resume, "Résumé (final) #2.pdf") is False
+    finally:
+        session.close()
+
+
+def test_modern_widget_scopes_strictly_to_its_own_group_not_cover_letter() -> None:
+    """The Cover Letter field renders the identical `.file-upload__filename`
+    markup under its own id -- a resume check must never read that as its
+    own attachment, and vice versa.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate(f"window.__ghSetCompleted({RESUME_FIXTURE.name!r}, 'cover_letter')")
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is False
+        status, observation_failed = _resume_widget_status(session.page, resume)
+        assert observation_failed is False
+        assert status is not None
+        assert status["nativeInputPresent"] is True
+        assert status["completedFilename"] is None
+    finally:
+        session.close()
+
+
+def test_modern_widget_explicit_missing_distinct_id_never_falls_back_to_generic_resume_group() -> None:
+    """A field that identifies a distinct, missing id (`resume_other`) must
+    stay unattached even while the page's own default "resume" group is
+    genuinely showing a completed, matching filename -- never a silent
+    fallback to that other control's evidence.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        session.page.evaluate(f"window.__ghSetCompleted({RESUME_FIXTURE.name!r})")
+        other_field = DiscoveredField(
+            label="Resume/CV", field_type="file", required=True, element_id="resume_other"
+        )
+        status, observation_failed = _resume_widget_status(session.page, other_field)
+        assert status is None
+        assert observation_failed is False
+        assert _resume_is_attached(session.page, other_field, RESUME_FIXTURE.name) is False
+    finally:
+        session.close()
+
+
+def test_modern_widget_removal_after_success_fails_closed_with_no_reupload() -> None:
+    """A resume verified earlier in the run can be cleared later (e.g. the
+    candidate clicks the widget's own "Remove file" control) -- the final
+    re-check must catch this and must never re-upload to "fix" it.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        assert adapter.upload_resume(session.page, RESUME_FIXTURE, resume) is True
+        session.page.evaluate("window.__ghRestoreInput('resume')")
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is False
+        assert adapter.verify_resume_attached(session.page, resume, RESUME_FIXTURE.name) is False
+        # The native input is back (idle, unselected) -- confirms this is a
+        # genuine removal, not a page/DOM lookup failure.
+        assert session.page.locator("#resume").count() == 1
+    finally:
+        session.close()
+
+
+def test_modern_widget_legacy_fixture_still_uses_native_files_only() -> None:
+    """`GREENHOUSE_FIXTURE` has no modern widget group at all -- confirms the
+    fallback path (`_resume_widget_status` returns None) still relies solely
+    on the native input's own `.files`, unchanged from before this fix.
+    """
+    session = _open(GREENHOUSE_FIXTURE)
+    try:
+        resume = _field(GreenhouseAdapter().discover_fields(session.page), "Resume")
+        status, observation_failed = _resume_widget_status(session.page, resume)
+        assert status is None
+        assert observation_failed is False
+    finally:
+        session.close()
+
+
+def test_modern_widget_discovers_required_resume_and_optional_cover_letter_group() -> None:
+    """`aria-required` lives on the wrapping `role="group"`, never on the
+    `<input type="file">` itself -- `_discover_control` must consult that
+    group for the Resume/CV control (mirrors the Cover Letter required-file
+    case) and must not invent a requirement for a group that says optional.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        fields = GreenhouseAdapter().discover_fields(session.page)
+        resume = _modern_resume_field(fields)
+        assert resume.required is True
+        cover_letter = next(item for item in fields if item.element_id == "cover_letter")
+        assert cover_letter.required is False
+    finally:
+        session.close()
+
+
+def test_modern_widget_missing_remove_control_is_not_attached() -> None:
+    """A `.file-upload__filename` readout without its own working "Remove
+    file" button is never a real completed state -- only a readout that
+    carries both the filename slot and the remove control counts.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate(
+            """(name) => {
+                const wrapper = document.getElementById('resume-wrapper');
+                wrapper.innerHTML =
+                    '<div class="file-upload__filename"><svg></svg>' +
+                    '<p class="body body__secondary"></p></div>';
+                wrapper.querySelector('p').textContent = name;
+            }""",
+            RESUME_FIXTURE.name,
+        )
+        status, observation_failed = _resume_widget_status(session.page, resume)
+        assert observation_failed is False
+        assert status is not None
+        assert status["completedFilename"] is None
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is False
+        assert adapter.read_back(session.page, resume) is None
+    finally:
+        session.close()
+
+
+def test_modern_widget_hidden_stale_completed_state_is_not_attached() -> None:
+    """A completed filename readout that is no longer visible (e.g. a stale
+    node CSS hid without removing) must never count, even though the
+    filename text and remove control are still technically present in the
+    DOM.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate(f"window.__ghSetCompleted({RESUME_FIXTURE.name!r})")
+        session.page.evaluate(
+            "document.querySelector('#resume-wrapper .file-upload__filename').style.display = 'none'"
+        )
+        status, observation_failed = _resume_widget_status(session.page, resume)
+        assert observation_failed is False
+        assert status is not None
+        assert status["completedFilename"] is None
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is False
+    finally:
+        session.close()
+
+
+def test_modern_widget_stale_completed_filename_coexisting_with_pending_is_not_attached() -> None:
+    """Regression: a contrived (but DOM-observable) in-between state where a
+    visible, fully-formed completed readout (filename slot + Remove file
+    control) coexists with a progressbar for the same group. The readout
+    alone used to be enough for `_resume_is_attached` to report True; it must
+    now fail closed whenever `pending` (or `error`) is also reported,
+    because the earlier `completedFilename` could be stale while a fresh
+    upload is in flight.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate(
+            """(name) => {
+                const wrapper = document.getElementById('resume-wrapper');
+                wrapper.innerHTML =
+                    '<div class="file-upload__filename"><svg></svg><p class="body body__secondary"></p>' +
+                    '<button type="button" aria-label="Remove file">x</button></div>' +
+                    '<div role="progressbar" aria-valuenow="40"></div>';
+                wrapper.querySelector('p').textContent = name;
+            }""",
+            RESUME_FIXTURE.name,
+        )
+        status, observation_failed = _resume_widget_status(session.page, resume)
+        assert observation_failed is False
+        assert status is not None
+        assert status["completedFilename"] == RESUME_FIXTURE.name
+        assert status["pending"] is True
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is False
+        assert adapter.read_back(session.page, resume) is None
+    finally:
+        session.close()
+
+
+def test_modern_widget_retained_native_input_alongside_success_ui_still_attaches() -> None:
+    """Some widget variants briefly retain the (now-inert) native input node
+    alongside the completed filename readout instead of removing it outright
+    -- `nativeInputPresent` reflects that, but it must never by itself block
+    a genuine, visible completed readout with its own working Remove file
+    control from counting as attached.
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate(
+            """(name) => {
+                const wrapper = document.getElementById('resume-wrapper');
+                wrapper.innerHTML =
+                    '<input id="resume" class="visually-hidden" type="file" accept=".pdf,.doc,.docx,.txt,.rtf">' +
+                    '<div class="file-upload__filename"><svg></svg><p class="body body__secondary"></p>' +
+                    '<button type="button" aria-label="Remove file">x</button></div>';
+                wrapper.querySelector('p').textContent = name;
+            }""",
+            RESUME_FIXTURE.name,
+        )
+        status, observation_failed = _resume_widget_status(session.page, resume)
+        assert observation_failed is False
+        assert status is not None
+        assert status["nativeInputPresent"] is True
+        assert status["completedFilename"] == RESUME_FIXTURE.name
+        assert _resume_is_attached(session.page, resume, RESUME_FIXTURE.name) is True
+    finally:
+        session.close()
+
+
+def test_modern_widget_real_delayed_transition_resolves_via_polling_without_second_write() -> None:
+    """A genuine async upload: the widget goes `pending` immediately on
+    selection and only reaches `completedFilename` after a real `setTimeout`
+    (`__ghArmDelayedUpload`), mirroring an actual network round-trip rather
+    than a Python-side state swap. `upload_resume` must keep polling long
+    enough to observe that real transition -- not sample twice at one fixed
+    delay -- and must never issue a second `_set_resume_files` write to
+    "retry" it (tracked here via the fixture's own change-event counter,
+    which increments once per native `set_input_files` call).
+    """
+    session = _open(MODERN_WIDGET_FIXTURE)
+    try:
+        adapter = GreenhouseAdapter()
+        resume = _modern_resume_field(adapter.discover_fields(session.page))
+        session.page.evaluate("window.__ghArmDelayedUpload('resume', 800)")
+        assert adapter.upload_resume(session.page, RESUME_FIXTURE, resume) is True
+        assert session.page.evaluate("window.__ghChangeCount") == 1
+        assert adapter.read_back(session.page, resume) == RESUME_FIXTURE.name
+        assert session.page.evaluate("window.__submitClicked") is False
     finally:
         session.close()

@@ -624,18 +624,29 @@ class GreenhouseAdapter:
             pass
         path = str(resume_path)
         filename = resume_path.name
+        set_files_error: str | None = None
         try:
             _set_resume_files(page, field, path)
-        except PlaywrightError:
-            pass
-        if _resume_is_attached(page, field, filename):
-            return True
-        if not page.url.startswith("file:"):
-            page.wait_for_timeout(1500)
-        return _resume_is_attached(page, field, filename)
+        except PlaywrightError as exc:
+            set_files_error = type(exc).__name__
+        # A single write, then the same bounded poll `verify_resume_attached`
+        # uses for its final re-check -- the modern widget's completion may
+        # arrive a beat after the write returns (a genuine upload/network
+        # round-trip), and this is never a second `_set_resume_files` call,
+        # only repeated readback.
+        attached = _wait_for_resume_attached(page, field, filename)
+        logger.warning(
+            "greenhouse_resume stage=upload_attempt operation=set_resume_files outcome=%s "
+            "set_files_error_class=%s expected_basename=%s %s",
+            "attached" if attached else "could_not_confirm",
+            set_files_error,
+            _bounded_log_token(filename),
+            _resume_evidence_summary(page, field),
+        )
+        return attached
 
     def resume_file_attached(self, page: Page, field: DiscoveredField) -> bool:
-        return bool(_file_names(page, field))
+        return _resume_is_attached(page, field, None)
 
     def verify_resume_attached(self, page: Page, field: DiscoveredField, filename: str) -> bool:
         """Re-check, with a short bounded wait, that the resume control this
@@ -646,7 +657,15 @@ class GreenhouseAdapter:
         its own page-side JS. Never re-uploads; a failure here is only ever
         reported, not retried.
         """
-        return _wait_for_resume_attached(page, field, filename)
+        attached = _wait_for_resume_attached(page, field, filename)
+        logger.warning(
+            "greenhouse_resume stage=final_verify operation=recheck_only outcome=%s "
+            "expected_basename=%s %s",
+            "attached" if attached else "could_not_confirm",
+            _bounded_log_token(filename),
+            _resume_evidence_summary(page, field),
+        )
+        return attached
 
     def upload_cover_letter_file(self, page: Page, file_path: Path, field: DiscoveredField) -> bool:
         """Uploads a generated cover-letter PDF to Greenhouse's required
@@ -687,8 +706,24 @@ class GreenhouseAdapter:
         if field.field_type == "file":
             if _is_cover_letter_field(field):
                 names = _cover_letter_file_names(page, field)
-            else:
-                names = _file_names(page, field)
+                return names[0] if names else None
+            # The resume control's modern widget removes the original input
+            # on a successful upload (see `_resume_is_attached`); its own
+            # `.file-upload__filename` readout, not a (by-then-gone) native
+            # input's `.files`, is what a completed upload actually looks
+            # like.
+            status, observation_failed = _resume_widget_status(page, field)
+            if observation_failed:
+                # Failed read, not a proven absence -- never fall through to
+                # the native input below on the strength of a failed
+                # widget-status call alone (see `_resume_is_attached`).
+                return None
+            if status is not None:
+                if status.get("pending") or status.get("error"):
+                    return None
+                completed = status.get("completedFilename")
+                return str(completed) if completed else None
+            names = _file_names(page, field)
             return names[0] if names else None
         locator = _field_locator(page, field)
         if field.field_type == "checkbox":
@@ -825,6 +860,12 @@ def _discover_control(
         required = True
     elif field_type == "checkbox" and not required:
         required = context_required
+    elif not required and field_type == "file":
+        # Mirrors the Cover Letter required-file case above: Greenhouse's
+        # modern widget marks `aria-required` on the wrapping `role="group"`,
+        # never on the `<input type="file">` itself, so a required Resume/CV
+        # (e.g. Elastic's, Asana's postings) is otherwise never noticed.
+        required = _file_upload_group_required(locator)
     elif not required and field_type in _ORDINARY_VISUAL_REQUIRED_TYPES:
         required = _has_ordinary_visual_required_marker(locator, label)
     return DiscoveredField(
@@ -2417,21 +2458,183 @@ def _choice_label(value: str | bool) -> str:
     return str(value)
 
 
+# Greenhouse's current React embed (job-boards.cdn.greenhouse.io) removes the
+# original `<input type="file">` entirely once an upload completes -- it is
+# replaced by a `.file-upload__filename` readout inside the same
+# `[role="group"]` wrapper, keyed off that group's own
+# `aria-labelledby="upload-label-{id}"` (see `_RESUME_WIDGET_STATUS_JS`
+# below). A verifier that only ever reads the (now-gone) input's `.files`
+# -- as `_file_names` alone does -- reports a false negative on every
+# successful upload. This reads the group's own rendered state instead:
+# `completedFilename` is read only from the readout's own
+# `p.body.body__secondary` filename slot, and only while that readout is
+# both currently visible and still has its own "Remove file" button -- a
+# hidden/stale leftover node, or one whose remove control is missing, never
+# counts. `pending` (the upload progressbar, which unmounts the input too)
+# and `error` (the group's label gets an `upload-label--error` class, or its
+# own `{id}-error` helper text is populated) are reported alongside, never
+# folded into `completedFilename` itself. The field id is never interpolated
+# into a CSS selector string (a quote in the id could break out of it);
+# group/input lookups walk candidates and compare the attribute directly.
+# Scoped strictly to this one group -- never the page body, another field's
+# group, or the Cover Letter widget, which renders the identical markup
+# under its own id.
+_RESUME_WIDGET_STATUS_JS = """id => {
+    const labelId = `upload-label-${id}`;
+    let group = null;
+    for (const candidate of document.querySelectorAll('[role="group"]')) {
+        if (candidate.getAttribute('aria-labelledby') === labelId) {
+            group = candidate;
+            break;
+        }
+    }
+    if (!group) return null;
+    const label = document.getElementById(labelId);
+    let nativeInput = null;
+    for (const candidate of group.querySelectorAll('input[type="file"]')) {
+        if (candidate.id === id) {
+            nativeInput = candidate;
+            break;
+        }
+    }
+    const isVisible = node => !!node && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+    let completedFilename = null;
+    const filenameNode = group.querySelector('.file-upload__filename');
+    if (filenameNode && isVisible(filenameNode)) {
+        const removeButton = Array.from(filenameNode.querySelectorAll('button')).find(
+            button => (button.getAttribute('aria-label') || '').trim().toLowerCase() === 'remove file'
+        );
+        const nameNode = filenameNode.querySelector('p.body.body__secondary');
+        if (removeButton && nameNode) {
+            completedFilename = (nameNode.textContent || '').trim();
+        }
+    }
+    const progress = group.querySelector('[role="progressbar"]');
+    const errorNode = document.getElementById(`${id}-error`);
+    const labelError = !!(label && label.classList && label.classList.contains('upload-label--error'));
+    const errorText = errorNode ? (errorNode.innerText || errorNode.textContent || '').trim() : '';
+    return {
+        nativeInputPresent: !!nativeInput,
+        completedFilename: completedFilename,
+        pending: !!progress,
+        error: labelError || !!errorText,
+    };
+}"""
+
+
+def _resume_widget_status(page: Page, field: DiscoveredField) -> tuple[dict[str, object] | None, bool]:
+    """Current rendered state of this field's own modern file-upload group,
+    returned as `(status, observation_failed)`.
+
+    `status` is None either because no such group exists at all (a
+    genuinely legacy, non-React upload control -- see `_resume_is_attached`'s
+    fallback) or because the observation itself failed; `observation_failed`
+    is what distinguishes the two. A raised `PlaywrightError` means the page
+    was never actually read -- it is never treated the same as a proven
+    "no modern group here", since that would let a failed read silently fall
+    back to the native input's (possibly stale/unrelated) `.files` state and
+    report a false attachment. Scoped by `field.element_id`, defaulting to
+    "resume" only when the field has no id of its own, mirroring
+    `_file_names`'s identity rule: a field with a distinct, missing id never
+    falls back to reading the generic "resume" group.
+    """
+    element_id = field.element_id or "resume"
+    try:
+        result = page.evaluate(_RESUME_WIDGET_STATUS_JS, element_id)
+    except PlaywrightError:
+        return None, True
+    if not isinstance(result, dict):
+        return None, False
+    return result, False
+
+
 def _resume_is_attached(page: Page, field: DiscoveredField, filename: str | None) -> bool:
-    # Scoped to the resume field's own file input (falls back to "#resume"
-    # inside _file_names) rather than every file input on the page, so an
-    # unrelated file input (e.g. a portfolio upload) can never be mistaken
-    # for a successful resume attachment. Never falls back to scanning the
-    # page's visible body text for `filename`: an upload-rejection toast or
-    # error message can legitimately echo the attempted filename back
-    # without the file ever having attached, so only the resume control's
-    # own `.files` state -- read via `_file_names` -- counts as a real
-    # attachment (mirrors `_cover_letter_file_attached` below and Ashby's
-    # `_file_is_attached`).
+    # When this field's own modern file-upload group exists, its own
+    # rendered state is authoritative -- a stale `.files` value on a native
+    # input that is mid-removal (uploading) or was never cleared after a
+    # rejected upload must never be accepted just because `_file_names`
+    # alone still sees it. Only a genuine `.file-upload__filename` readout,
+    # scoped to this field's own group, counts as attached; pending/error
+    # states (including a legacy input briefly coexisting with either) fail
+    # closed. Never falls back to scanning the page's visible body text for
+    # `filename`: an upload-rejection toast can legitimately echo the
+    # attempted filename back without the file ever having attached.
+    status, observation_failed = _resume_widget_status(page, field)
+    if observation_failed:
+        # The widget-status read itself failed -- never fall through to the
+        # native-input `.files` check below on the strength of that failure
+        # alone: `_file_names` succeeding here would prove nothing about
+        # whether a modern group (which could still hold the real answer)
+        # exists. Fail this one observation closed; the bounded poll in
+        # `_wait_for_resume_attached` re-reads on the next tick.
+        return False
+    if status is not None:
+        if status.get("pending") or status.get("error"):
+            return False
+        completed = status.get("completedFilename")
+        if not completed:
+            return False
+        if filename:
+            return completed == filename
+        return True
+    # No modern group at all -- a genuinely legacy, non-React upload control
+    # (mirrors `_cover_letter_file_attached` below and Ashby's
+    # `_file_is_attached`), so the native input's own `.files` state is the
+    # only evidence there is.
     names = _file_names(page, field)
     if filename:
         return filename in names
     return bool(names)
+
+
+def _bounded_log_token(value: object, *, max_len: int = 120) -> str:
+    """Single-line, length-bounded token for log output.
+
+    Escapes newlines/backslashes (a filename could otherwise inject fake
+    log lines) and truncates long values -- basenames may themselves carry
+    personal names, so this bounds and escapes them, it never claims they
+    are PII-free.
+    """
+    if value is None:
+        return "None"
+    text = str(value).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+    if len(text) > max_len:
+        text = text[:max_len] + "...(truncated)"
+    return text
+
+
+def _bounded_log_list(values: list[str], *, max_items: int = 3) -> str:
+    bounded = [_bounded_log_token(value) for value in values[:max_items]]
+    remaining = len(values) - max_items
+    suffix = f",+{remaining}more" if remaining > 0 else ""
+    return "[" + ",".join(bounded) + suffix + "]"
+
+
+def _resume_evidence_summary(page: Page, field: DiscoveredField) -> str:
+    """Bounded, log-escaped diagnostic summary of this field's current
+    attachment evidence -- basenames and booleans only, never full paths,
+    page text, or raw errors -- so an unconfirmed attachment can be logged
+    at warning level without exposing file contents, URLs, or error bodies.
+    Basenames are bounded/escaped for safe single-line logging, not scrubbed
+    of personal names -- a resume filename may itself carry one.
+    """
+    status, observation_failed = _resume_widget_status(page, field)
+    if observation_failed:
+        evidence_kind = "unavailable"
+    elif status is not None:
+        evidence_kind = "modern"
+    else:
+        evidence_kind = "legacy"
+    legacy_names = [] if evidence_kind != "legacy" else _file_names(page, field)
+    completed = status.get("completedFilename") if status else None
+    return (
+        f"field={_field_locator_debug(field)} evidence_kind={evidence_kind} "
+        f"native_input_present={status.get('nativeInputPresent') if status else None} "
+        f"completed_filename={_bounded_log_token(completed)} "
+        f"pending={status.get('pending') if status else None} "
+        f"error_present={bool(status.get('error')) if status else None} "
+        f"legacy_files={_bounded_log_list(legacy_names)}"
+    )
 
 
 _RESUME_VERIFY_POLL_TIMEOUT_MS = 3_000
