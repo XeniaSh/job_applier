@@ -401,8 +401,15 @@ uv run python -m app analyze-target-companies-greenhouse --company Agoda
 
 Greenhouse Stage 1's known-field mapper reads a separate, structured YAML profile, not `candidate_profile.md`, `profiles/`, `resume_profiles.yaml`, or `config/candidate_constraints.yaml` (those remain inputs to LLM matching and resume selection). The one exception is cover-letter generation: `AutofillCoverLetterProvider` reuses the shared LLM cover-letter generator and, when present, also loads `candidate_profile.md` as extra generation context alongside the structured YAML profile.
 
-- `candidate_profile.example.yaml` — tracked in Git, synthetic/fake values, defines the schema.
-- `candidate_profile.local.yaml` — gitignored, real values, overlaid on top of the example at runtime when present. Never read or committed by coding agents.
+- `candidate_profile.example.yaml` — tracked in Git, synthetic/fake values, defines the schema. At runtime, only its non-factual `application_files` technical defaults (legacy `default_resume` / `cover_letter_strategy`, kept for schema compatibility) may be used. Its candidate facts are never inherited.
+- `candidate_profile.local.yaml` — gitignored, the sole source of structured candidate facts. Required: missing/disabled local configuration or missing mandatory identity fails safely before browser startup. Missing optional facts stay unknown/manual. Never read or committed by coding agents.
+
+An existing partial local profile may now leave additional questions manual.
+Add only verified facts locally; do not copy synthetic identity or eligibility
+values merely to resolve a missing field. Explicit local values remain
+authoritative, including `false`, zero, empty lists and nullable `null`.
+Established model-level application policy defaults remain unchanged. Actual
+resume selection still uses the separate four variants in `resume_profiles.yaml`.
 
 Sensitive/demographic fields (gender, ethnicity, disability, veteran status, etc.) are left unfilled by default. Gender specifically is never filled from `sensitive.gender`: a required Gender question always gets a non-disclosure option, and an optional Gender question is always left untouched, regardless of what the profile contains. Work authorization is per-country and explicit; a location alone never implies authorization or citizenship.
 

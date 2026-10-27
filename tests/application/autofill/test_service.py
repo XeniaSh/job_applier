@@ -2786,6 +2786,37 @@ def test_unconfigured_resume_variant_fails_closed_before_browser_opens(tmp_path:
     assert result.resume_variant == "java_backend_nz"
 
 
+def test_candidate_profile_load_failure_fails_closed_before_browser_opens() -> None:
+    """A missing/disabled candidate_profile.local.yaml must fail the run via
+    the normal CandidateProfileLoadError path -- and never open a browser --
+    rather than the loader silently falling back to the synthetic example
+    profile.
+    """
+    from app.application.candidate_profile_loader import CandidateProfileLoadError
+
+    def _raise_profile_load_error() -> None:
+        raise CandidateProfileLoadError("Candidate profile local overlay not found: candidate_profile.local.yaml")
+
+    browser_factory_calls: list[bool] = []
+
+    def _browser_factory() -> _FakeSession:
+        browser_factory_calls.append(True)
+        return _FakeSession()
+
+    service = AutofillService(
+        resolver=_FakeResolver(),
+        profile_loader=_raise_profile_load_error,
+        adapter=_FakeAdapter(),
+        browser_factory=_browser_factory,
+        wait_for_review=lambda: None,
+    )
+    result = service.run("target_company:greenhouse:agoda", "1", keep_open=False)
+
+    assert result.status is AutofillStatus.FAILED
+    assert result.failure_reason is AutofillFailureReason.PROFILE_LOAD_FAILED
+    assert not browser_factory_calls
+
+
 def test_default_no_injection_resume_fails_closed_before_browser_opens(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, default_resume_profiles: ResumeProfiles
 ) -> None:

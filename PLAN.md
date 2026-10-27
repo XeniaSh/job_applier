@@ -1,8 +1,9 @@
 # JobApplier — Implementation Plan
 
-This plan compares `PRODUCT_SPEC.md` with the repository as inspected on 2026-09-10,
-and re-audited on 2026-09-16 through TASK-086 (see `PROGRESS.md` for the current
-task/status/build details). It is the work queue for autonomous development.
+This plan compares `PRODUCT_SPEC.md` with the implementation. Historical task
+entries retain their original scope; current status was reconciled against
+code, recent commits and the NZ audit on 2026-10-27. See `PROGRESS.md` for exact
+test results and supervised acceptance. It is the work queue for development.
 
 Do not start from a blank architecture.
 Prefer extending working code over rewriting it.
@@ -35,6 +36,32 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 
 ---
 
+## Current capability and acceptance checkpoint — 2026-10-27
+
+- Greenhouse, Lever and Ashby have runtime discovery, resolver, Telegram Prepare
+  routing and autofill implementations. SmartRecruiters has a standalone watcher
+  prototype; Workday has no collector; HH remains CLI-only.
+- Four resume variants and their shared selection/attachment path are implemented
+  (`23de715`); Greenhouse completed-widget verification is implemented (`1a7b24a`).
+  Preserve all four variants. Local automated tests do not replace outstanding
+  supervised attachment/Prepare acceptance noted in `PROGRESS.md`.
+- Bounded Telegram notification retry and deterministic failed-handoff cleanup
+  are implemented. Ordinary Done reviewing was user-verified; failure-path and
+  duplicate/stale-callback live acceptance remain distinct pending checks.
+- Discovery diagnosis and provider counters are implemented. The 2026-10-26 NZ
+  audit joined public feeds to a user-run sanitized export: all nine baseline NZ
+  title passes have analysis; no starvation established for those identities.
+  Halter's one-title correction (`4e7f5d9`) is locally verified; subsequent
+  production admission/analysis remains unmeasured. No cache replay is planned.
+- Greenhouse residence-country clearing/confirmation remains unresolved pending
+  scoped rendered-control evidence. Do not substitute Other without explicit
+  instructions on that question or confuse residence with phone dialing country.
+- Current approved order: TASK-090 profile safety first; report its findings
+  before TASK-091 country evidence/fix; then TASK-092 read-only SmartRecruiters
+  pilot; then TASK-093 isolated scoring evaluation. Each is a separate iteration.
+- No automatic submission, CAPTCHA bypass, Workday/HH expansion, broad refactor,
+  production cache reset or whole-backlog reanalysis is authorized in this phase.
+
 ## Repository snapshot
 
 ### Stack
@@ -48,9 +75,10 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 - Lint: `ruff`
 - Persistence: SQLite at `data/jobs.db`; `data/target_company_analysis_cache.json` (durable JSON, not SQLite)
 - Browser automation: Playwright (`BrowserSession`, Stage 1 Greenhouse autofill). Production runs headed by default; `BrowserSession(headed=False)` exists and is used by tests. Lazy-imported so ordinary collection/analysis does not require it.
-- No LangChain, no extra databases, no automated submit
+- No LangChain or extra databases. Historical auto-submit code exists behind a
+  default-false flag; this approved phase permits no automatic submission.
 
-### Coverage audit — 2026-09-18
+### Historical coverage audit — 2026-09-18 (not current capability)
 
 The repository contains no persisted historical `dropped_unsupported_form`
 events, and the local SQLite database currently has zero
@@ -210,20 +238,25 @@ Everything listed below was the "main remaining work" as of 2026-09-10 and is no
 - `PreparationService` supports only `linkedin-email` cover-letter/resume packages. Target Companies uses `PrepareApplicationService` (TASK-078/079) plus Telegram **Prepare application** (TASK-037..039) with `PrepareIntent.EXPLICIT`. These remain two separate mechanisms; do not merge them.
 - `application_answers` in the LinkedIn `PreparationService` (not the Stage 1 autofill answer generator) is a no-op placeholder.
 - `data/prepared/` retention (TASK-049) is a fixed 14-day age rule for LinkedIn cover-letter artifacts only; there is no CLI command to trigger cleanup on demand.
-- Lever/Ashby/SmartRecruiters watchers exist (`app/company_watch/watchers/`, TASK-042..044). Lever is now wired into the Target Companies `run`/Telegram delivery path and its existing autofill adapter; Ashby and SmartRecruiters remain standalone. `custom` / `manual` entries have no watcher. Greenhouse and Lever are the currently supported end-to-end providers.
-- Lever collection/delivery is locally complete, but live Qonto preparation is
-  blocked on the unobserved current Qonto form DOM; do not broaden the Lever
-  adapter from fixture assumptions.
+- Lever/Ashby/SmartRecruiters watchers exist (`app/company_watch/watchers/`, TASK-042..044).
+  Greenhouse, Lever and Ashby are wired into runtime discovery and Prepare.
+  SmartRecruiters remains standalone and needs pagination, posting details and
+  public URLs before its approved read-only pilot. `custom` / `manual` entries
+  have no generic watcher. Per-site unsupported forms still require evidence;
+  do not infer universal form coverage from an implemented ATS adapter.
 - Generic Greenhouse jobs in `run` are delivered to the LinkedIn Telegram destination. This matches “current discovery”, not Target Companies.
 - HH exists as CLI-only collection (`OQ-007`), not part of `run`.
 - Root `candidate_profile.md` is tracked in Git and may contain personal search context. Do not relocate unless requested (`OQ-010`).
-- Open `on_ready`-notification-failure gap in the Telegram review handoff: if the completion notification fails to send, the browser and `ReviewSessionRegistry` entry stay open (correctly), but the "Done reviewing" button/message never reaches the user and there is no retry. Not fixed; do not claim it is.
-- A live retest of the TASK-086 fix has not been performed by an agent; only the user's own report exists.
+- Telegram failed-handoff cleanup/retry is locally implemented and fixture-verified;
+  live failure-path acceptance remains pending. Ordinary Done reviewing has a
+  user-reported successful live check; do not equate that with duplicate/stale
+  or failed-send verification.
 
 ### Intentionally later
 
-- TASK-046: additional-ATS autofill adapters (beyond Greenhouse), one per iteration; Lever is done through the existing watcher, resolver, adapter, and Target Companies delivery path; Ashby/SmartRecruiters remain later candidates
-- TASK-047: auto-submit policy computation only (no submit action); depends on TASK-033 and TASK-041 (both done), so it also has no unmet dependency
+- TASK-046: Lever and bounded Ashby adapters are implemented; SmartRecruiters and
+  Workday autofill remain out of scope. Per-provider live acceptance is separate.
+- TASK-047: policy computation is implemented; it is not a remaining todo.
 - Workday (`OQ-006`), including TASK-045 — blocked on an explicit user request
 
 TASK-048 (auto-submit execution) is done: an explicit user request enabled it, gated behind `AUTO_SUBMIT_ENABLED` (default `false`) plus the TASK-047 policy — see the TASK-048 entry below.
@@ -390,9 +423,11 @@ TASK-050 optional vacancy snapshot (only if live resolve is insufficient)
 
 ### TASK-005 — Profile loader (example + local overlay)
 
-- **Status:** done
+- **Status:** historical implementation done; unsafe fact inheritance superseded by TASK-090
 - **Depends on:** TASK-004
 - **Goal:** Load Candidate Profile from example, overlaying `candidate_profile.local.yaml` when present.
+- **Current contract:** See TASK-090. The historical overlay acceptance below
+  must not be used to restore synthetic candidate facts into runtime loading.
 - **Area:** profile loader module
 - **Acceptance criteria:**
   - Runtime prefers local file when it exists.
@@ -488,6 +523,9 @@ TASK-050 optional vacancy snapshot (only if live resolve is insufficient)
 - **Status:** done
 - **Depends on:** TASK-005
 - **Goal:** Choose the resume file for Stage 1 from the structured profile default.
+- **Superseded behavior:** The shared four-variant `resume_profiles.yaml` policy
+  now selects the actual PDF. The profile default is schema compatibility only;
+  never restore it as a fifth resume or a runtime fallback.
 - **Area:** autofill resume helper
 - **Acceptance criteria:**
   - Uses profile default resume path.
@@ -888,7 +926,7 @@ Watchers belong in `app/company_watch/watchers/`. Autofill adapters belong in th
 
 ### TASK-044 — SmartRecruiters Target Company watcher
 
-- **Status:** done
+- **Status:** partial — standalone prototype exists; completeness/pilot tracked in TASK-092
 - **Depends on:** none
 - **Goal:** Same as TASK-042 for SmartRecruiters.
 - **Area:** company_watch watchers
@@ -906,7 +944,7 @@ Watchers belong in `app/company_watch/watchers/`. Autofill adapters belong in th
 
 ### TASK-046 — Additional autofill adapters
 
-- **Status:** done (Lever adapter)
+- **Status:** implemented for Lever and bounded Ashby; additional ATS not implemented
 - **Depends on:** TASK-033 and the matching watcher
 - **Goal:** Add autofill adapters only after Greenhouse Stage 1 is done, one ATS per iteration.
 - **Area:** autofill adapters
@@ -969,7 +1007,7 @@ Watchers belong in `app/company_watch/watchers/`. Autofill adapters belong in th
 
 ### TASK-050 — Optional vacancy snapshot store
 
-- **Status:** todo
+- **Status:** deferred — no demonstrated target-company live-resolver failure requiring it
 - **Depends on:** TASK-009 proven insufficient (job gone / need offline resolve)
 - **Goal:** Persist enough vacancy fields for autofill without using Telegram as storage.
 - **Area:** storage (schema change only in this dedicated task)
@@ -1112,6 +1150,9 @@ Do not hardcode Agoda selectors or vacancy-specific answers. CandidateProfile / 
 ### TASK-064 — Explicit gender autofill
 
 - **Status:** done
+- **Superseded policy:** TASK-071/current mapper leaves optional gender blank and
+  uses a listed non-disclosure option for required gender. Do not restore the
+  historical direct-demographic-fill behavior described below.
 - **Depends on:** TASK-014
 - **Goal:** If CandidateProfile has an explicit gender value, map it to the matching visible option and fill it. Do not default to Prefer not to disclose. Other sensitive fields stay unfilled unless `fill_sensitive_fields` is true. Required gender with an explicit value is not unresolved merely because it is sensitive.
 - **Verification:** Mapper + React/native select fixture; read-back of the visible label.
@@ -1119,6 +1160,8 @@ Do not hardcode Agoda selectors or vacancy-specific answers. CandidateProfile / 
 ### TASK-065 — Newsletter No / SMS Yes application policy
 
 - **Status:** done
+- **Superseded default:** TASK-072/current model defaults SMS updates to No.
+  The historical Yes requirement below is not the current application policy.
 - **Depends on:** TASK-013
 - **Goal:** Optional/required recruitment-newsletter / other-job-opening questions default to No. SMS/text interview-update questions default to Yes. Configurable on ApplicationPolicy, not Agoda wording.
 - **Verification:** Mapper tests + React Yes/No read-back.
@@ -1449,10 +1492,15 @@ a task number or a prescribed fix.
 - **Verification:** New real-lifecycle test (`tests/test_review_session_real_lifecycle.py`) drives the actual production wiring (`build_prepare_application_service`, not a hand-rolled fake) with only browser/LLM/network faked, so it exercises the same path that failed live. Full suite re-run (see `PROGRESS.md` Build/test status).
 - **Note:** The real Adyen/Agoda outcomes referenced in `PROGRESS.md` (successful autofill, manual Submit, email verification) are the user's own reports from the live session, not independently re-verified by an agent.
 
-### Open items from this audit (not fixed here, no task number assigned)
+### Acceptance follow-up from this historical audit
 
-1. **Live retest of the TASK-086 fix.** The exact scenario that found the TASK-086 bug (trigger **Prepare application** on a non-`APPLIED` Target Company Greenhouse vacancy, not Adyen `7342887`; confirm the completion message + "Done reviewing" button arrive, the browser stays open, and tapping the button closes it, including a second/duplicate tap) has **not** been re-verified live since TASK-086 landed — do not claim it has. This needs a human, not an agent.
-2. **`on_ready` notification-failure gap.** If the `on_ready` Telegram send fails, the browser handoff and `ReviewSessionRegistry` entry are correctly kept alive, but the "Done reviewing" button/message never reaches the user and there is no retry before `wait_for_review()` blocks. The session is then only released by a delivered "Done reviewing" tap or by `run` shutdown's best-effort `close_all()` — manually closing the Chromium window does not release it. Not designed or started here; no retry-vs-re-request approach is prescribed.
+1. Ordinary Done reviewing was subsequently user-verified on Adyen 8075150.
+   Duplicate/stale callbacks and failed-send behavior have automated coverage
+   but remain unverified in a supervised live session.
+2. Bounded notification retry and deterministic failed-handoff cleanup are
+   implemented in `app.cli` (`_send_with_bounded_retry`, `_notify_review_ready`,
+   `on_ready`). Do not reopen this as an unimplemented retry feature. Manually
+   closing Chromium still does not itself signal Done reviewing.
 
 ---
 
@@ -1477,7 +1525,7 @@ coverage without weakening candidate-fit filtering or application safety.
 
 ### TASK-087 — Discovery volume diagnosis and coverage inventory
 
-- **Status:** todo
+- **Status:** done — provider diagnosis/diagnostics plus 2026-10-26 NZ audit and sanitized runtime join
 - **Depends on:** none
 - **Goal:** Measure the current discovery funnel by source (configured,
   reachable, parsed, title-filtered, analyzed, delivered) and identify the
@@ -1491,6 +1539,10 @@ coverage without weakening candidate-fit filtering or application safety.
   - The result identifies a bounded next coverage task rather than guessing a
     provider from static configuration alone.
 - **Verification:** Focused collector/runtime tests and log-safety checks.
+- **Evidence:** `docs/nz-discovery-audit.md`, diagnostic commit `53073d3`,
+  production-evidence report `eea1c96`, and the prior provider-cycle counters.
+  Unpersisted historical per-cycle counts remain unavailable, not zero. This
+  limitation does not justify a production cache reset or backlog replay.
 
 ### TASK-088 — First evidence-backed discovery coverage expansion
 
@@ -1520,8 +1572,8 @@ backend-stack mismatch analysis. Focused config/watcher/prefilter/runtime tests:
   cycle so future low-volume diagnosis does not require private database access
   or ad-hoc public-board probes.
 - **Area:** target-company runtime result/logging
-- **Acceptance criteria:** For each runtime-supported provider (Greenhouse and
-  Lever), expose value-free counts for configured companies, raw fetched jobs,
+- **Acceptance criteria:** For each runtime-supported provider (Greenhouse,
+  Lever and Ashby), expose value-free counts for configured companies, raw fetched jobs,
   title-prefilter pass, watcher errors, post-gate candidates, selected,
   analyzed, and sent. Do not log vacancy titles, descriptions, URLs, candidate
   data, or error response bodies. Existing aggregate counters, filtering,
@@ -1536,31 +1588,105 @@ title-prefilter-pass, watcher-error, post-gate, selected, analyzed, and sent
 counts. No vacancy/candidate content or error payload is included. Focused
 cycle tests: 27 passed; Ruff and diff checks passed.
 
+The paragraph above records the original two-provider implementation. Current
+runtime code also carries Ashby provider funnels and recommendation-outcome
+counts. Historical test totals are not a claim of a new full-suite run.
+
 ---
 
-## Suggested first implementation iteration
+## Stage 7 — Approved bounded safety, evidence and discovery phase
 
-TASK-001 through TASK-044, TASK-049, and TASK-051 through TASK-086 are done
-(see status fields above and `PROGRESS.md` for the verified build/test
-baseline). The remaining tasks are not all done and are not all equally
-blocked:
+Approved by the user on 2026-10-27. Follow this order, as separate iterations
+with focused tests/review and main-compatible commits where applicable. Report
+TASK-090 findings before proceeding to TASK-091. Never access the private
+candidate profile or production data outside the agent worktree. Human-run
+sanitized diagnostics may supply missing evidence. Keep all four resumes,
+manual Submit, existing caches and the drained-backlog behavior intact.
 
-- TASK-045 (Workday watcher) is `blocked` on an explicit user request
-  (`OQ-006`).
-- TASK-046 (additional autofill adapters) is done for Lever, including runtime
-  Target Companies collection/delivery wiring; Ashby and SmartRecruiters are
-  not started.
-- TASK-047 (auto-submit policy computation only) is `todo` with no unmet
-  dependency: it depends on TASK-033 and TASK-041 (both done).
-- TASK-048 (auto-submit execution) is `done`: implemented behind
-  `AUTO_SUBMIT_ENABLED` (default `false`) after an explicit user request to
-  enable submit; see the TASK-048 entry above for details.
-- TASK-050 (optional vacancy snapshot store) is `todo`, gated on TASK-009's
-  live resolve first proving insufficient.
+### TASK-090 — Prevent synthetic example facts entering runtime profiles
 
-The Stage 1Q audit above also left two items open without an assigned task
-number or priority — a live retest of the TASK-086 fix, and the
-`on_ready`-notification-failure gap — see that section and `PROGRESS.md` for
-details. For a fresh run, read `PROGRESS.md` first for current blockers,
-then pick the next eligible task per the workflow and dependency notes
-above.
+- **Status:** done locally — synthetic audit, implementation and focused automated review accepted 2026-10-27
+- **Goal:** Material candidate facts come only from explicitly configured local
+  data, never from missing overrides in the synthetic example.
+- **Area:** shared structured profile loader, focused tests and loading docs.
+- **Acceptance criteria:**
+  - Missing/disabled private profile or missing mandatory identity fails safely
+    before browser startup; optional missing facts remain unknown/manual.
+  - Example citizenship, authorization, sponsorship, residence, education,
+    experience, salary, links, demographic data and factual policy answers
+    cannot backfill a partial local profile.
+  - Explicit local values, including false, zero, empty lists and nullable null,
+    remain authoritative. Do not blacklist legitimate countries or values.
+  - Retain only non-factual technical example defaults needed for compatibility;
+    do not change shared four-resume selection or established model policy defaults.
+  - Invalid YAML/schema errors and logs never expose raw profile contents.
+  - Use synthetic temporary profiles only; never read/modify private data.
+- **Automated verification:** Loader/model/policy and missing-answer mapping
+  regressions, failure-before-browser coverage, Ruff and diff checks.
+  Final focused run: 267 tests passed, including four-resume combinations;
+  loaded-profile mapping smoke confirmed six missing material answers remain
+  unresolved. No full-suite rerun or real browser/ATS execution.
+- **Supervised acceptance:** Production private-profile completeness/factual
+  attestation is not established by synthetic tests; any missing explicit facts
+  must be supplied by the user, not filled by the agent.
+
+### TASK-091 — Greenhouse country combobox evidence and confirmed correction
+
+- **Status:** approved, not started — scoped rendered-control evidence required
+- **Depends on:** TASK-090 findings reported; rendered evidence for the failing control.
+- **Goal:** Fix only a demonstrated selection/clearing/verification defect.
+- **Acceptance criteria:** Distinguish phone dialing-country from residence;
+  capture only relevant control/listbox/committed-state evidence; correct values
+  persist and unrelated controls cannot confirm them. If a country is absent,
+  Other is allowed only when that question explicitly instructs it. Otherwise
+  keep it manual. Clear stale selections only through evidenced scoped behavior,
+  or retain a prominent manual-correction warning. No Submit/challenge bypass.
+- **Automated verification:** Focused fixtures matching the observed control,
+  negative read-back/clearing cases and connected service regressions.
+- **Supervised acceptance:** Separate no-submit visual check of the affected
+  control after local verification; fixture success alone is insufficient.
+
+### TASK-092 — One-employer read-only SmartRecruiters discovery pilot
+
+- **Status:** approved, not started — not production wiring
+- **Depends on:** TASK-091 checkpoint; a currently verified public employer board.
+- **Goal:** Complete and measure the standalone watcher for one employer before
+  deciding whether its yield merits production integration.
+- **Acceptance criteria:** Bounded pagination; full job details; public posting
+  URLs instead of API refs; stable source/ID and deduplication; meaningful
+  Java/Kotlin/backend or software-engineering AI-integration evidence. Distinguish
+  raw matches, title passes, relevant roles and unknown/explicitly incompatible
+  eligibility. Do not infer sponsorship from employer identity or AI integration
+  from coding-tool mentions. Read-only output only, no real LLM call for every
+  raw record, cache writes, Telegram sends, Prepare adapter or runtime wiring.
+- **Automated verification:** Mocked HTTP pagination/detail/normalization,
+  deduplication/error cases and existing non-SmartRecruiters regressions.
+- **Acceptance checkpoint:** Review measured pilot yield before any production
+  wiring; Workday and HH remain outside this phase.
+
+### TASK-093 — Isolated evaluation of historical scoring/filter decisions
+
+- **Status:** approved, not started
+- **Depends on:** TASK-092 pilot checkpoint, per the user's approved order.
+- **Goal:** Validate 15–20 representative historical vacancies against reviewed
+  relevance/eligibility labels, keeping evidence separate from production state.
+- **Acceptance criteria:** Include suitable Java/backend, meaningful AI
+  integration, irrelevant stacks, generic software/platform titles, senior IC
+  versus management, unknown sponsorship versus refusal/existing rights, and
+  known misleading lead-warning evidence. Use sanitized persisted decisions and
+  public vacancy descriptions; isolated output. Report disagreement causes and
+  bounded fixes rather than automatically loosening filters or promoting matches.
+  No production cache modification or whole-backlog replay.
+- **Automated verification:** Deterministic scoring/reason regression cases for
+  any accepted correction; bounded model use only if necessary and documented.
+- **Acceptance checkpoint:** Human-reviewed labels and model uncertainty must be
+  explicit; the evaluation is not proof of visa eligibility or ATS success.
+
+## Deferred and historical tasks
+
+TASK-045 Workday and HH promotion are not authorized in this phase. TASK-050
+remains deferred pending a demonstrated live-resolver need. TASK-047/048 exist
+locally, but auto-submit stays disabled/manual; no enablement or submission is
+part of this phase. SmartRecruiters autofill and general architecture changes
+are not approved. Historical task acceptance describes its original milestone;
+later corrections and current supervised acceptance notes take precedence.
