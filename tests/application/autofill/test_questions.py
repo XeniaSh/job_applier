@@ -1706,6 +1706,31 @@ def test_current_country_of_residence_uses_profile_country() -> None:
     assert mapped.value == "Germany"
 
 
+def test_country_question_stays_unfillable_without_identity_country_even_with_differing_citizenship_and_location() -> None:
+    """`QuestionKind.COUNTRY` is mapped from `profile.identity.country`
+    alone (`_country_value`) and must never be guessed from
+    `current_location` or `work_eligibility.citizenship` when
+    `identity.country` itself is missing -- even when those two differ
+    from each other, which would make either one an ambiguous, wrong
+    substitute for the genuine, unset fact.
+    """
+    profile = _profile_without_identity_country(
+        "Berlin, Germany",
+        work_eligibility={"citizenship": ["Canada"]},
+    )
+    mapped = map_question(
+        DiscoveredField(
+            label="What is your current country of residence?",
+            field_type="select",
+            options=["Germany", "Canada", "United States"],
+        ),
+        profile,
+    )
+    assert mapped.kind is QuestionKind.COUNTRY
+    assert mapped.value is None
+    assert mapped.fillable is False
+
+
 def test_located_in_uk_or_poland_is_no_when_residence_is_elsewhere() -> None:
     profile = _profile(application_policy={"relocation": {"willing": True}})
     mapped = map_question(

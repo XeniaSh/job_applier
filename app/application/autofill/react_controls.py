@@ -311,6 +311,13 @@ def confirm_option_selected(
     """Confirm a just-clicked exact option is genuinely this control's
     committed selection.
 
+    Used by every kind's combobox fill path except `QuestionKind.COUNTRY`,
+    which uses its own local-only `confirm_country_option_committed_locally`
+    instead -- this function's primary signal below scans every
+    single-value/chip node on the whole page, which a swallowed click on a
+    country control could satisfy from an unrelated sibling already
+    showing the same country.
+
     `option_label` must be captured from the option *before* it was
     clicked: a committed React-select can detach/unmount the clicked
     option node itself, and this never re-queries that possibly-detached
@@ -381,6 +388,148 @@ def confirm_other_option_committed_locally(locator: Locator, option_label: str) 
     if match_option_exact_normalized("Other", [text]) is not None:
         return True
     return bool(option_label) and match_option_exact_normalized(option_label, [text]) is not None
+
+
+def read_country_committed_label(locator: Locator) -> str | None:
+    """Read this control's own genuinely committed country selection --
+    never this control's typed search text, a page-wide single-value/chip
+    scan, this control's own placeholder/live-status text, or a bare
+    dialing-code fragment with no corroborating committed metadata (that
+    bare-fragment-alone shape belongs to the separate phone-widget picker,
+    which never reaches this reader at all; see
+    `greenhouse._PHONE_DIAL_COUNTRY_FIELD_TYPE`).
+
+    Used for both the immediate post-click confirmation
+    (`confirm_country_option_committed_locally`) and a later, independent
+    read-back pass (`greenhouse.GreenhouseAdapter.read_back`, scoped to a
+    country-labelled combobox field) -- both must see exactly the same
+    evidence, so a selection that only *looked* committed right after the
+    click but reverts by the time of that later pass is never confirmed.
+
+    Fails closed (returns `None`) unless this control's own dedicated
+    single-value display node exists, is actually visible, carries
+    non-empty text, and this control's own search/typeahead input is
+    confirmed empty (never merely assumed empty on a read error -- a
+    locator that cannot even be read from is never evidence of a cleared
+    search) -- a leftover typed string with no committed node update is
+    never evidence of a selection, even when that typed text happens to
+    match what was requested (the scenario this exists to close: React can
+    unmount/blank this node mid-search while still internally retaining a
+    stale, different prior commitment). When the display text is itself a
+    bare dialing-code fragment, this never trusts that fragment alone --
+    it falls back to the exact same durable, control-committed metadata
+    `confirm_option_selected`'s own dial-code fallback relies on
+    (`read_committed_selected_value`), so a legacy collapsed display with a
+    genuine committed attribute is still recognized, while a bare fragment
+    with no such attribute still fails closed.
+    """
+    node = _single_value_node(locator)
+    if node is None:
+        return None
+    try:
+        if not node.is_visible():
+            return None
+    except PlaywrightError:
+        return None
+    try:
+        text = " ".join((node.inner_text() or "").split())
+    except PlaywrightError:
+        return None
+    if not text:
+        return None
+    try:
+        typed = (locator.input_value() or "").strip()
+    except PlaywrightError:
+        return None
+    if typed:
+        return None
+    if _DIAL_CODE_ONLY_RE.match(text):
+        return read_committed_selected_value(locator)
+    return text
+
+
+def confirm_country_option_committed_locally(
+    page: Page,
+    locator: Locator,
+    option_label: str,
+    matched_value: str,
+    timeout: int = 2_500,
+) -> bool:
+    """Confirm a just-clicked country option is this control's own
+    genuinely committed selection, via `read_country_committed_label`
+    only -- never `confirm_option_selected`'s page-wide primary signal
+    (`wait_for_selected_label`), which scans every single-value/chip node
+    on the whole page and so could be satisfied by an unrelated control
+    that already shows the same country (e.g. a work-authorization
+    dropdown) when this control's own click was swallowed and it still
+    shows a stale prior value.
+
+    Requires a normalized-exact match against the option's own *pre-click*
+    label (falling back to the requested `matched_value` only when no
+    label was captured) -- never `label_matches`' fuzzy/prefix matching,
+    which would let a stale, merely-related committed value (e.g. "United
+    States Minor Outlying Islands") confirm a click on a different option
+    ("United States") that only happens to share a prefix.
+
+    Polls (bounded by `timeout`) only to tolerate React's own render
+    delay before this control's own display updates -- never to retry a
+    page-wide query; each poll re-reads this same control's own node.
+    """
+    wanted = option_label or matched_value
+    if not wanted:
+        return False
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        committed = read_country_committed_label(locator)
+        if committed and match_option_exact_normalized(wanted, [committed]) is not None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            page.wait_for_timeout(50)
+        except PlaywrightError:
+            return False
+
+
+def confirm_country_selection_persists_after_blur(
+    page: Page,
+    locator: Locator,
+    option_label: str,
+    matched_value: str,
+    timeout: int = 300,
+) -> bool:
+    """After `confirm_country_option_committed_locally` already reports a
+    committed match, blur this control and require that same committed
+    label to keep matching, continuously, through a short bounded window --
+    country-only, never any other kind's shared confirmation path, and
+    never a change to that function's own timeout/behavior.
+
+    A control whose blur handler resets its display back to a stale prior
+    country, or whose own async re-render lands moments after the click and
+    reverts it, must never be mistaken for a durable commitment just
+    because the very first read after the click happened to match -- this
+    keeps polling for the full window and fails closed the instant any
+    read during it stops matching, rather than returning true on the first
+    match the way the plain poll-until-match helpers above do.
+    """
+    try:
+        locator.blur(timeout=1_000)
+    except PlaywrightError:
+        return False
+    wanted = option_label or matched_value
+    if not wanted:
+        return False
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        committed = read_country_committed_label(locator)
+        if committed is None or match_option_exact_normalized(wanted, [committed]) is None:
+            return False
+        if time.monotonic() >= deadline:
+            return True
+        try:
+            page.wait_for_timeout(50)
+        except PlaywrightError:
+            return False
 
 
 def selection_display_is_dial_code_fragment(locator: Locator) -> bool:

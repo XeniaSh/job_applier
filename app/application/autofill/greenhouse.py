@@ -71,6 +71,23 @@ _FORM_READY_SELECTOR = (
 )
 _COMBOBOX_IDS = frozenset({"country", "candidate-location", "candidate_location"})
 
+# Greenhouse's phone-number widget renders its own country *dialing-code*
+# combobox (e.g. `input#country[role="combobox"]` labelled "Country(*)") as
+# `.phone-input > .phone-input__country > .select > .select__container` --
+# structurally distinct from, and rendered alongside, the actual phone
+# number input. Evidenced live on Elastic/Stripe/Asana postings: the only
+# way to tell it apart from a genuine residence/citizenship country question
+# sharing the same accessible name is this exact nesting under
+# `.phone-input__country`. `field_type="phone_dial_country"` (never reused
+# for any other control) routes it straight to the existing
+# UNSUPPORTED/manual-completion path in `classifier.classify_field` -- it is
+# never mapped through `QuestionKind.COUNTRY`, so no residence, citizenship,
+# temporary current_location, or employer value (and no generated LLM
+# answer, which the service's UNSUPPORTED classification check keeps from
+# reaching the DOM) can ever be written into it.
+_PHONE_DIAL_COUNTRY_FIELD_TYPE = "phone_dial_country"
+_PHONE_DIAL_COUNTRY_ANCESTOR_JS = "el => el.closest('.phone-input__country') !== null"
+
 # Structural evidence that an anchor is Greenhouse's own apply action on a
 # target company's custom careers domain (see `GreenhouseTargetVacancyResolver`
 # / `original_url`: the canonical job-boards.greenhouse.io URL can redirect
@@ -233,7 +250,9 @@ _ORDINARY_REQUIRED_MARKER_JS = """(el, optionLabel) => {
     return ariaRequired === 'true' || markedRequired || /\\*/.test(firstLine);
 }"""
 
-_ORDINARY_VISUAL_REQUIRED_TYPES = frozenset({"text", "textarea", "select", "multiselect"} | _TEXT_TYPES)
+_ORDINARY_VISUAL_REQUIRED_TYPES = frozenset(
+    {"text", "textarea", "select", "multiselect", _PHONE_DIAL_COUNTRY_FIELD_TYPE} | _TEXT_TYPES
+)
 
 
 class GreenhouseFormError(Exception):
@@ -749,6 +768,11 @@ class GreenhouseAdapter:
         chips = react_controls.read_selected_chips(page, locator)
         if chips:
             return ", ".join(chips)
+        if _is_country_semantics_combobox_field(field):
+            # Use the same local committed evidence as country fill,
+            # including legacy semantic metadata. The generic reader's
+            # typed-search/placeholder fallback cannot verify a selection.
+            return react_controls.read_country_committed_label(locator)
         selected_label = react_controls.read_selected_label(page, locator)
         if _looks_like_phone_widget(page, locator):
             return _composed_phone_value(page, locator)
@@ -810,17 +834,32 @@ def _discover_control(
             element_id=element_id,
         )
     field_type = _field_type(tag, input_type, locator)
+    if field_type == "combobox" and _is_phone_dial_country_combobox(locator):
+        field_type = _PHONE_DIAL_COUNTRY_FIELD_TYPE
     label = _control_label(page, locator)
     heading = _question_heading(locator)
     if heading and _looks_like_control_name(label):
         label = heading
     context = ""
     context_required = False
+    phone_dial_country_relabel = False
     if field_type == "checkbox":
         if tag != "input" and _group_has_native_checkbox(locator):
             return None
         context, context_required = _checkbox_question_meta(locator)
         label = _checkbox_display_label(label, context)
+    elif field_type == _PHONE_DIAL_COUNTRY_FIELD_TYPE:
+        # Never the residence-country help-text lookup below: this is the
+        # phone widget's own dialing-code picker, not a question with
+        # field-local "select Other" instructions. The diagnostic suffix
+        # for this control's reported label is appended further below,
+        # after the visual-required-marker check -- that check must see
+        # this control's own real, unmodified visible label text (e.g. the
+        # literal "Country(*)" asterisk evidenced live) to notice a
+        # required marker that carries no native required/aria-required
+        # attribute; the suffix is for human-readable reporting only and
+        # must never change what text that check matches against.
+        phone_dial_country_relabel = True
     elif field_type == "combobox" and re.search(r"\bcountry\b", label, re.I) and not re.search(
         r"\bphone\b", label, re.I
     ):
@@ -868,6 +907,8 @@ def _discover_control(
         required = _file_upload_group_required(locator)
     elif not required and field_type in _ORDINARY_VISUAL_REQUIRED_TYPES:
         required = _has_ordinary_visual_required_marker(locator, label)
+    if phone_dial_country_relabel:
+        label = f"{label} (phone dialing country -- select manually)".strip()
     return DiscoveredField(
         label=label,
         name=name,
@@ -911,6 +952,36 @@ def _is_combobox(locator: Locator, field: DiscoveredField | None) -> bool:
     if role == "combobox" or autocomplete in {"list", "both"}:
         return True
     return element_id in _COMBOBOX_IDS
+
+
+def _is_country_semantics_combobox_field(field: DiscoveredField) -> bool:
+    """True for a combobox field that is semantically a country question
+    by its own discovered label alone -- independent of whether this field
+    was ever actually mapped through `QuestionKind.COUNTRY` (`read_back`
+    runs with only a `DiscoveredField`, never the classification-time
+    mapping). Mirrors the same label heuristic `_discover_control` already
+    uses to decide whether to look up this control's own field-local
+    "select Other" help text. Never true for the phone widget's own
+    dialing-code picker, which already carries its own distinct
+    `field_type` (`_PHONE_DIAL_COUNTRY_FIELD_TYPE`) rather than "combobox".
+    """
+    return (
+        field.field_type == "combobox"
+        and bool(re.search(r"\bcountry\b", field.label, re.I))
+        and not re.search(r"\bphone\b", field.label, re.I)
+    )
+
+
+def _is_phone_dial_country_combobox(locator: Locator) -> bool:
+    """True only for the evidenced phone-widget dialing-code country picker
+    (`.phone-input__country`) -- never a broader guess from label text or
+    id alone, since a genuine residence/citizenship country question can
+    share the exact same accessible name and `id="country"`.
+    """
+    try:
+        return bool(locator.evaluate(_PHONE_DIAL_COUNTRY_ANCESTOR_JS))
+    except PlaywrightError:
+        return False
 
 
 def _is_decoy_control(
@@ -970,30 +1041,121 @@ def _checkbox_question_meta(locator: Locator) -> tuple[str, bool]:
 # practice) but not safe for a combobox's field-local instruction text,
 # which this module trusts to decide whether "Other" may ever be clicked.
 # This only ever returns text from a scope it can prove belongs to this
-# control alone: an aria-describedby target (always control-specific by
-# construction), or the nearest ancestor within a bounded climb that is
-# both structurally named (question/field/fieldset/section) *and* carries
-# its own direct label/legend -- never a bare long-text fallback. No safely
-# scoped context means an empty string, never a guess.
+# control alone:
+#   - an aria-describedby target, but only when that target is not itself
+#     react-select's own transient placeholder/live-region node (evidenced
+#     on Stripe: aria-describedby there resolves only to the "Select..."
+#     placeholder, never to the question's own help copy, so accepting it
+#     unfiltered would silently mask the real instruction below);
+#   - otherwise the nearest ancestor within a bounded climb that is both
+#     structurally named (question/field/fieldset/section) *and* carries a
+#     label proven to belong to this exact control -- either a direct-child
+#     label/legend, or (evidenced on Stripe: `.field-wrapper > .select >
+#     .select__container > label[for=input-id] + .select-shell > ... >
+#     input`, where the field's own help text is a sibling of `.select`
+#     several levels above the label) this control's own `label[for=<this
+#     id>]`, wherever it sits inside that same named ancestor. That
+#     ancestor is rejected outright -- before any text is ever collected or
+#     returned, not merely before the direct-child-label aggregate
+#     fallback -- if it contains any *other* field's `label[for]` too (a
+#     shared wrapper), or any other independently editable control at all
+#     -- input/select/textarea/combobox/contenteditable other than this one
+#     -- aside from react-select's own hidden accessibility/form-sync input
+#     (never a genuinely different, merely unlabeled control). Without that
+#     ordering, a genuine help-text sibling living in the very same shared
+#     ancestor as that second, unlabeled control would still be returned
+#     and could wrongly authorize "Other" for a question that was never
+#     this control's own. The collected text always excludes this control's
+#     own select/value subtree, the label itself, and any placeholder/
+#     live-region noise -- never a bare long-text fallback. No safely
+#     scoped context means an empty string, never a guess.
 _COMBOBOX_FIELD_HELP_JS = """el => {
+    const isNoise = (node) => {
+        if (!node) return true;
+        const cls = String(node.className || '');
+        if (/placeholder/i.test(cls)) return true;
+        if (node.getAttribute && node.getAttribute('aria-live')) return true;
+        return false;
+    };
+    const isHiddenDummyInput = (candidate) => {
+        if (!candidate || candidate.tagName !== 'INPUT') return false;
+        const type = (candidate.getAttribute('type') || '').toLowerCase();
+        if (type === 'hidden') return true;
+        if (candidate.getAttribute('aria-hidden') === 'true') return true;
+        try {
+            const style = window.getComputedStyle(candidate);
+            if (style.display === 'none' || style.visibility === 'hidden') return true;
+        } catch (e) {}
+        return false;
+    };
     const describedBy = (el.getAttribute('aria-describedby') || '').trim();
     if (describedBy) {
         const text = describedBy.split(/\\s+/).map(id => {
             const node = document.getElementById(id);
-            return node ? (node.innerText || node.textContent || '') : '';
+            if (!node || isNoise(node)) return '';
+            return node.innerText || node.textContent || '';
         }).filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
         if (text) return text;
     }
+    const ownId = el.id || '';
+    const ownLabelFor = ownId ? document.querySelector('label[for="' + ownId + '"]') : null;
     let node = el.parentElement;
-    for (let i = 0; i < 4 && node && node.tagName && !['FORM', 'BODY', 'HTML'].includes(node.tagName); i++) {
+    for (let i = 0; i < 8 && node && node.tagName && !['FORM', 'BODY', 'HTML'].includes(node.tagName); i++) {
         const marker = String(node.className || '') + ' ' + String(node.id || '');
         const named = /question/i.test(marker)
             || /(?:^|\\s)field\\b/i.test(marker)
             || ['FIELDSET', 'SECTION'].includes(node.tagName);
         if (named) {
-            const ownLabel = node.querySelector(':scope > label, :scope > legend, :scope > [class*="label"]');
+            const directLabel = node.querySelector(':scope > label, :scope > legend, :scope > [class*="label"]');
+            const ownLabel = directLabel || (ownLabelFor && node.contains(ownLabelFor) ? ownLabelFor : null);
             if (ownLabel) {
-                return (node.innerText || '').replace(/\\s+/g, ' ').trim();
+                const otherLabels = Array.from(node.querySelectorAll('label[for]'))
+                    .filter(l => l.getAttribute('for') !== ownId);
+                if (otherLabels.length > 0) {
+                    // A shared wrapper also owns a different field's own
+                    // label -- never safe to trust its aggregate text.
+                    return '';
+                }
+                // Proof of only this independently editable control must
+                // hold before *any* ancestor text is ever returned below --
+                // not merely before the direct-child-label aggregate
+                // fallback -- since a shared wrapper can hold a second,
+                // genuinely different control that just happens not to
+                // carry its own `label[for]` (the otherLabels check above
+                // only catches a labelled sibling), and that second
+                // control's presence is never safe to ignore just because
+                // an explicit help-text sibling also happens to be
+                // collected in `parts`. React-select's own hidden
+                // accessibility/form-sync input is part of this exact
+                // control, not a different one, so it alone is excluded.
+                const otherControls = Array.from(
+                    node.querySelectorAll('input, select, textarea, [role="combobox"], [contenteditable="true"]')
+                ).filter(candidate => candidate !== el && !isHiddenDummyInput(candidate));
+                if (otherControls.length > 0) {
+                    return '';
+                }
+                const parts = [];
+                Array.from(node.children).forEach(child => {
+                    if (child === ownLabel || child.contains(el) || isNoise(child)) return;
+                    const text = (child.innerText || child.textContent || '').trim();
+                    if (text) parts.push(text);
+                });
+                if (parts.length) return parts.join(' ').replace(/\\s+/g, ' ').trim();
+                if (ownLabel === directLabel) {
+                    // The original, more constrained proof: a label/legend
+                    // that is a *direct child* of this exact named ancestor.
+                    // That ancestor's full aggregate text was always trusted
+                    // here, before this control's own `label[for]` fallback
+                    // above existed to match a deeper association -- never
+                    // extend that same blanket trust to the new, looser
+                    // association without an explicit sibling/help node
+                    // found; no safely scoped context means empty, not a
+                    // guess (e.g. it must never surface this control's own
+                    // placeholder/value text just because no real help
+                    // sibling exists).
+                    return (node.innerText || '').replace(/\\s+/g, ' ').trim();
+                }
+                return '';
             }
         }
         node = node.parentElement;
@@ -1714,7 +1876,37 @@ def _fill_combobox(
         # its own: neither proves commitment (vs. mere highlight/focus),
         # and a later read-back pass has no way to re-derive either once
         # the option node is hidden/detached.
-        if react_controls.confirm_option_selected(page, locator, option_label, matched_value):
+        #
+        # COUNTRY alone uses its own local-only confirmation
+        # (`confirm_country_option_committed_locally`), never this shared
+        # `confirm_option_selected`'s page-wide primary signal: a swallowed
+        # click on a residence/citizenship/work-country control could
+        # otherwise be "confirmed" by an unrelated sibling control already
+        # showing the same requested country (e.g. a work-authorization
+        # dropdown), or by this control's own leftover typed search text
+        # read as if it were committed while a stale, different value was
+        # actually retained internally. SCHOOL/PRIMARY_LANGUAGE and every
+        # other kind keep using `confirm_option_selected` unchanged.
+        confirmed = (
+            react_controls.confirm_country_option_committed_locally(
+                page, locator, option_label, matched_value
+            )
+            if kind is QuestionKind.COUNTRY
+            else react_controls.confirm_option_selected(page, locator, option_label, matched_value)
+        )
+        if confirmed:
+            # COUNTRY only: the exact-option render that just confirmed
+            # above can still be transient -- a blur handler or an
+            # immediately-following async re-render can reset this
+            # control's own display back to a stale prior country moments
+            # later. A bounded, country-only recheck after forcing blur
+            # (`confirm_country_selection_persists_after_blur`) closes that
+            # gap without changing other kinds. The "Other" fallback
+            # below uses the same persistence recheck.
+            if kind is QuestionKind.COUNTRY and not react_controls.confirm_country_selection_persists_after_blur(
+                page, locator, option_label, matched_value
+            ):
+                break
             if resolved is not None:
                 resolved["label"] = option_label or matched_value
             _dismiss_overlays(page)
@@ -1826,7 +2018,12 @@ def _select_other_combobox_option(page: Page, locator: Locator) -> bool:
     still shows its previous, wrong value (e.g. a stale "France"). Instead
     this uses `confirm_other_option_committed_locally`, which only ever
     reads this control's own single-value display node, or this fails
-    closed exactly like an ordinary unmatched country.
+    closed exactly like an ordinary unmatched country. That same local
+    confirmation is then also required to persist through a blur, via
+    `confirm_country_selection_persists_after_blur` -- the same helper
+    the ordinary country-match path above uses -- so a blur handler or
+    immediate async re-render that resets this control back to a stale
+    prior country is never mistaken for a durable "Other" commitment.
     """
     try:
         locator.fill("", timeout=1_000)
@@ -1847,7 +2044,11 @@ def _select_other_combobox_option(page: Page, locator: Locator) -> bool:
                 option.click(force=True, timeout=3_000)
             except PlaywrightError:
                 break
-        if react_controls.confirm_other_option_committed_locally(locator, option_label):
+        if react_controls.confirm_other_option_committed_locally(
+            locator, option_label
+        ) and react_controls.confirm_country_selection_persists_after_blur(
+            page, locator, option_label, "Other"
+        ):
             logger.info("combobox_other_selected element_id=%r", locator.get_attribute("id") or "")
             return True
     logger.warning("combobox_other_unconfirmed element_id=%r", locator.get_attribute("id") or "")

@@ -259,6 +259,53 @@ def test_unrecognized_control_is_unsupported() -> None:
     assert classified.fill is False
 
 
+def test_phone_dial_country_control_stays_unsupported_and_required_regardless_of_profile_country() -> None:
+    """Greenhouse's phone-widget dialing-code country picker
+    (`greenhouse._PHONE_DIAL_COUNTRY_FIELD_TYPE`, discovered only via its
+    evidenced `.phone-input__country` nesting -- see
+    `test_greenhouse_country_fill_diagnostics_fake_dom.py`) must never be
+    filled from residence, citizenship, current_location, or employer --
+    it must stay UNSUPPORTED/unfilled even when every one of those is
+    explicitly set on the profile, and its own `required` marker must
+    survive untouched into the classified result (so it still counts as a
+    required field left unresolved, never silently dropped).
+    """
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+15555550100",
+            "country": "Canada",
+            "current_location": "Toronto, Canada",
+        },
+        work_eligibility={
+            "work_authorizations": [{"country": "Germany", "authorized": True}],
+            "citizenship": ["Canada"],
+            "requires_visa_sponsorship": False,
+        },
+        employment={"current_employer": "Acme Corp"},
+    )
+
+    classified = classify_field(
+        DiscoveredField(
+            label="Country(*) (phone dialing country -- select manually)",
+            field_type="phone_dial_country",
+            required=True,
+            element_id="country",
+        ),
+        profile,
+    )
+
+    assert classified.classification is FieldClassification.UNSUPPORTED
+    assert classified.fill is False
+    assert classified.value is None
+    assert classified.field.required is True
+    assert classified.unresolved_reason is not None
+    assert "Canada" not in (classified.unresolved_reason or "")
+    assert "Acme" not in (classified.unresolved_reason or "")
+
+
 def test_work_auth_without_country_authorization_is_not_deterministic() -> None:
     profile = _profile(
         identity={

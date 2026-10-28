@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import re
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.application.autofill import react_controls, service
@@ -34,6 +35,7 @@ from app.application.autofill.greenhouse import (
     _combobox_field_help,
     _country_other_instructed,
     _fill_combobox,
+    _is_phone_dial_country_combobox,
 )
 from app.application.autofill.models import FieldClassification
 from app.application.autofill.questions import QuestionKind
@@ -63,6 +65,16 @@ class _FakeElement:
         self.children: list[_FakeElement] = []
         self.visible = True
         self.value = ""
+        # Models a locator read that raises rather than ever returning an
+        # empty string -- so a reader that treats "empty" and "unreadable"
+        # the same way can be told apart from one that correctly fails
+        # closed only on the latter.
+        self.raise_on_input_value = False
+        # Models `locator.blur()` itself raising (e.g. the element detached
+        # or the control navigated away mid-blur) -- a regression that
+        # swallows this and proceeds as if the blur succeeded must be told
+        # apart from one that correctly fails closed on it.
+        self.raise_on_blur = False
         # Set True the instant a committed React-select would unmount this
         # node (e.g. inside its own on-click handler) -- any locator method
         # called on it afterwards raises, so a regression that re-reads the
@@ -97,26 +109,53 @@ def _aggregate_text(node: _FakeElement) -> str:
     return " ".join(part for part in (descendant.text for descendant in node.subtree()) if part)
 
 
+def _is_noise(node: _FakeElement | None) -> bool:
+    if node is None:
+        return True
+    if re.search(r"placeholder", node.classes or "", re.I):
+        return True
+    if node.attrs.get("aria-live"):
+        return True
+    return False
+
+
+def _find_label_for(root: _FakeElement, target_id: str) -> _FakeElement | None:
+    for node in root.subtree():
+        if node.tag.lower() == "label" and node.attrs.get("for") == target_id:
+            return node
+    return None
+
+
+def _node_contains(ancestor: _FakeElement, node: _FakeElement) -> bool:
+    return any(descendant is node for descendant in ancestor.subtree())
+
+
 def _simulate_combobox_field_help(el: _FakeElement) -> str:
     """Fake-DOM equivalent of `greenhouse._COMBOBOX_FIELD_HELP_JS`, so this
-    suite can prove the extractor's own scoping logic (aria-describedby,
-    else a bounded named+own-label ancestor climb, else empty) rather than
-    just asserting on whatever `context=` a test passes in directly.
+    suite can prove the extractor's own scoping logic (aria-describedby
+    filtered for placeholder/live-region noise; else a bounded
+    named+own-label ancestor climb -- direct-child label/legend, or this
+    control's own `label[for]` wherever it sits inside that same named
+    ancestor, rejecting any ancestor that also owns a *different* field's
+    label; else empty) rather than just asserting on whatever `context=` a
+    test passes in directly.
     """
     described_by = (el.attrs.get("aria-describedby") or "").strip()
+    root = _root_of(el)
     if described_by:
-        root = _root_of(el)
         parts = [
             match.text
             for token in described_by.split()
             for match in root.subtree()
-            if match.elem_id == token and match.text
+            if match.elem_id == token and not _is_noise(match) and match.text
         ]
         joined = " ".join(" ".join(parts).split())
         if joined:
             return joined
+    own_id = el.elem_id or ""
+    own_label_for = _find_label_for(root, own_id) if own_id else None
     node = el.parent
-    for _ in range(4):
+    for _ in range(8):
         if node is None or node.tag.lower() in {"form", "body", "html"}:
             break
         marker = f"{node.classes or ''} {node.elem_id or ''}"
@@ -126,7 +165,7 @@ def _simulate_combobox_field_help(el: _FakeElement) -> str:
             or node.tag.lower() in {"fieldset", "section"}
         )
         if named:
-            own_label = next(
+            direct_label = next(
                 (
                     child
                     for child in node.children
@@ -134,8 +173,31 @@ def _simulate_combobox_field_help(el: _FakeElement) -> str:
                 ),
                 None,
             )
+            own_label = direct_label
+            if own_label is None and own_label_for is not None and _node_contains(node, own_label_for):
+                own_label = own_label_for
             if own_label is not None:
-                return " ".join(_aggregate_text(node).split())
+                other_labels = [
+                    candidate
+                    for candidate in node.subtree()
+                    if candidate.tag.lower() == "label"
+                    and candidate.attrs.get("for")
+                    and candidate.attrs.get("for") != own_id
+                ]
+                if other_labels:
+                    return ""
+                parts = []
+                for child in node.children:
+                    if child is own_label or _node_contains(child, el) or _is_noise(child):
+                        continue
+                    text = " ".join(_aggregate_text(child).split())
+                    if text:
+                        parts.append(text)
+                if parts:
+                    return " ".join(" ".join(parts).split())
+                if own_label is direct_label:
+                    return " ".join(_aggregate_text(node).split())
+                return ""
         node = node.parent
     return ""
 
@@ -195,7 +257,11 @@ class _FakeLocator:
 
     def input_value(self, timeout: int | None = None) -> str:
         _ = timeout
-        return self._elements[0].value if self._elements else ""
+        if not self._elements:
+            return ""
+        if self._elements[0].raise_on_input_value:
+            raise PlaywrightError("boom: input_value unreadable")
+        return self._elements[0].value
 
     def evaluate(self, script: str, arg: object = None) -> object:
         _ = arg
@@ -208,6 +274,13 @@ class _FakeLocator:
             return el.tag
         if "aria-describedby" in script:
             return _simulate_combobox_field_help(el)
+        if "phone-input__country" in script:
+            node: _FakeElement | None = el
+            while node is not None:
+                if "phone-input__country" in (node.classes or ""):
+                    return True
+                node = node.parent
+            return False
         return None
 
     def click(self, timeout: int | None = None, force: bool = False) -> None:
@@ -230,6 +303,18 @@ class _FakeLocator:
 
     def wait_for(self, state: str | None = None, timeout: int | None = None) -> None:
         _ = state, timeout
+
+    def blur(self, timeout: int | None = None) -> None:
+        # No fake-DOM test models a blur-triggered revert -- that shape
+        # needs a real browser's own event dispatch/async-render timing
+        # (see `test_greenhouse_country_control_evidence_browser.py`); this
+        # no-op only keeps every existing COUNTRY-kind fake-DOM test (which
+        # now always calls through
+        # `react_controls.confirm_country_selection_persists_after_blur`)
+        # from breaking on a missing method.
+        _ = timeout
+        if self._elements and self._elements[0].raise_on_blur:
+            raise PlaywrightError("boom: blur unavailable")
 
     def locator(self, selector: str) -> "_FakeLocator":
         if selector.startswith("xpath=ancestor::"):
@@ -554,7 +639,7 @@ def _country_solo_page() -> tuple[_FakePage, _FakeElement, _FakeElement]:
     control = root.add_child(_FakeElement("div", classes="select__control"))
     value_container = control.add_child(_FakeElement("div", classes="select__value-container"))
     single_value = value_container.add_child(_FakeElement("div", classes="select__single-value"))
-    value_container.add_child(_FakeElement("input", elem_id=_COUNTRY_INPUT_ID))
+    country_input = value_container.add_child(_FakeElement("input", elem_id=_COUNTRY_INPUT_ID))
 
     country_listbox = root.add_child(_FakeElement("div", role="listbox", elem_id=_COUNTRY_LISTBOX_ID))
     country_option = country_listbox.add_child(
@@ -568,6 +653,14 @@ def _country_solo_page() -> tuple[_FakePage, _FakeElement, _FakeElement]:
 
     def _select_country() -> None:
         single_value.text = "Uzbekistan +998"
+        # A genuine React commit always clears the control's own typed
+        # search text as part of the same click -- never leaves it in
+        # place the way this fake previously did. Without this, the
+        # country-only reader's typed-search-not-empty guard (which exists
+        # to reject a leftover, merely *typed* string from ever being
+        # mistaken for a committed selection) would wrongly fail closed on
+        # a perfectly normal, already-committed selection here.
+        country_input.value = ""
 
     country_option._on_click = _select_country  # type: ignore[attr-defined]
 
@@ -764,6 +857,58 @@ def test_committed_selected_value_requires_cleared_search_input() -> None:
     assert react_controls.read_committed_selected_value(locator) is None
 
 
+# --- read_country_committed_label / confirm_country_option_committed_locally:
+# direct fail-closed edge cases -----------------------------------------------
+
+
+def test_read_country_committed_label_fails_closed_on_input_value_read_error() -> None:
+    """An `input_value()` read error must never be treated the same as an
+    empty/cleared search string -- a control this reader cannot even
+    finish inspecting must never be trusted as showing a committed
+    selection just because its visible text happens to look genuine."""
+    page, _control, _country_option = _country_solo_page()
+    locator = _country_locator(page)
+    single_value = next(el for el in page.root.subtree() if "single-value" in (el.classes or ""))
+    single_value.text = "Uzbekistan +998"
+    locator._elements[0].raise_on_input_value = True
+
+    assert react_controls.read_country_committed_label(locator) is None
+
+
+def test_read_country_committed_label_fails_closed_on_hidden_selected_value_node() -> None:
+    """A dedicated single-value display node that exists but is not
+    actually visible must never be trusted -- a React-select can leave a
+    stale text node in the DOM without it being the control's genuinely
+    rendered, currently-shown selection."""
+    page, _control, _country_option = _country_solo_page()
+    locator = _country_locator(page)
+    single_value = next(el for el in page.root.subtree() if "single-value" in (el.classes or ""))
+    single_value.text = "Uzbekistan +998"
+    single_value.visible = False
+
+    assert react_controls.read_country_committed_label(locator) is None
+
+
+def test_confirm_country_option_committed_locally_rejects_related_but_different_country() -> None:
+    """A stale committed display that is merely *related* to the option
+    actually clicked (e.g. "United States Minor Outlying Islands" already
+    showing when "United States" was the option clicked) must never
+    confirm that click -- `label_matches`' fuzzy/prefix matching would
+    accept this; the normalized-exact match on the option's own pre-click
+    label must not.
+    """
+    page, _control, _country_option = _country_solo_page()
+    locator = _country_locator(page)
+    single_value = next(el for el in page.root.subtree() if "single-value" in (el.classes or ""))
+    single_value.text = "United States Minor Outlying Islands"
+
+    confirmed = react_controls.confirm_country_option_committed_locally(
+        page, locator, "United States", "United States", timeout=50
+    )
+
+    assert confirmed is False
+
+
 # --- clear_selected_value: direct fail-closed edge cases --------------------
 
 
@@ -904,6 +1049,79 @@ def test_country_combobox_other_fallback_fails_closed_when_confirmation_never_pe
     confirmed = service._fill_and_confirm(GreenhouseAdapter(), page, item)
 
     assert confirmed is False
+
+
+def _committed_country_input_page(committed_text: str) -> tuple[_FakePage, _FakeLocator]:
+    """A country control whose own display already shows `committed_text`
+    as committed (search input cleared) -- the shape
+    `confirm_country_selection_persists_after_blur` is always called
+    against immediately after `confirm_country_option_committed_locally`
+    already reported a match, so a bug that treats either of its own
+    error paths as a pass would otherwise read back as a false "True".
+    """
+    root = _FakeElement("div")
+    control = root.add_child(_FakeElement("div", classes="select__control"))
+    value_container = control.add_child(_FakeElement("div", classes="select__value-container"))
+    value_container.add_child(
+        _FakeElement("div", classes="select__single-value", text=committed_text)
+    )
+    value_container.add_child(_FakeElement("input", elem_id=_COUNTRY_INPUT_ID))
+
+    page = _FakePage(root)
+    locator = page.locator(f'[id="{_COUNTRY_INPUT_ID}"]')
+    return page, locator
+
+
+def test_confirm_country_selection_persists_after_blur_fails_closed_when_blur_itself_raises() -> None:
+    """If `locator.blur()` itself raises, the requested post-blur
+    verification never actually ran -- this must fail closed exactly like
+    a blur that revealed a reverted selection, never silently treat the
+    unraised error as proof the committed value survived the blur.
+    """
+    page, locator = _committed_country_input_page("Uzbekistan")
+    locator._elements[0].raise_on_blur = True
+
+    persisted = react_controls.confirm_country_selection_persists_after_blur(
+        page, locator, "Uzbekistan", "Uzbekistan"
+    )
+
+    assert persisted is False
+
+
+class _RaisingWaitFakePage(_FakePage):
+    """A page whose `wait_for_timeout` itself raises mid-poll -- models a
+    real page navigating away or closing partway through the bounded
+    blur-persistence window, only ever used by the regression below.
+    """
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        _ = timeout
+        raise PlaywrightError("boom: wait_for_timeout unavailable")
+
+
+def test_confirm_country_selection_persists_after_blur_fails_closed_when_wait_for_timeout_raises() -> None:
+    """If `page.wait_for_timeout` itself raises partway through the
+    bounded blur-persistence window, the requested verification could not
+    run to completion -- this must fail closed, never return as if the
+    window had simply elapsed cleanly with the last-read committed match
+    still standing.
+    """
+    root = _FakeElement("div")
+    control = root.add_child(_FakeElement("div", classes="select__control"))
+    value_container = control.add_child(_FakeElement("div", classes="select__value-container"))
+    value_container.add_child(
+        _FakeElement("div", classes="select__single-value", text="Uzbekistan")
+    )
+    value_container.add_child(_FakeElement("input", elem_id=_COUNTRY_INPUT_ID))
+
+    page = _RaisingWaitFakePage(root)
+    locator = page.locator(f'[id="{_COUNTRY_INPUT_ID}"]')
+
+    persisted = react_controls.confirm_country_selection_persists_after_blur(
+        page, locator, "Uzbekistan", "Uzbekistan"
+    )
+
+    assert persisted is False
 
 
 class _GlobalMatchFakePage(_FakePage):
@@ -1082,6 +1300,119 @@ def test_combobox_field_help_never_leaks_sibling_field_instruction() -> None:
 
     assert context == ""
     assert _country_other_instructed(context) is False
+
+
+# Anchored on the real Stripe shape evidenced live (jobs 8301379, 6176758):
+# `.field-wrapper > .select > .select__container > label[for=input-id] +
+# .select-shell > div > .select__control > .select__value-container >
+# input`, where the question's own help text ("If you do not see your
+# country in the list, please select Other.") is a *sibling of `.select`*
+# inside `.field-wrapper` -- several ancestor levels above the label itself,
+# which the old direct-child-only climb could never reach. `aria-describedby`
+# there resolves only to react-select's own transient placeholder node
+# ("Select..."), never to that help text.
+
+
+def _stripe_shaped_country_page(
+    *, include_help_sibling: bool
+) -> _FakeElement:
+    field_wrapper = _FakeElement("div", classes="field-wrapper")
+    select_div = field_wrapper.add_child(_FakeElement("div", classes="select"))
+    select_container = select_div.add_child(_FakeElement("div", classes="select__container"))
+    select_container.add_child(
+        _FakeElement("label", text="Country", attrs={"for": _COUNTRY_INPUT_ID})
+    )
+    select_shell = select_container.add_child(_FakeElement("div", classes="select-shell"))
+    inner = select_shell.add_child(_FakeElement("div"))
+    select_control = inner.add_child(_FakeElement("div", classes="select__control"))
+    value_container = select_control.add_child(_FakeElement("div", classes="select__value-container"))
+    value_container.add_child(
+        _FakeElement(
+            "div",
+            classes="select__placeholder",
+            elem_id="country-placeholder",
+            text="Select...",
+        )
+    )
+    value_container.add_child(
+        _FakeElement(
+            "input",
+            elem_id=_COUNTRY_INPUT_ID,
+            attrs={"aria-describedby": "country-placeholder"},
+        )
+    )
+    if include_help_sibling:
+        field_wrapper.add_child(
+            _FakeElement(
+                "div",
+                classes="select__help",
+                text="If you do not see your country in the list, please select Other.",
+            )
+        )
+    return field_wrapper
+
+
+def test_combobox_field_help_finds_sibling_help_text_above_nested_label() -> None:
+    """The field's own help text, several ancestor levels above its nested
+    `label[for]`, is captured; the aria-describedby target -- react-select's
+    own placeholder, never the real help -- is correctly rejected first."""
+    field_wrapper = _stripe_shaped_country_page(include_help_sibling=True)
+    country_input = next(el for el in field_wrapper.subtree() if el.elem_id == _COUNTRY_INPUT_ID)
+    locator = _FakeLocator([country_input])
+
+    context = _combobox_field_help(locator)
+
+    assert context == "If you do not see your country in the list, please select Other."
+    assert _country_other_instructed(context) is True
+
+
+def test_combobox_field_help_never_returns_placeholder_or_bare_label_text() -> None:
+    """With no real help sibling present, the aria-describedby placeholder
+    must never be returned as field-local help, and the deeper
+    `label[for]`-based association alone (without an explicit help node)
+    must fail closed rather than fall back to this field's own aggregate
+    (placeholder-carrying) text."""
+    field_wrapper = _stripe_shaped_country_page(include_help_sibling=False)
+    country_input = next(el for el in field_wrapper.subtree() if el.elem_id == _COUNTRY_INPUT_ID)
+    locator = _FakeLocator([country_input])
+
+    context = _combobox_field_help(locator)
+
+    assert context == ""
+    assert "Select" not in context
+    assert _country_other_instructed(context) is False
+
+
+# --- Phone dialing-country combobox: structural detection -------------------
+#
+# Anchored on the real shape evidenced live on Elastic (8315564), Stripe
+# (8301379, 6176758) and Asana (8319678): `input#country[role="combobox"]`
+# labelled "Country(*)" nested under `.phone-input > .phone-input__country
+# > .select > .select__container`. This is the phone widget's own dialing
+# *code* picker, not country of residence/citizenship -- it must only ever
+# be recognized via this exact structural nesting, never by label text or
+# `id="country"` alone, since a genuine residence-country question can
+# share both.
+
+
+def test_is_phone_dial_country_combobox_detects_only_the_evidenced_phone_widget_nesting() -> None:
+    phone_input = _FakeElement("div", classes="phone-input")
+    phone_country = phone_input.add_child(_FakeElement("div", classes="phone-input__country"))
+    select_div = phone_country.add_child(_FakeElement("div", classes="select"))
+    select_container = select_div.add_child(_FakeElement("div", classes="select__container"))
+    phone_country_input = select_container.add_child(
+        _FakeElement("input", elem_id="country", role="combobox")
+    )
+    phone_locator = _FakeLocator([phone_country_input])
+
+    residence_wrapper = _FakeElement("div", classes="field-wrapper")
+    residence_input = residence_wrapper.add_child(
+        _FakeElement("input", elem_id="country", role="combobox")
+    )
+    residence_locator = _FakeLocator([residence_input])
+
+    assert _is_phone_dial_country_combobox(phone_locator) is True
+    assert _is_phone_dial_country_combobox(residence_locator) is False
 
 
 # --- Country combobox: stale selected-value clearing on failed fill ---------

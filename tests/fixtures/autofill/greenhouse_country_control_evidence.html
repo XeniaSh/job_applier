@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Job Application — Country Control Evidence</title>
+  <style>
+    .select__control { border: 1px solid #ccc; padding: 6px; min-height: 32px; cursor: pointer; }
+    .select__single-value { display: inline-block; margin-right: 6px; background: #eef; padding: 2px 6px; }
+    [hidden] { display: none !important; }
+    .visually-hidden-dummy { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+  </style>
+</head>
+<body>
+  <h1>Senior Backend Engineer</h1>
+  <form id="application_form" data-ats="greenhouse" action="/job_applications" method="post">
+    <label for="first_name">First Name</label>
+    <input id="first_name" name="job_application[first_name]" type="text" required>
+
+    <!-- F1: Stripe-nested shape, own "select Other" help instruction, plus an
+         unrelated sibling that already shows "Other" the whole time -- the
+         own-control Other confirmation must never be satisfied by that
+         sibling. -->
+    <div class="field-wrapper" id="stripe-country-wrapper">
+      <div class="select">
+        <div class="select__container">
+          <label for="stripe_country">Country of your current residence</label>
+          <div class="select-shell">
+            <div class="select__control">
+              <div class="select__value-container">
+                <div class="select__single-value"></div>
+                <div class="select__placeholder" id="stripe-country-placeholder">Select...</div>
+                <input id="stripe_country" aria-describedby="stripe-country-placeholder" role="combobox" aria-autocomplete="list" aria-required="true">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="select__help">If you do not see your country in the list, please select Other.</div>
+    </div>
+    <div id="stripe-country-listbox" role="listbox" hidden></div>
+
+    <div class="field" id="other-sibling-field">
+      <label for="other_sibling_input">Already shows Other, unrelated question</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value">Other</div>
+          <input id="other_sibling_input" role="combobox" aria-autocomplete="list">
+        </div>
+      </div>
+    </div>
+
+    <!-- F2: target click permanently swallowed, while a sibling control
+         already displays the exact requested country the whole time. The
+         target must never be confirmed from the sibling's display. -->
+    <div class="field" id="swallow-target-field">
+      <label for="swallow_target_country">Country of residence</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="swallow_target_country" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+    </div>
+    <div id="swallow-target-listbox" role="listbox" hidden></div>
+
+    <div class="field" id="swallow-sibling-field">
+      <label for="swallow_sibling_country">Are you authorized to work in France?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value">France</div>
+          <input id="swallow_sibling_country" role="combobox" aria-autocomplete="list">
+        </div>
+      </div>
+    </div>
+
+    <!-- F3: typing removes (unmounts) the single-value node entirely while
+         React internally retains a stale prior commitment ("Brazil") that
+         is never exposed anywhere readable -- the typed, uncommitted text
+         must never be read back as if it were the committed selection. -->
+    <div class="field" id="stale-unmount-field">
+      <label for="stale_unmount_country">Country of citizenship</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value">Brazil</div>
+          <input id="stale_unmount_country" role="combobox" aria-autocomplete="list">
+        </div>
+      </div>
+    </div>
+    <div id="stale-unmount-listbox" role="listbox" hidden></div>
+
+    <!-- F4: a normal, genuinely committed selection that later reverts
+         (simulating an observed UI bug) -- a later, independent read-back
+         must reflect the live DOM truthfully, never a cached "it was
+         confirmed once" result. -->
+    <div class="field" id="revert-field">
+      <label for="revert_country">Country where you currently reside</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="revert_country" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+    </div>
+    <div id="revert-listbox" role="listbox" hidden></div>
+
+    <!-- F6: the exact option is clicked and genuinely commits, but this
+         control's own blur handler then resets its display back to a
+         stale prior country -- a genuinely different failure shape than
+         F4's slow background revert above, which only a later,
+         independent read-back could ever observe. This one must be
+         caught by the fill's own bounded persistence recheck, within the
+         very same fill attempt, never only a later read-back. -->
+    <div class="field" id="blur-revert-field">
+      <label for="blur_revert_country">Current country of residence</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value">Brazil</div>
+          <input id="blur_revert_country" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+    </div>
+    <div id="blur-revert-listbox" role="listbox" hidden></div>
+
+    <!-- F7: the exact option is clicked and genuinely commits, but an
+         immediate (next-tick) async re-render -- unrelated to blur timing
+         -- resets the display back to a stale prior country moments
+         later. The same bounded persistence recheck must still observe
+         this within its own short poll window. -->
+    <div class="field" id="async-revert-field">
+      <label for="async_revert_country">Please select your current country of residence</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value">Brazil</div>
+          <input id="async_revert_country" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+    </div>
+    <div id="async-revert-listbox" role="listbox" hidden></div>
+
+    <!-- F8: own-control "select Other" instruction identical to F1's shape
+         above (no live option matches the candidate's actual, unlisted
+         country at all -- the only live option is "Other" itself), but
+         this control's own blur handler resets the display back to a
+         stale prior country ("Brazil") immediately after "Other" itself
+         commits -- the SAME persistence-after-blur check the ordinary
+         country-match path above already applies must also gate the
+         "Other" fallback's own success; a fill that only checks the
+         instant-after-click single-value text would wrongly report this
+         confirmed. -->
+    <div class="field-wrapper" id="other-blur-revert-wrapper">
+      <div class="select">
+        <div class="select__container">
+          <label for="other_blur_revert_country">What is your current country of residence?</label>
+          <div class="select-shell">
+            <div class="select__control">
+              <div class="select__value-container">
+                <div class="select__single-value">Brazil</div>
+                <div class="select__placeholder" id="other-blur-revert-placeholder" hidden>Select...</div>
+                <input id="other_blur_revert_country" aria-describedby="other-blur-revert-placeholder" role="combobox" aria-autocomplete="list" aria-required="true">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="select__help">If you do not see your country in the list, please select Other.</div>
+    </div>
+    <div id="other-blur-revert-listbox" role="listbox" hidden></div>
+
+    <!-- F5: Greenhouse's phone-widget dialing-code picker, evidenced live on
+         Elastic/Stripe/Asana as `input[role="combobox"]` nested under
+         `.phone-input__country`, labelled "Country(*)" with no native
+         required/aria-required attribute on the input itself -- only a
+         visible asterisk in its own label text. -->
+    <div class="phone-input" id="phone-widget">
+      <div class="phone-input__country">
+        <div class="select">
+          <div class="select__container">
+            <label for="phone_dial_country_input">Country(*)</label>
+            <div class="select__control">
+              <div class="select__value-container">
+                <div class="select__single-value"></div>
+                <div class="select__placeholder">Select...</div>
+                <input id="phone_dial_country_input" role="combobox" aria-autocomplete="list">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="phone-dial-country-listbox" role="listbox" hidden></div>
+      <label for="phone_number_input">Phone</label>
+      <input id="phone_number_input" name="job_application[phone]" type="tel">
+    </div>
+
+    <!-- The genuine residence-country question must still be recognized
+         normally -- never swept into the phone-widget's own field_type
+         just because both can share a "Country" label and even the
+         `id="country"`/`id="candidate_location"` convention `_is_combobox`
+         also recognizes. -->
+    <div class="field" id="residence-country-field">
+      <label for="candidate_location">What is your country of residence?</label>
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__single-value"></div>
+          <input id="candidate_location" role="combobox" aria-autocomplete="list" aria-required="true">
+        </div>
+      </div>
+    </div>
+    <div id="residence-country-listbox" role="listbox" hidden></div>
+
+    <button type="submit" id="submit_app">Submit Application</button>
+  </form>
+
+  <!-- Standalone fixtures below: never discovered via
+       `GreenhouseAdapter.discover_fields` (outside the form), used only via
+       a direct locator + `_combobox_field_help` call, exactly like the
+       fake-DOM suite's equivalent cases but against a real rendered
+       browser DOM instead of a Python re-implementation of the JS. -->
+  <div id="standalone-fixtures">
+    <div class="field-wrapper" id="standalone-stripe-no-help-wrapper">
+      <div class="select">
+        <div class="select__container">
+          <label for="standalone_stripe_no_help">Country</label>
+          <div class="select-shell">
+            <div class="select__control">
+              <div class="select__value-container">
+                <div class="select__placeholder" id="standalone-stripe-no-help-placeholder">Select...</div>
+                <input id="standalone_stripe_no_help" aria-describedby="standalone-stripe-no-help-placeholder" role="combobox" aria-autocomplete="list">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="field" id="standalone-shared-other-control-wrapper">
+      <label for="standalone_shared_other_control">Country</label>
+      <input id="standalone_shared_other_control" role="combobox" aria-autocomplete="list">
+      <input id="standalone_other_independent_control" type="text" placeholder="A genuinely different, merely unlabeled control">
+    </div>
+
+    <div class="field" id="standalone-shared-hidden-dummy-wrapper">
+      <label for="standalone_shared_hidden_dummy">Country</label>
+      <input id="standalone_shared_hidden_dummy" role="combobox" aria-autocomplete="list">
+      <input type="hidden" aria-hidden="true" class="visually-hidden-dummy" value="UZ">
+    </div>
+
+    <!-- Nested label[for] (the Stripe-nested shape, never a direct child),
+         a genuine help-text sibling instructing "select Other", AND a
+         second, genuinely different control that simply carries no
+         `label[for]` of its own -- all sharing the one wrapper. Proves the
+         otherControls guard now gates this ancestor's text *before* the
+         help-text sibling is ever collected/returned, not only before the
+         older direct-child-label aggregate fallback. -->
+    <div class="field-wrapper" id="standalone-nested-help-second-control-wrapper">
+      <div class="select">
+        <div class="select__container">
+          <label for="standalone_nested_help_second_control">Country</label>
+          <div class="select-shell">
+            <div class="select__control">
+              <div class="select__value-container">
+                <input id="standalone_nested_help_second_control" role="combobox" aria-autocomplete="list">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="select__help">If you do not see your country in the list, please select Other.</div>
+      <input id="standalone_other_independent_control_2" type="text" placeholder="A genuinely different, merely unlabeled control sharing this same wrapper">
+    </div>
+  </div>
+
+  <script>
+    window.__submitClicked = false;
+    window.__formSubmitted = false;
+    document.getElementById("submit_app").addEventListener("click", function () {
+      window.__submitClicked = true;
+    });
+    document.getElementById("application_form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      window.__formSubmitted = true;
+    });
+
+    function setupCountryWithOther(fieldWrapperId, inputId, listId, options) {
+      var wrapper = document.getElementById(fieldWrapperId);
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      var valueNode = wrapper.querySelector(".select__single-value");
+      function render() {
+        var needle = input.value.trim().toLowerCase();
+        var matches = needle
+          ? options.filter(function (text) { return text.toLowerCase().indexOf(needle) !== -1; })
+          : options.slice();
+        list.innerHTML = "";
+        list.hidden = matches.length === 0;
+        matches.forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            valueNode.textContent = text;
+            input.value = "";
+            list.hidden = true;
+          });
+          list.appendChild(option);
+        });
+      }
+      input.addEventListener("focus", render);
+      input.addEventListener("input", render);
+    }
+
+    function setupSwallowedClick(fieldId, inputId, listId, options) {
+      // Every click on a live, visible option is permanently swallowed:
+      // never updates the single-value node, never clears the typed text,
+      // never hides the menu -- models a target control whose commit never
+      // actually lands, no matter how many times the fill path retries.
+      var field = document.getElementById(fieldId);
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      function render() {
+        var needle = input.value.trim().toLowerCase();
+        var matches = needle
+          ? options.filter(function (text) { return text.toLowerCase().indexOf(needle) !== -1; })
+          : options.slice();
+        list.innerHTML = "";
+        list.hidden = matches.length === 0;
+        matches.forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            /* Deliberately does nothing: the click is swallowed. */
+          });
+          list.appendChild(option);
+        });
+      }
+      input.addEventListener("focus", render);
+      input.addEventListener("input", render);
+    }
+
+    function setupStaleUnmount(fieldId, inputId) {
+      // Typing unmounts this control's own single-value display node
+      // entirely (never merely blanking its text) while the real
+      // committed value ("Brazil") stays stuck in closure state that is
+      // never exposed anywhere readable in the DOM -- exactly the shape a
+      // later read-back must fail closed on, never substituting the
+      // typed-but-uncommitted search text instead.
+      var field = document.getElementById(fieldId);
+      var input = document.getElementById(inputId);
+      input.addEventListener("input", function () {
+        var valueNode = field.querySelector(".select__single-value");
+        if (input.value.trim() && valueNode && valueNode.parentNode) {
+          valueNode.remove();
+        }
+      });
+    }
+
+    function setupRevertingSingleSelect(fieldId, inputId, listId, options, revertAfterMs) {
+      var field = document.getElementById(fieldId);
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      var valueNode = field.querySelector(".select__single-value");
+      function render() {
+        var needle = input.value.trim().toLowerCase();
+        var matches = needle
+          ? options.filter(function (text) { return text.toLowerCase().indexOf(needle) !== -1; })
+          : options.slice();
+        list.innerHTML = "";
+        list.hidden = matches.length === 0;
+        matches.forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            valueNode.textContent = text;
+            input.value = "";
+            list.hidden = true;
+            setTimeout(function () {
+              valueNode.textContent = "";
+            }, revertAfterMs);
+          });
+          list.appendChild(option);
+        });
+      }
+      input.addEventListener("focus", render);
+      input.addEventListener("input", render);
+    }
+
+    function setupBlurRevertingSingleSelect(fieldId, inputId, listId, options, staleValue) {
+      // Commits correctly on click (never swallowed), but this control's
+      // own blur handler resets the display back to a stale prior
+      // country -- the fill's own bounded persistence recheck, which
+      // deliberately blurs the control before its final recheck, must
+      // observe this within the very same fill attempt.
+      var field = document.getElementById(fieldId);
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      var valueNode = field.querySelector(".select__single-value");
+      function render() {
+        var needle = input.value.trim().toLowerCase();
+        var matches = needle
+          ? options.filter(function (text) { return text.toLowerCase().indexOf(needle) !== -1; })
+          : options.slice();
+        list.innerHTML = "";
+        list.hidden = matches.length === 0;
+        matches.forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            valueNode.textContent = text;
+            input.value = "";
+            list.hidden = true;
+          });
+          list.appendChild(option);
+        });
+      }
+      input.addEventListener("focus", render);
+      input.addEventListener("input", render);
+      input.addEventListener("blur", function () {
+        valueNode.textContent = staleValue;
+      });
+    }
+
+    function setupAsyncRevertingSingleSelect(fieldId, inputId, listId, options, staleValue, revertAfterMs) {
+      // Commits correctly on click, but an async re-render unrelated to
+      // blur timing resets the display back to a stale prior country a
+      // short time later -- the same bounded persistence recheck must
+      // still observe this within its own short poll window, never only
+      // a much later independent read-back.
+      var field = document.getElementById(fieldId);
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      var valueNode = field.querySelector(".select__single-value");
+      function render() {
+        var needle = input.value.trim().toLowerCase();
+        var matches = needle
+          ? options.filter(function (text) { return text.toLowerCase().indexOf(needle) !== -1; })
+          : options.slice();
+        list.innerHTML = "";
+        list.hidden = matches.length === 0;
+        matches.forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            valueNode.textContent = text;
+            input.value = "";
+            list.hidden = true;
+            setTimeout(function () {
+              valueNode.textContent = staleValue;
+            }, revertAfterMs);
+          });
+          list.appendChild(option);
+        });
+      }
+      input.addEventListener("focus", render);
+      input.addEventListener("input", render);
+    }
+
+    function setupPlainSingleSelect(fieldWrapperEl, inputId, listId, options) {
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      var valueNode = fieldWrapperEl.querySelector(".select__single-value");
+      function render() {
+        var needle = input.value.trim().toLowerCase();
+        var matches = needle
+          ? options.filter(function (text) { return text.toLowerCase().indexOf(needle) !== -1; })
+          : options.slice();
+        list.innerHTML = "";
+        list.hidden = matches.length === 0;
+        matches.forEach(function (text) {
+          var option = document.createElement("div");
+          option.setAttribute("role", "option");
+          option.textContent = text;
+          option.addEventListener("mousedown", function (event) {
+            event.preventDefault();
+            valueNode.textContent = text;
+            input.value = "";
+            list.hidden = true;
+          });
+          list.appendChild(option);
+        });
+      }
+      input.addEventListener("focus", render);
+      input.addEventListener("input", render);
+    }
+
+    setupCountryWithOther("stripe-country-wrapper", "stripe_country", "stripe-country-listbox", ["Uzbekistan", "Other"]);
+    setupSwallowedClick("swallow-target-field", "swallow_target_country", "swallow-target-listbox", ["France"]);
+    setupStaleUnmount("stale-unmount-field", "stale_unmount_country");
+    setupRevertingSingleSelect("revert-field", "revert_country", "revert-listbox", ["Uzbekistan"], 3000);
+    setupBlurRevertingSingleSelect(
+      "blur-revert-field", "blur_revert_country", "blur-revert-listbox", ["Uzbekistan"], "Brazil"
+    );
+    setupAsyncRevertingSingleSelect(
+      "async-revert-field", "async_revert_country", "async-revert-listbox", ["Uzbekistan"], "Brazil", 80
+    );
+    setupBlurRevertingSingleSelect(
+      "other-blur-revert-wrapper", "other_blur_revert_country", "other-blur-revert-listbox", ["Other"], "Brazil"
+    );
+    setupPlainSingleSelect(
+      document.getElementById("phone-widget"),
+      "phone_dial_country_input",
+      "phone-dial-country-listbox",
+      ["United States (+1)", "Uzbekistan (+998)"]
+    );
+    setupPlainSingleSelect(
+      document.getElementById("residence-country-field"),
+      "candidate_location",
+      "residence-country-listbox",
+      ["Uzbekistan", "Germany"]
+    );
+  </script>
+</body>
+</html>

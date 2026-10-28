@@ -9,6 +9,19 @@ from app.application.candidate_profile import CandidateProfile
 
 _UNSUPPORTED_TYPES = frozenset({"signature", "captcha", "unknown"})
 
+# Greenhouse's phone-widget dialing-code country picker
+# (`greenhouse._PHONE_DIAL_COUNTRY_FIELD_TYPE`, discovered only via its
+# evidenced `.phone-input__country` structural nesting) is never the
+# residence/citizenship/work-country question `QuestionKind.COUNTRY` maps
+# to -- it must stay unresolved regardless of any profile data, and is kept
+# out of `map_question` entirely rather than risk it ever being matched by
+# a country-shaped kind.
+_PHONE_DIAL_COUNTRY_TYPE = "phone_dial_country"
+_PHONE_DIAL_COUNTRY_UNRESOLVED_REASON = (
+    "Phone dialing country code selector (not country of residence/citizenship) "
+    "-- requires manual selection."
+)
+
 
 @dataclass(frozen=True)
 class ClassifiedField:
@@ -25,6 +38,14 @@ class ClassifiedField:
 
 
 def classify_field(field: DiscoveredField, profile: CandidateProfile) -> ClassifiedField:
+    if field.field_type == _PHONE_DIAL_COUNTRY_TYPE:
+        return ClassifiedField(
+            field=field,
+            classification=FieldClassification.UNSUPPORTED,
+            fill=False,
+            kind=QuestionKind.UNKNOWN,
+            unresolved_reason=_PHONE_DIAL_COUNTRY_UNRESOLVED_REASON,
+        )
     if field.field_type in _UNSUPPORTED_TYPES:
         return ClassifiedField(
             field=field,

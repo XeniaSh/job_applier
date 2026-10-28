@@ -36,7 +36,7 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 
 ---
 
-## Current capability and acceptance checkpoint — 2026-10-27
+## Current capability and acceptance checkpoint — 2026-10-28
 
 - Greenhouse, Lever and Ashby have runtime discovery, resolver, Telegram Prepare
   routing and autofill implementations. SmartRecruiters has a standalone watcher
@@ -53,9 +53,11 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   title passes have analysis; no starvation established for those identities.
   Halter's one-title correction (`4e7f5d9`) is locally verified; subsequent
   production admission/analysis remains unmeasured. No cache replay is planned.
-- Greenhouse residence-country clearing/confirmation remains unresolved pending
-  scoped rendered-control evidence. Do not substitute Other without explicit
-  instructions on that question or confuse residence with phone dialing country.
+- Greenhouse country correction is accepted locally: phone dialing country is
+  manual, residence verification uses only committed local state and checks
+  persistence after blur. Other requires that question's explicit instruction.
+  Forty-seven focused country tests pass; full supervised Prepare acceptance is
+  pending. Uncertain values and unconfirmed clearing remain manual.
 - Current approved order: TASK-090 profile safety first; report its findings
   before TASK-091 country evidence/fix; then TASK-092 read-only SmartRecruiters
   pilot; then TASK-093 isolated scoring evaluation. Each is a separate iteration.
@@ -1632,7 +1634,7 @@ manual Submit, existing caches and the drained-backlog behavior intact.
 
 ### TASK-091 — Greenhouse country combobox evidence and confirmed correction
 
-- **Status:** approved, not started — scoped rendered-control evidence required
+- **Status:** accepted locally — automated verification passed; supervised Prepare acceptance pending
 - **Depends on:** TASK-090 findings reported; rendered evidence for the failing control.
 - **Goal:** Fix only a demonstrated selection/clearing/verification defect.
 - **Acceptance criteria:** Distinguish phone dialing-country from residence;
@@ -1645,6 +1647,19 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   negative read-back/clearing cases and connected service regressions.
 - **Supervised acceptance:** Separate no-submit visual check of the affected
   control after local verification; fixture success alone is insufficient.
+- **Evidence and local acceptance (2026-10-27/28):** Public blank forms inspected
+  for Elastic 8315564, Stripe 8301379/6176758 and Asana 8319678. The generic
+  Country control is a phone dialing-country picker, retained as manual;
+  Stripe residence has separate, explicit Other instructions. The fix rejects
+  typed search, placeholders, sibling confirmation, hidden/unreadable state and
+  reverted values. Both ordinary and Other selections must survive blur and a
+  bounded settle window. Unproven clearing keeps the manual-correction warning;
+  no automatic keyboard clear was added. Thirty-two country fake-DOM and fifteen
+  real-browser tests pass, including service manual-field/no-submit coverage.
+  See `docs/greenhouse-country-control-evidence.md` for evidence, compatibility
+  checks, the unrelated pre-existing diagnostic failure and supervised steps.
+  No real candidate Prepare acceptance is claimed. Stop at this iteration's
+  report; SmartRecruiters is a separate next iteration.
 
 ### TASK-092 — One-employer read-only SmartRecruiters discovery pilot
 
