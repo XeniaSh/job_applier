@@ -39,8 +39,9 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 ## Current capability and acceptance checkpoint — 2026-10-28
 
 - Greenhouse, Lever and Ashby have runtime discovery, resolver, Telegram Prepare
-  routing and autofill implementations. SmartRecruiters has a standalone watcher
-  prototype; Workday has no collector; HH remains CLI-only.
+  routing and autofill implementations. SmartRecruiters has verified standalone
+  read-only discovery and a completed Wise pilot; production wiring is disabled.
+  Workday has no collector; HH remains CLI-only.
 - Four resume variants and their shared selection/attachment path are implemented
   (`23de715`); Greenhouse completed-widget verification is implemented (`1a7b24a`).
   Preserve all four variants. Local automated tests do not replace outstanding
@@ -242,9 +243,10 @@ Everything listed below was the "main remaining work" as of 2026-09-10 and is no
 - `data/prepared/` retention (TASK-049) is a fixed 14-day age rule for LinkedIn cover-letter artifacts only; there is no CLI command to trigger cleanup on demand.
 - Lever/Ashby/SmartRecruiters watchers exist (`app/company_watch/watchers/`, TASK-042..044).
   Greenhouse, Lever and Ashby are wired into runtime discovery and Prepare.
-  SmartRecruiters remains standalone and needs pagination, posting details and
-  public URLs before its approved read-only pilot. `custom` / `manual` entries
-  have no generic watcher. Per-site unsupported forms still require evidence;
+  SmartRecruiters standalone pagination, posting details, canonical public URLs
+  and deduplication are locally verified; its Wise read-only pilot is complete.
+  Runtime integration is not enabled. `custom` / `manual` entries have no generic
+  watcher. Per-site unsupported forms still require evidence;
   do not infer universal form coverage from an implemented ATS adapter.
 - Generic Greenhouse jobs in `run` are delivered to the LinkedIn Telegram destination. This matches “current discovery”, not Target Companies.
 - HH exists as CLI-only collection (`OQ-007`), not part of `run`.
@@ -928,7 +930,7 @@ Watchers belong in `app/company_watch/watchers/`. Autofill adapters belong in th
 
 ### TASK-044 — SmartRecruiters Target Company watcher
 
-- **Status:** partial — standalone prototype exists; completeness/pilot tracked in TASK-092
+- **Status:** standalone discovery verified — TASK-092 pilot complete; runtime integration disabled
 - **Depends on:** none
 - **Goal:** Same as TASK-042 for SmartRecruiters.
 - **Area:** company_watch watchers
@@ -1663,7 +1665,7 @@ manual Submit, existing caches and the drained-backlog behavior intact.
 
 ### TASK-092 — One-employer read-only SmartRecruiters discovery pilot
 
-- **Status:** approved, not started — not production wiring
+- **Status:** complete — bounded read-only Wise pilot; production integration decision pending
 - **Depends on:** TASK-091 checkpoint; a currently verified public employer board.
 - **Goal:** Complete and measure the standalone watcher for one employer before
   deciding whether its yield merits production integration.
@@ -1678,6 +1680,24 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   deduplication/error cases and existing non-SmartRecruiters regressions.
 - **Acceptance checkpoint:** Review measured pilot yield before any production
   wiring; Workday and HH remain outside this phase.
+- **Observed yield (2026-10-28):** Wise public API: 417 rows/unique posting IDs,
+  five pages, 49 title matches with full details (54 GETs); no errors, duplicates
+  or bound truncation. Manual review: 34 Java/JVM backend postings, including two
+  substantive Java + AI integrations. Among the 34, one explicitly offers
+  relocation/visa support, five have explicit local/relocation/sponsorship
+  restrictions, and 28 leave the policy unknown. Other 15 matches remain separate.
+  No NZ posting was present in the 417 raw records. Personal eligibility and
+  new-to-user counts were not established.
+- **Verification:** 63 focused SmartRecruiters/script tests and 61 existing
+  GH/Lever/Ashby/prefilter regressions passed; Ruff/diff checks passed. Corrected
+  code and isolated script replayed the saved public snapshot with all 49
+  identities, URLs, locations and descriptions unchanged; no additional live
+  scan. See `docs/smartrecruiters-wise-pilot.md` for the full reviewed inventory,
+  limitations and a Wise-only integration recommendation. No production config,
+  scheduler, cache/DB, Telegram, Prepare, application or scoring changes.
+- **Human checkpoint:** Review the pilot report before authorizing Wise-only
+  production discovery. Stop after this iteration; TASK-093 scoring evaluation
+  remains a separate, unstarted iteration.
 
 ### TASK-093 — Isolated evaluation of historical scoring/filter decisions
 
