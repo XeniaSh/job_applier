@@ -1,0 +1,9 @@
+#!/bin/zsh
+# Thin entry point; needs the executable bit (chmod +x) or run as `zsh scripts/job-claude`.
+set -euo pipefail
+
+ROOT="${0:A:h:h}"
+PY="$ROOT/.venv/bin/python"
+[[ -x "$PY" ]] || PY=/usr/bin/python3
+
+exec "$PY" "$ROOT/scripts/job_claude.py" "$@"
