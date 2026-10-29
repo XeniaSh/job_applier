@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import app.cli as cli_module
@@ -13,6 +14,11 @@ from app.company_watch.seniority import SeniorityClassification
 from app.company_watch.watchers.greenhouse import GreenhouseWatchResult
 from app.company_watch.watchers.lever import LeverWatchResult
 from app.company_watch.watchers.ashby import AshbyCompanyError, AshbyWatchResult
+from app.company_watch.watchers.smartrecruiters import (
+    SmartRecruitersCompanyError,
+    SmartRecruitersJobError,
+    SmartRecruitersWatchResult,
+)
 from app.models import (
     Decision,
     RecommendedCoverTemplate,
@@ -69,6 +75,28 @@ ASHBY_COMPANY_CONFIG = """  - name: TravelPerk
 
 ASHBY_ONLY_CONFIG = "companies:\n" + ASHBY_COMPANY_CONFIG
 
+SMARTRECRUITERS_WISE_COMPANY_CONFIG = """  - name: Wise
+    priority: A
+    language: english
+    relocation_status: mixed_check_per_role
+    watcher_type: smartrecruiters
+    ats: smartrecruiters
+    job_board_url: https://careers.smartrecruiters.com/Wise
+    role_keywords: [java, backend]
+"""
+
+SMARTRECRUITERS_CANVA_COMPANY_CONFIG = """  - name: Canva
+    priority: A
+    language: english
+    relocation_status: confirmed_role_based
+    watcher_type: smartrecruiters
+    ats: smartrecruiters
+    job_board_url: https://careers.smartrecruiters.com/canva
+    role_keywords: [java, backend]
+"""
+
+SMARTRECRUITERS_ONLY_CONFIG = "companies:\n" + SMARTRECRUITERS_WISE_COMPANY_CONFIG
+
 
 def _constraints() -> CandidateConstraints:
     return CandidateConstraints(
@@ -82,7 +110,14 @@ def _constraints() -> CandidateConstraints:
     )
 
 
-def _evaluation(decision: Decision = Decision.POTENTIAL_MATCH) -> VacancyEvaluation:
+def _evaluation(
+    decision: Decision = Decision.POTENTIAL_MATCH,
+    *,
+    visa_sponsorship: str = "unknown",
+    relocation_support: str = "unknown",
+    work_authorization_requirement: str = "unknown",
+    language_requirements: list[str] | None = None,
+) -> VacancyEvaluation:
     return VacancyEvaluation(
         decision=decision,
         summary="summary",
@@ -97,6 +132,10 @@ def _evaluation(decision: Decision = Decision.POTENTIAL_MATCH) -> VacancyEvaluat
         evidence_sufficient=True,
         recommended_resume=RecommendedResume.JAVA,
         recommended_cover_template=RecommendedCoverTemplate.GENERIC,
+        visa_sponsorship=visa_sponsorship,
+        relocation_support=relocation_support,
+        work_authorization_requirement=work_authorization_requirement,
+        language_requirements=language_requirements or [],
     )
 
 
@@ -170,6 +209,30 @@ def _ashby_vacancy(
     )
 
 
+def _smartrecruiters_vacancy(
+    *,
+    company: str = "Wise",
+    board: str = "Wise",
+    external_id: str = "901",
+    title: str = "Java Backend Engineer",
+    description: str = "Java backend services",
+    location: str = "Tallinn, Estonia",
+    url: str | None = None,
+    published_at: str | None = "2026-09-05T10:00:00Z",
+) -> NormalizedVacancy:
+    return NormalizedVacancy(
+        source=f"target_company:smartrecruiters:{board.lower()}",
+        external_id=external_id,
+        title=title,
+        company=company,
+        location=location,
+        employment="Full-time",
+        description=description,
+        url=url or f"https://jobs.smartrecruiters.com/{board}/{external_id}",
+        published_at=published_at,
+    )
+
+
 def _feasibility() -> ApplicationFeasibility:
     return ApplicationFeasibility(
         label="UNCLEAR",
@@ -192,6 +255,8 @@ def _write_config(
     *,
     include_lever: bool = False,
     include_ashby: bool = False,
+    include_smartrecruiters: bool = False,
+    include_unapproved_smartrecruiters: bool = False,
 ) -> Path:
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -200,6 +265,8 @@ def _write_config(
         MINIMAL_CONFIG
         + (LEVER_COMPANY_CONFIG if include_lever else "")
         + (ASHBY_COMPANY_CONFIG if include_ashby else "")
+        + (SMARTRECRUITERS_WISE_COMPANY_CONFIG if include_smartrecruiters else "")
+        + (SMARTRECRUITERS_CANVA_COMPANY_CONFIG if include_unapproved_smartrecruiters else "")
     )
     config_file.write_text(content, encoding="utf-8")
     return config_file
@@ -254,6 +321,31 @@ def _fake_ashby_watcher(vacancies: list[NormalizedVacancy], *, errors: list[obje
     return FakeAshbyWatcher()
 
 
+def _fake_smartrecruiters_watcher(
+    vacancies: list[NormalizedVacancy],
+    *,
+    errors: list[object] | None = None,
+    job_errors: list[object] | None = None,
+    captured_companies: list[object] | None = None,
+    raw_fetched: int | None = None,
+    title_matched_count: int | None = None,
+):
+    class FakeSmartRecruitersWatcher:
+        def watch(self, companies: object) -> SmartRecruitersWatchResult:
+            if captured_companies is not None:
+                captured_companies.extend(companies)
+            return SmartRecruitersWatchResult(
+                vacancies=list(vacancies),
+                errors=list(errors or []),
+                job_errors=list(job_errors or []),
+                raw_fetched=len(vacancies) if raw_fetched is None else raw_fetched,
+                title_matched_count=len(vacancies) if title_matched_count is None else title_matched_count,
+                detail_fetched_count=len(vacancies),
+            )
+
+    return FakeSmartRecruitersWatcher()
+
+
 class _CountingAnalyzer:
     def __init__(self, evaluation: VacancyEvaluation | None = None) -> None:
         self.calls: list[str] = []
@@ -288,6 +380,14 @@ def _run_cycle(
     ashby_vacancies: list[NormalizedVacancy] | None = None,
     ashby_errors: list[object] | None = None,
     include_ashby_company: bool = False,
+    smartrecruiters_vacancies: list[NormalizedVacancy] | None = None,
+    smartrecruiters_errors: list[object] | None = None,
+    smartrecruiters_job_errors: list[object] | None = None,
+    include_smartrecruiters_company: bool = False,
+    include_unapproved_smartrecruiters_company: bool = False,
+    smartrecruiters_captured_companies: list[object] | None = None,
+    smartrecruiters_raw_fetched: int | None = None,
+    smartrecruiters_title_matched_count: int | None = None,
     analyzer: _CountingAnalyzer | None = None,
     telegram: _FakeTelegram | None = None,
     deliveries: TelegramDeliveryStorage | None = None,
@@ -303,6 +403,8 @@ def _run_cycle(
         tmp_path,
         include_lever=include_lever_company,
         include_ashby=include_ashby_company,
+        include_smartrecruiters=include_smartrecruiters_company,
+        include_unapproved_smartrecruiters=include_unapproved_smartrecruiters_company,
     )
     monkeypatch.setattr(cli_module, "load_candidate_constraints", lambda path: _constraints())
     analyzer = analyzer or _CountingAnalyzer()
@@ -319,6 +421,14 @@ def _run_cycle(
         watcher=_fake_watcher(vacancies),
         lever_watcher=_fake_lever_watcher(lever_vacancies or []),
         ashby_watcher=_fake_ashby_watcher(ashby_vacancies or [], errors=ashby_errors),
+        smartrecruiters_watcher=_fake_smartrecruiters_watcher(
+            smartrecruiters_vacancies or [],
+            errors=smartrecruiters_errors,
+            job_errors=smartrecruiters_job_errors,
+            captured_companies=smartrecruiters_captured_companies,
+            raw_fetched=smartrecruiters_raw_fetched,
+            title_matched_count=smartrecruiters_title_matched_count,
+        ),
         telegram_client=telegram,
     )
     return result, analyzer, telegram, deliveries
@@ -1496,7 +1606,7 @@ def test_provider_funnel_counts_watcher_errors_without_leaking_details(
 
     out = capsys.readouterr().out
     funnel_lines = [line for line in out.splitlines() if "Target companies funnel[" in line]
-    assert len(funnel_lines) == 3  # one each for greenhouse, lever, ashby
+    assert len(funnel_lines) == 4  # one each for greenhouse, lever, ashby, smartrecruiters
     for line in funnel_lines:
         assert "secret" not in line
         assert "leaked" not in line
@@ -1917,3 +2027,593 @@ def test_run_cycle_provider_fair_selection_does_not_starve_ashby(monkeypatch, tm
     assert result.provider_funnels["ashby"].selected == 1
     assert result.provider_funnels["greenhouse"].selected == 3
     assert result.selected == 4
+
+
+# --- SmartRecruiters (Wise-only discovery pilot) -----------------------------
+
+
+def test_smartrecruiters_watcher_is_combined_with_other_providers(monkeypatch, tmp_path: Path) -> None:
+    gh_vacancy = _vacancy(external_id="1", title="Java Backend Engineer")
+    lever_vacancy = _lever_vacancy(external_id="501", title="Kotlin Backend Engineer")
+    ashby_vacancy = _ashby_vacancy(external_id="701", title="Go Backend Engineer")
+    wise_vacancy = _smartrecruiters_vacancy(external_id="901", title="Java Backend Engineer")
+    result, analyzer, telegram, deliveries = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[gh_vacancy],
+        lever_vacancies=[lever_vacancy],
+        include_lever_company=True,
+        ashby_vacancies=[ashby_vacancy],
+        include_ashby_company=True,
+        smartrecruiters_vacancies=[wise_vacancy],
+        include_smartrecruiters_company=True,
+    )
+
+    assert result.watched == 4
+    assert result.sent == 4
+    assert {getattr(card, "source") for card in telegram.cards} == {
+        gh_vacancy.source,
+        lever_vacancy.source,
+        ashby_vacancy.source,
+        wise_vacancy.source,
+    }
+    assert deliveries.get_message_ref(
+        source=wise_vacancy.source,
+        external_id=wise_vacancy.external_id,
+        chat_id="222",
+    ) is not None
+
+
+def test_unapproved_smartrecruiters_board_is_never_collected(monkeypatch, tmp_path: Path) -> None:
+    captured: list[object] = []
+    wise_vacancy = _smartrecruiters_vacancy(external_id="901", title="Java Backend Engineer")
+    result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[wise_vacancy],
+        include_smartrecruiters_company=True,
+        include_unapproved_smartrecruiters_company=True,
+        smartrecruiters_captured_companies=captured,
+    )
+
+    # Canva is configured as a SmartRecruiters target elsewhere in the real
+    # config, but this integration is approved for Wise only: the runtime
+    # allowlist must filter Canva out before the watcher is ever called.
+    assert [company.name for company in captured] == ["Wise"]
+    assert result.provider_funnels["smartrecruiters"].configured_companies == 1
+    assert result.sent == 1
+    assert telegram.cards
+    assert getattr(telegram.cards[0], "source") == wise_vacancy.source
+
+
+def test_wise_canonical_url_gate_rejects_malformed_paths(monkeypatch, tmp_path: Path) -> None:
+    # Discovered via SmartRecruiters (source=target_company:smartrecruiters:wise),
+    # but none of these URLs is Wise's own canonical public posting path --
+    # see cli._is_canonical_wise_smartrecruiters_url.
+    api_host = _smartrecruiters_vacancy(
+        external_id="1", url="https://api.smartrecruiters.com/v1/companies/Wise/postings/1"
+    )
+    extra_segment = _smartrecruiters_vacancy(
+        external_id="2", url="https://jobs.smartrecruiters.com/Wise/2/apply"
+    )
+    malformed_empty_path = _smartrecruiters_vacancy(
+        external_id="3", url="https://jobs.smartrecruiters.com/"
+    )
+    wrong_board = _smartrecruiters_vacancy(
+        external_id="4", url="https://jobs.smartrecruiters.com/canva/4"
+    )
+    wrong_id = _smartrecruiters_vacancy(
+        external_id="5", url="https://jobs.smartrecruiters.com/Wise/999"
+    )
+    remaining = _smartrecruiters_vacancy(external_id="6", title="Office Coordinator")
+    analyzer = _CountingAnalyzer()
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[
+            api_host,
+            extra_segment,
+            malformed_empty_path,
+            wrong_board,
+            wrong_id,
+            remaining,
+        ],
+        include_smartrecruiters_company=True,
+        analyzer=analyzer,
+        analyze_limit=1,
+        analyze_limit_per_company=1,
+    )
+
+    assert result.dropped_unsupported_form == 5
+    assert result.selected == 1
+    assert len(analyzer.calls) == 1
+    assert "Office Coordinator" in analyzer.calls[0]
+    assert telegram.cards
+    assert getattr(telegram.cards[0], "external_id") == "6"
+
+
+def test_provider_funnel_counts_smartrecruiters(monkeypatch, tmp_path: Path, capsys) -> None:
+    wise_vacancy = _smartrecruiters_vacancy(external_id="901", title="Java Backend Engineer")
+    job_error = SmartRecruitersJobError(
+        company_name="Wise",
+        posting_id="999",
+        message="fetch failed",
+        error_type="RequestError",
+    )
+    result, analyzer, telegram, deliveries = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[wise_vacancy],
+        include_smartrecruiters_company=True,
+        smartrecruiters_job_errors=[job_error],
+    )
+
+    sr = result.provider_funnels["smartrecruiters"]
+    assert sr.configured_companies == 1
+    assert sr.raw_fetched == 1
+    assert sr.title_prefilter_pass == 1
+    assert sr.watcher_errors == 1  # SmartRecruitersJobError folded into watcher_errors
+    assert sr.post_gate_candidates == 1
+    assert sr.selected == 1
+    assert sr.analyzed == 1
+    assert sr.sent == 1
+
+    out = capsys.readouterr().out
+    sr_lines = [line for line in out.splitlines() if "Target companies funnel[smartrecruiters]:" in line]
+    assert len(sr_lines) == 1
+    assert "configured=1" in sr_lines[0]
+    assert "sent=1" in sr_lines[0]
+
+    bounds_lines = [line for line in out.splitlines() if "Target companies smartrecruiters bounds:" in line]
+    assert len(bounds_lines) == 1
+    assert "job_errors=1" in bounds_lines[0]
+
+
+def test_provider_funnel_counts_smartrecruiters_errors_without_leaking_details(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[],
+        smartrecruiters_errors=[
+            SmartRecruitersCompanyError(
+                company_name="Wise",
+                message="super secret internal failure detail",
+                response_snippet="<html>leaked-response-body</html>",
+                status_code=500,
+            )
+        ],
+        include_smartrecruiters_company=True,
+    )
+
+    sr = result.provider_funnels["smartrecruiters"]
+    assert sr.configured_companies == 1
+    assert sr.raw_fetched == 0
+    assert sr.title_prefilter_pass == 0
+    assert sr.watcher_errors == 1
+    assert sr.post_gate_candidates == 0
+    assert sr.selected == 0
+    assert sr.analyzed == 0
+    assert sr.sent == 0
+
+    out = capsys.readouterr().out
+    _assert_no_private_values_leaked(
+        out, "super secret internal failure detail", "leaked-response-body"
+    )
+
+
+def test_wise_positive_sponsorship_wording_reaches_apply_now(monkeypatch, tmp_path: Path) -> None:
+    # Real, genuinely positive Wise wording must keep working exactly as
+    # the shared feasibility/recommendation logic already handles it.
+    vacancy = _smartrecruiters_vacancy(
+        external_id="1",
+        title="Senior Backend Engineer - Rules Platform",
+        description=(
+            "Hybrid working in Tallinn, Estonia (with relocation and visa sponsorship "
+            "support, if needed)."
+        ),
+    )
+    analyzer = _CountingAnalyzer(
+        _evaluation(Decision.STRONG_MATCH, visa_sponsorship="yes", relocation_support="yes")
+    )
+    result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.outcome_counts.eligible == 1
+    assert result.sent == 1
+    assert telegram.cards
+    assert getattr(telegram.cards[0], "source") == vacancy.source
+
+
+def test_wise_unknown_sponsorship_stays_check_manually(monkeypatch, tmp_path: Path) -> None:
+    vacancy = _smartrecruiters_vacancy(
+        external_id="2",
+        title="Senior Backend Engineer",
+        description="Build backend services in Java and Kotlin.",
+    )
+    analyzer = _CountingAnalyzer(_evaluation(Decision.POTENTIAL_MATCH))
+    result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=analyzer,
+    )
+
+    # CHECK_MANUALLY (unclear sponsorship/relocation) is still deliverable
+    # for manual review -- not SKIP, not APPLY_NOW.
+    assert result.outcome_counts.eligible == 1
+    assert result.sent == 1
+    assert telegram.cards
+
+
+def test_wise_explicit_sponsorship_refusal_skips_when_sponsorship_required(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Real Wise wording: the shared substring scanner's "visa sponsorship"
+    # yes-marker false-positives on "...or visa sponsorship" here. The
+    # Wise-only correction must recognize this as an explicit refusal and,
+    # because the candidate's constraints require sponsorship, SKIP with a
+    # truthful reason instead of the old APPLY_NOW bug.
+    vacancy = _smartrecruiters_vacancy(
+        external_id="3",
+        title="Backend Engineer",
+        description="We are unable to support relocation or visa sponsorship for this role.",
+    )
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+    result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.outcome_counts.eligible == 0
+    assert result.outcome_counts.other_skip == 1
+    assert result.sent == 0
+    assert telegram.cards == []
+
+
+def test_wise_local_candidates_transfer_only_wording_stays_check_manually_with_warning(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Real Wise wording: "transfer of visa sponsorship" also contains the
+    # generic "visa sponsorship" yes-marker, but this is a local-only /
+    # existing-visa-transfer qualifier, never a general sponsorship offer.
+    # Must stay CHECK_MANUALLY (never SKIP, never APPLY_NOW) with an
+    # explicit manual-check warning reaching the Telegram card.
+    vacancy = _smartrecruiters_vacancy(
+        external_id="4",
+        title="Backend Engineer",
+        description=(
+            "We are currently only considering local candidates as relocation support is "
+            "not provided. For local candidates we are able to support transfer of visa "
+            "sponsorship."
+        ),
+    )
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+    result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.outcome_counts.eligible == 1
+    assert result.outcome_counts.other_skip == 0
+    assert result.sent == 1
+    assert telegram.cards
+    card = telegram.cards[0]
+    assert any("candidate local status/authorization unknown" in w for w in card.warnings)
+
+
+def test_wise_existing_work_authorization_blocker_preserved(monkeypatch, tmp_path: Path) -> None:
+    # Unrelated to the Wise-only correction: the shared hard blocker for a
+    # required local work right without visa/relocation support must keep
+    # working exactly as before.
+    vacancy = _smartrecruiters_vacancy(
+        external_id="5",
+        title="Backend Engineer",
+        description="Must have the right to work in the UK. No visa sponsorship is provided.",
+    )
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.outcome_counts.work_auth == 1
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+
+
+def test_wise_technical_ignore_decision_preserved(monkeypatch, tmp_path: Path) -> None:
+    vacancy = _smartrecruiters_vacancy(
+        external_id="6",
+        title="Backend Engineer",
+        description="Build backend services in Java and Kotlin.",
+    )
+    analyzer = _CountingAnalyzer(_evaluation(Decision.IGNORE))
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.outcome_counts.llm_ignore == 1
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+
+
+def test_wise_excluded_seniority_preserved(monkeypatch, tmp_path: Path) -> None:
+    vacancy = _smartrecruiters_vacancy(
+        external_id="7",
+        title="Engineering Manager - Backend",
+        description="Build backend services in Java and Kotlin.",
+    )
+    analyzer = _CountingAnalyzer(_evaluation(Decision.STRONG_MATCH))
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.outcome_counts.excluded_seniority == 1
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+
+
+def test_wise_missing_required_language_preserved(monkeypatch, tmp_path: Path) -> None:
+    vacancy = _smartrecruiters_vacancy(
+        external_id="8",
+        title="Backend Engineer",
+        description="Build backend services in Java and Kotlin.",
+    )
+    analyzer = _CountingAnalyzer(
+        _evaluation(Decision.STRONG_MATCH, language_requirements=["french"])
+    )
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=analyzer,
+    )
+
+    assert result.outcome_counts.missing_languages == 1
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+
+
+# --- Wise correction follow-ups -------------------------------------------------
+
+_WISE_CONDITIONAL = (
+    "We are currently only considering local candidates as relocation support is not "
+    "provided. For local candidates we are able to support transfer of visa sponsorship."
+)
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Please note we do not offer relocation support or VISA sponsorship for this role.",
+        "We do not offer visa sponsorship for this role.",
+    ],
+)
+def test_wise_visa_refusal_phrasings_skip_when_sponsorship_required(
+    monkeypatch, tmp_path: Path, description: str
+) -> None:
+    vacancy = _smartrecruiters_vacancy(external_id="20", title="Backend Engineer", description=description)
+    result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=_CountingAnalyzer(_evaluation(Decision.STRONG_MATCH)),
+    )
+
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+    assert telegram.cards == []
+
+
+def test_wise_transfer_wording_with_legal_right_to_work_stays_skip(monkeypatch, tmp_path: Path) -> None:
+    vacancy = _smartrecruiters_vacancy(
+        external_id="21",
+        title="Backend Engineer",
+        description=_WISE_CONDITIONAL + " Candidates must have legal right to work in the UK.",
+    )
+    result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=_CountingAnalyzer(_evaluation(Decision.STRONG_MATCH)),
+    )
+
+    assert result.outcome_counts.eligible == 0
+    assert result.sent == 0
+    assert telegram.cards == []
+
+
+def test_wise_conditional_with_remote_boost_is_manual_not_skipped(monkeypatch, tmp_path: Path) -> None:
+    vacancy = _smartrecruiters_vacancy(
+        external_id="22",
+        title="Backend Engineer",
+        description="Remote worldwide. " + _WISE_CONDITIONAL,
+    )
+    result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=_CountingAnalyzer(_evaluation(Decision.STRONG_MATCH)),
+    )
+
+    assert result.sent == 1
+    assert any("local status/authorization unknown" in w for w in telegram.cards[0].warnings)
+
+
+def test_wise_conditional_wording_never_promotes_technical_ignore(monkeypatch, tmp_path: Path) -> None:
+    vacancy = _smartrecruiters_vacancy(external_id="23", title="Backend Engineer", description=_WISE_CONDITIONAL)
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=_CountingAnalyzer(_evaluation(Decision.IGNORE)),
+    )
+
+    assert result.outcome_counts.llm_ignore == 1
+    assert result.sent == 0
+
+
+def test_wise_card_puts_wise_warning_and_manual_info_first(monkeypatch, tmp_path: Path) -> None:
+    vacancy = _smartrecruiters_vacancy(external_id="24", title="Backend Engineer", description=_WISE_CONDITIONAL)
+    evaluation = _evaluation(Decision.STRONG_MATCH).model_copy(
+        update={
+            "warning_signals": [{"code": f"w{i}", "evidence": f"warning {i}"} for i in range(5)],
+            "info_items": [f"info {i}" for i in range(6)],
+        }
+    )
+    _result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[vacancy],
+        include_smartrecruiters_company=True,
+        analyzer=_CountingAnalyzer(evaluation),
+    )
+
+    card = telegram.cards[0]
+    assert card.warnings[0].startswith("Wise:")
+    assert "not confirmed" in card.warnings[0]
+    assert "not offered" not in card.warnings[0]
+    assert "employer" in card.info_items[0]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user@jobs.smartrecruiters.com/Wise/30",
+        "https://jobs.smartrecruiters.com:8443/Wise/30",
+        "https://jobs.smartrecruiters.com/Wise/30?ref=x",
+        "https://jobs.smartrecruiters.com/Wise/30#apply",
+        "https://jobs.smartrecruiters.com/Wise/30/apply",
+    ],
+)
+def test_wise_canonical_url_gate_rejects_userinfo_port_query_fragment(
+    monkeypatch, tmp_path: Path, url: str
+) -> None:
+    bad = _smartrecruiters_vacancy(external_id="30", url=url)
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[bad],
+        include_smartrecruiters_company=True,
+    )
+
+    assert result.dropped_unsupported_form == 1
+    assert result.sent == 0
+
+
+def test_wise_canonical_url_gate_accepts_slug_and_rejects_wrong_source(monkeypatch, tmp_path: Path) -> None:
+    good = _smartrecruiters_vacancy(
+        external_id="31", url="https://jobs.smartrecruiters.com/Wise/31-backend-engineer"
+    )
+    wrong_source = _smartrecruiters_vacancy(
+        external_id="32", board="Canva", url="https://jobs.smartrecruiters.com/Wise/32"
+    )
+    result, _analyzer, telegram, _ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[good, wrong_source],
+        include_smartrecruiters_company=True,
+    )
+
+    assert result.dropped_unsupported_form == 1
+    assert [getattr(card, "external_id") for card in telegram.cards] == ["31"]
+
+
+def test_smartrecruiters_funnel_title_prefilter_counts_title_matches_not_details(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Realistic partial run: 5 listed, 3 title-matched, only 1 detail succeeded.
+    job_errors = [
+        SmartRecruitersJobError(
+            company_name="Wise", posting_id=str(pid), message="fetch failed", error_type="RequestError"
+        )
+        for pid in (41, 42)
+    ]
+    result, *_ = _run_cycle(
+        monkeypatch,
+        tmp_path,
+        vacancies=[],
+        smartrecruiters_vacancies=[_smartrecruiters_vacancy(external_id="40")],
+        smartrecruiters_job_errors=job_errors,
+        include_smartrecruiters_company=True,
+        smartrecruiters_raw_fetched=5,
+        smartrecruiters_title_matched_count=3,
+    )
+
+    sr = result.provider_funnels["smartrecruiters"]
+    assert sr.raw_fetched == 5
+    assert sr.title_prefilter_pass == 3
+    assert sr.watcher_errors == 2
+
+
+def test_no_smartrecruiters_watcher_constructed_when_no_wise_config(monkeypatch, tmp_path: Path) -> None:
+    def _forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SmartRecruiters watcher must not be constructed without a Wise config")
+
+    monkeypatch.setattr(cli_module, "SmartRecruitersTargetWatcher", _forbidden)
+    cli_module._TARGET_COMPANY_SENT_IN_PROCESS.clear()
+    _set_base_env(monkeypatch, tmp_path, target_chat_id="222")
+    config_file = _write_config(tmp_path)
+    monkeypatch.setattr(cli_module, "load_candidate_constraints", lambda path: _constraints())
+    result = cli_module._run_target_companies_cycle(
+        settings=cli_module.Settings(),
+        analyzer=_CountingAnalyzer(),
+        deliveries=TelegramDeliveryStorage(db_path=tmp_path / "jobs.db"),
+        config_path=config_file,
+        cache_path=tmp_path / "analysis_cache.json",
+        watcher=_fake_watcher([]),
+        lever_watcher=_fake_lever_watcher([]),
+        ashby_watcher=_fake_ashby_watcher([]),
+        telegram_client=_FakeTelegram(),
+    )
+
+    assert result.provider_funnels["smartrecruiters"].configured_companies == 0

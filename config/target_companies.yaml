@@ -65,16 +65,19 @@ companies:
     language: english
     russian_speaking_signal: false
     hiring_modes: [relocation, hybrid]
-    relocation_status: confirmed_role_based
+    relocation_status: mixed_check_per_role
     known_hiring_locations: [Tallinn, London, Budapest, Singapore]
     remote: limited
     java_backend_relevance: very_high
     role_keywords: [backend, java, kotlin, payments, financial crime, platform]
-    ats: smartrecruiters_attrax
-    watcher_type: custom
+    role_title_keywords: [java, kotlin, backend, back-end, software engineer, platform engineer]
+    ats: smartrecruiters
+    watcher_type: smartrecruiters
     career_url: https://wise.jobs/
-    job_board_url: https://wise.jobs/Jobs
+    job_board_url: https://careers.smartrecruiters.com/Wise
     notes:
+      - Verified public SmartRecruiters board (slug Wise) via the read-only postings API.
+      - "relocation_status is mixed_check_per_role: relocation/visa sponsorship wording varies per posting (including explicit refusals and local-only/transfer-only qualifiers) and must never be assumed from this company-level metadata."
       - Tallinn is especially interesting because some roles mention relocation support.
       - London/Budapest sponsorship may be stricter; check each role.
 

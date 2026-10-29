@@ -36,11 +36,13 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 
 ---
 
-## Current capability and acceptance checkpoint — 2026-10-28
+## Current capability and acceptance checkpoint — 2026-10-29
 
 - Greenhouse, Lever and Ashby have runtime discovery, resolver, Telegram Prepare
   routing and autofill implementations. SmartRecruiters has verified standalone
-  read-only discovery and a completed Wise pilot; production wiring is disabled.
+  read-only discovery and a completed Wise pilot. TASK-094 adds Wise-only regular
+  discovery with manual employer-site applications; local verification passes,
+  and the first supervised production run remains pending.
   Workday has no collector; HH remains CLI-only.
 - Four resume variants and their shared selection/attachment path are implemented
   (`23de715`); Greenhouse completed-widget verification is implemented (`1a7b24a`).
@@ -59,9 +61,11 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   persistence after blur. Other requires that question's explicit instruction.
   Forty-seven focused country tests pass; full supervised Prepare acceptance is
   pending. Uncertain values and unconfirmed clearing remain manual.
-- Current approved order: TASK-090 profile safety first; report its findings
-  before TASK-091 country evidence/fix; then TASK-092 read-only SmartRecruiters
-  pilot; then TASK-093 isolated scoring evaluation. Each is a separate iteration.
+- TASK-090 profile safety, TASK-091 country correction and TASK-092 discovery
+  pilot have completed their local iterations. The user approved TASK-094
+  Wise-only production discovery next, ahead of TASK-093 scoring evaluation.
+  Stop after TASK-094's verified commit/report; supervised production acceptance
+  remains separate from automated verification.
 - No automatic submission, CAPTCHA bypass, Workday/HH expansion, broad refactor,
   production cache reset or whole-backlog reanalysis is authorized in this phase.
 
@@ -245,7 +249,8 @@ Everything listed below was the "main remaining work" as of 2026-09-10 and is no
   Greenhouse, Lever and Ashby are wired into runtime discovery and Prepare.
   SmartRecruiters standalone pagination, posting details, canonical public URLs
   and deduplication are locally verified; its Wise read-only pilot is complete.
-  Runtime integration is not enabled. `custom` / `manual` entries have no generic
+  TASK-094 enables Wise alone in regular discovery; SmartRecruiters Prepare is
+  unavailable. `custom` / `manual` entries have no generic
   watcher. Per-site unsupported forms still require evidence;
   do not infer universal form coverage from an implemented ATS adapter.
 - Generic Greenhouse jobs in `run` are delivered to the LinkedIn Telegram destination. This matches “current discovery”, not Target Companies.
@@ -930,7 +935,7 @@ Watchers belong in `app/company_watch/watchers/`. Autofill adapters belong in th
 
 ### TASK-044 — SmartRecruiters Target Company watcher
 
-- **Status:** standalone discovery verified — TASK-092 pilot complete; runtime integration disabled
+- **Status:** verified — TASK-092 pilot complete; TASK-094 adds Wise-only runtime discovery, supervised production acceptance pending
 - **Depends on:** none
 - **Goal:** Same as TASK-042 for SmartRecruiters.
 - **Area:** company_watch watchers
@@ -1665,7 +1670,7 @@ manual Submit, existing caches and the drained-backlog behavior intact.
 
 ### TASK-092 — One-employer read-only SmartRecruiters discovery pilot
 
-- **Status:** complete — bounded read-only Wise pilot; production integration decision pending
+- **Status:** complete — bounded read-only Wise pilot; Wise-only production follow-up approved and implemented under TASK-094
 - **Depends on:** TASK-091 checkpoint; a currently verified public employer board.
 - **Goal:** Complete and measure the standalone watcher for one employer before
   deciding whether its yield merits production integration.
@@ -1695,9 +1700,46 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   scan. See `docs/smartrecruiters-wise-pilot.md` for the full reviewed inventory,
   limitations and a Wise-only integration recommendation. No production config,
   scheduler, cache/DB, Telegram, Prepare, application or scoring changes.
-- **Human checkpoint:** Review the pilot report before authorizing Wise-only
-  production discovery. Stop after this iteration; TASK-093 scoring evaluation
-  remains a separate, unstarted iteration.
+- **Human checkpoint:** The pilot was reviewed and Wise-only production discovery
+  was authorized separately under TASK-094. TASK-093 scoring evaluation remains
+  a separate, unstarted iteration.
+
+### TASK-094 — Wise-only SmartRecruiters production discovery
+
+- **Status:** locally complete — focused regression and isolated integration
+  verification pass; first supervised production acceptance pending.
+- **Authorization:** Explicit user approval following the completed TASK-092
+  pilot. Only Wise may enter the existing regular target-company pipeline;
+  Canva and other SmartRecruiters boards remain disabled.
+- **Acceptance criteria:** Preserve watcher pagination/details, canonical public
+  URLs and stable identities; normal title/stack/seniority/location/language and
+  eligibility assessment; existing analysis-cache, SQLite deduplication and
+  Telegram delivery semantics. Unknown sponsorship stays unknown; explicit
+  refusals must not become positive signals. Local/visa-transfer-only wording
+  requires manual review without erasing confirmed work-rights restrictions.
+  No SmartRecruiters Prepare/submission, private-data changes or other-provider
+  behavior changes. Preserve all four resume variants and auto-submit disabled.
+- **Implementation:** Wise board/title configuration and explicit runtime board
+  allowlist; existing watcher and analysis/delivery pipeline; compact Telegram
+  callbacks with no Prepare capability. Narrow Wise-only verification corrects
+  explicit refusals and local/visa-transfer conditions without rescanning them
+  into positive signals or losing work-rights restrictions. Unknown sponsorship
+  and manual employer-site instructions remain visible in rendered cards.
+- **Automated verification:** 117 distinct focused/regression tests passed,
+  including eight integration tests using real watcher/Telegram client with
+  mocked HTTP and isolated config, SQLite and analysis cache. Synthetic funnel:
+  10 listed, seven title matches/analyzed, three deliveries. Repeated polling and
+  simulated restart suppress duplicates; failed sends retry from cached analysis.
+  Refusal, unknown, conditional, work-rights, stack and seniority cases, real YAML,
+  canonical URLs, callback gates and truncated card sections are covered. Ruff
+  and diff checks pass. One pre-existing LinkedIn harness worker warning concerns
+  its missing temporary resume-profile fixture; no unrelated Prepare change.
+- **Supervised checkpoint:** Follow `docs/wise-production-discovery.md`. Keep
+  production DB/cache, use one process and `AUTO_SUBMIT_ENABLED=false`; inspect
+  Wise-only funnel/cards and subsequent-poll/restart deduplication. No production
+  collection, job-model analysis, live Telegram sends or applications were run
+  during implementation. Existing `Software Engineer I` seniority limitation
+  remains for the separate scoring evaluation. Stop after this iteration's report.
 
 ### TASK-093 — Isolated evaluation of historical scoring/filter decisions
 

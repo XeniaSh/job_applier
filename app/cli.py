@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from urllib.parse import urlsplit
 import hashlib
 import heapq
@@ -28,6 +29,8 @@ from app.company_watch.analysis_cache import (
     TargetCompanyAnalysisCache,
 )
 from app.company_watch.application_recommendation import (
+    RECOMMENDATION_APPLY_NOW,
+    RECOMMENDATION_CHECK_MANUALLY,
     RECOMMENDATION_LABELS,
     RECOMMENDATION_SKIP,
     ApplicationRecommendation,
@@ -64,6 +67,20 @@ from app.company_watch.watchers.greenhouse import (
 )
 from app.company_watch.watchers.lever import LeverTargetWatcher, is_lever_target
 from app.company_watch.watchers.ashby import AshbyTargetWatcher, is_ashby_target
+from app.company_watch.watchers.smartrecruiters import (
+    SmartRecruitersTargetWatcher,
+    SmartRecruitersWatchResult,
+    is_smartrecruiters_target,
+    resolve_smartrecruiters_slug,
+)
+from app.company_watch.wise_eligibility import (
+    CORRECTION_EXPLICIT_REFUSAL,
+    CORRECTION_LOCAL_TRANSFER_ONLY,
+    WISE_MANUAL_EMPLOYER_SITE_INFO,
+    WISE_UNKNOWN_SPONSORSHIP_WARNING,
+    detect_wise_sponsorship_correction,
+    is_wise_smartrecruiters_source,
+)
 from app.collectors.email_imap_client import (
     EmailAuthenticationError,
     EmailConnectionError,
@@ -1145,6 +1162,24 @@ def _analyze_target_company_vacancy(
         language_requirements=evaluation.language_requirements,
         location_restrictions=evaluation.location_restrictions,
     )
+    wise_correction = None
+    if is_wise_smartrecruiters_source(vacancy.source):
+        wise_correction = detect_wise_sponsorship_correction(vacancy.to_analysis_text())
+        if wise_correction is not None:
+            # The shared scan false-positives on "visa sponsorship" inside
+            # the refusal/transfer/local-only wording. Reclassify from the
+            # original normalized facts only: no raw text or restriction is
+            # rescanned, so no denial can be re-read as a positive signal.
+            # The original restriction list is restored after classification.
+            corrected = assess_application_feasibility(
+                location=vacancy.location,
+                visa_sponsorship=wise_correction.visa_override or assessment.visa_sponsorship,
+                relocation_support=wise_correction.relocation_override or assessment.relocation_support,
+                remote_type=assessment.remote_type,
+                work_authorization_requirement=assessment.work_authorization_requirement,
+                language_requirements=assessment.language_requirements,
+            )
+            assessment = dataclass_replace(corrected, location_restrictions=assessment.location_restrictions)
     target_company = companies_by_name.get((vacancy.company or "").casefold())
     seniority_result = classify_seniority(vacancy.title)
     recommendation_result = recommend_application(
@@ -1155,6 +1190,29 @@ def _analyze_target_company_vacancy(
         location=vacancy.location,
         seniority=seniority_result,
     )
+    if wise_correction is not None and recommendation_result.label != RECOMMENDATION_SKIP:
+        if wise_correction.category == CORRECTION_EXPLICIT_REFUSAL and constraints.requires_visa_sponsorship:
+            # The shared hard-blocker only fires on work_authorization_requirement
+            # == "required" (an LLM-extracted field we must not fabricate). This
+            # is a separate, truthful ground for SKIP: the posting itself
+            # explicitly refuses visa sponsorship and the candidate's own
+            # constraints require sponsorship. Existing SKIPs are never replaced.
+            recommendation_result = ApplicationRecommendation(
+                label=RECOMMENDATION_SKIP,
+                reasons=["Wise posting explicitly states visa sponsorship is not offered"],
+            )
+        elif (
+            wise_correction.category == CORRECTION_LOCAL_TRANSFER_ONLY
+            and recommendation_result.label == RECOMMENDATION_APPLY_NOW
+        ):
+            # Only APPLY_NOW is demoted; technical IGNORE, seniority,
+            # language and work-auth SKIPs were returned above untouched.
+            # Candidate's local status is unknown: other boosts (remote,
+            # relocation) must not promote a local/transfer-only posting.
+            recommendation_result = ApplicationRecommendation(
+                label=RECOMMENDATION_CHECK_MANUALLY,
+                reasons=["Wise posting is local-candidates/visa-transfer-only; check eligibility manually"],
+            )
     if write_cache and analysis_cache is not None:
         analysis_cache.put(
             vacancy,
@@ -1236,11 +1294,17 @@ def _has_unchanged_cached_analysis(
 _TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX = "target_company:greenhouse:"
 _TARGET_COMPANY_LEVER_SOURCE_PREFIX = "target_company:lever:"
 _TARGET_COMPANY_ASHBY_SOURCE_PREFIX = "target_company:ashby:"
+_TARGET_COMPANY_SMARTRECRUITERS_SOURCE_PREFIX = "target_company:smartrecruiters:"
 _GREENHOUSE_HOSTED_HOST_SUFFIX = ".greenhouse.io"
 _GREENHOUSE_HOSTED_HOST_EXACT = "greenhouse.io"
 _LEVER_HOSTED_HOST_SUFFIX = ".lever.co"
 _LEVER_HOSTED_HOST_EXACT = "lever.co"
 _ASHBY_HOSTED_HOST_EXACT = "jobs.ashbyhq.com"
+_SMARTRECRUITERS_HOSTED_HOST_EXACT = "jobs.smartrecruiters.com"
+# This Target Companies integration is approved for Wise only: any other
+# SmartRecruiters board (e.g. Canva, already configured elsewhere) must be
+# ignored at runtime even if present in target_companies.yaml.
+_APPROVED_SMARTRECRUITERS_BOARD_SLUGS = frozenset({"wise"})
 
 
 def _has_unconfirmed_application_form(vacancy: NormalizedVacancy) -> bool:
@@ -1255,13 +1319,51 @@ def _has_unconfirmed_application_form(vacancy: NormalizedVacancy) -> bool:
     is no autofill adapter at all yet: a recognized canonical public job URL
     is only a delivery eligibility signal (this is Ashby's own job-board
     shape, safe to send), never confirmation that an Ashby application-form
-    adapter exists or that autofill is supported.
+    adapter exists or that autofill is supported. SmartRecruiters has no
+    autofill adapter either: the gate below only recognizes Wise's own
+    public posting URL shape (jobs.smartrecruiters.com/Wise/{posting-id})
+    for the matching vacancy external_id, as a manual-application delivery
+    signal, never Prepare/autofill confirmation.
     """
     if vacancy.source.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX):
         return not is_canonical_lever_hosted_url(vacancy.url)
     if vacancy.source.startswith(_TARGET_COMPANY_ASHBY_SOURCE_PREFIX):
         return not is_canonical_ashby_hosted_url(vacancy.url)
+    if vacancy.source.startswith(_TARGET_COMPANY_SMARTRECRUITERS_SOURCE_PREFIX):
+        return not (
+            is_wise_smartrecruiters_source(vacancy.source)
+            and _is_canonical_wise_smartrecruiters_url(vacancy.url, posting_id=vacancy.external_id)
+        )
     return not is_canonical_greenhouse_hosted_url(vacancy.url)
+
+
+def _is_canonical_wise_smartrecruiters_url(url: str, *, posting_id: str) -> bool:
+    """True only for `https://jobs.smartrecruiters.com/Wise/{posting_id}[-slug]`.
+
+    Rejects the api.smartrecruiters.com host, /apply or referral paths, any
+    other SmartRecruiters board, and any posting id mismatch — this is a
+    delivery eligibility signal only, never application-form confirmation.
+    """
+    if not url or not posting_id or not posting_id.strip():
+        return False
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    # Exact netloc rejects userinfo and explicit ports.
+    if parsed.netloc != _SMARTRECRUITERS_HOSTED_HOST_EXACT:
+        return False
+    if parsed.query or parsed.fragment:
+        return False
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 2:
+        return False
+    board_part, posting_part = parts
+    if board_part != "Wise":
+        return False
+    return posting_part == posting_id or posting_part.startswith(f"{posting_id}-")
 
 
 def _target_company_form_provider(source: str) -> str:
@@ -1276,6 +1378,8 @@ def _target_company_form_provider(source: str) -> str:
         return "lever"
     if source.startswith(_TARGET_COMPANY_ASHBY_SOURCE_PREFIX):
         return "ashby"
+    if source.startswith(_TARGET_COMPANY_SMARTRECRUITERS_SOURCE_PREFIX):
+        return "smartrecruiters"
     return "unknown"
 
 
@@ -1307,6 +1411,10 @@ def _unsupported_application_form_reason(provider: str, url: str) -> str:
         if host != _ASHBY_HOSTED_HOST_EXACT:
             return "ashby_custom_domain"
         return "ashby_non_canonical_path"
+    if provider == "smartrecruiters":
+        if host != _SMARTRECRUITERS_HOSTED_HOST_EXACT:
+            return "smartrecruiters_custom_domain"
+        return "smartrecruiters_non_canonical_path"
     return "unknown_provider_unconfirmed_form"
 
 
@@ -1430,6 +1538,31 @@ def _log_provider_funnel(provider: str, counts: _ProviderFunnelCounts) -> None:
     )
 
 
+def _is_approved_smartrecruiters_company(company: TargetCompany) -> bool:
+    """Runtime allowlist: only the verified Wise board may be collected,
+    even though SmartRecruiters is also configured for other companies
+    (e.g. Canva) in target_companies.yaml.
+    """
+    try:
+        slug = resolve_smartrecruiters_slug(company)
+    except ValueError:
+        return False
+    return slug.lower() in _APPROVED_SMARTRECRUITERS_BOARD_SLUGS
+
+
+def _log_smartrecruiters_bounds(result: SmartRecruitersWatchResult) -> None:
+    """One value-free diagnostic line: Wise-only pagination/detail bound
+    truncation and job-level fetch error count, never titles/URLs/bodies.
+    """
+    _run_log(
+        "Target companies smartrecruiters bounds: "
+        f"pages_truncated={result.pages_truncated} "
+        f"detail_truncated={result.detail_truncated} "
+        f"job_errors={len(result.job_errors)}",
+        component="main",
+    )
+
+
 def _run_target_companies_cycle(
     *,
     settings: Settings,
@@ -1444,6 +1577,7 @@ def _run_target_companies_cycle(
     watcher: GreenhouseTargetWatcher | None = None,
     lever_watcher: LeverTargetWatcher | None = None,
     ashby_watcher: AshbyTargetWatcher | None = None,
+    smartrecruiters_watcher: SmartRecruitersTargetWatcher | None = None,
     telegram_client: TelegramClient | None = None,
 ) -> _TargetCompaniesCycleResult:
     chat_id = _target_companies_run_chat_id(settings)
@@ -1459,7 +1593,12 @@ def _run_target_companies_cycle(
     greenhouse_companies = [item for item in loaded.companies if is_greenhouse_target(item)]
     lever_companies = [item for item in loaded.companies if is_lever_target(item)]
     ashby_companies = [item for item in loaded.companies if is_ashby_target(item)]
-    if not greenhouse_companies and not lever_companies and not ashby_companies:
+    smartrecruiters_companies = [
+        item
+        for item in loaded.companies
+        if is_smartrecruiters_target(item) and _is_approved_smartrecruiters_company(item)
+    ]
+    if not greenhouse_companies and not lever_companies and not ashby_companies and not smartrecruiters_companies:
         _run_log("Target companies: skipped (no supported target companies)", component="main")
         return _TargetCompaniesCycleResult(enabled=False, skip_reason="no_supported_target_companies")
 
@@ -1483,17 +1622,32 @@ def _run_target_companies_cycle(
     analysis_cache.load()
     companies_by_name = {
         item.name.casefold(): item
-        for item in (*greenhouse_companies, *lever_companies, *ashby_companies)
+        for item in (*greenhouse_companies, *lever_companies, *ashby_companies, *smartrecruiters_companies)
     }
     greenhouse_watch_result = (watcher or GreenhouseTargetWatcher()).watch(greenhouse_companies)
     lever_watch_result = (lever_watcher or LeverTargetWatcher()).watch(lever_companies)
     ashby_watch_result = (ashby_watcher or AshbyTargetWatcher()).watch(ashby_companies)
+    if smartrecruiters_watcher is None and smartrecruiters_companies:
+        smartrecruiters_watcher = SmartRecruitersTargetWatcher(
+            page_limit=100, max_pages=10, max_detail_fetches=100
+        )
+    smartrecruiters_watch_result = (
+        smartrecruiters_watcher.watch(smartrecruiters_companies)
+        if smartrecruiters_watcher is not None
+        else SmartRecruitersWatchResult(vacancies=[], errors=[])
+    )
     watched_vacancies = [
         *greenhouse_watch_result.vacancies,
         *lever_watch_result.vacancies,
         *ashby_watch_result.vacancies,
+        *smartrecruiters_watch_result.vacancies,
     ]
-    watch_errors = [*greenhouse_watch_result.errors, *lever_watch_result.errors, *ashby_watch_result.errors]
+    watch_errors = [
+        *greenhouse_watch_result.errors,
+        *lever_watch_result.errors,
+        *ashby_watch_result.errors,
+        *smartrecruiters_watch_result.errors,
+    ]
 
     provider_funnels: dict[str, _ProviderFunnelCounts] = {
         "greenhouse": _ProviderFunnelCounts(
@@ -1513,6 +1667,12 @@ def _run_target_companies_cycle(
             raw_fetched=ashby_watch_result.raw_fetched,
             title_prefilter_pass=len(ashby_watch_result.vacancies),
             watcher_errors=len(ashby_watch_result.errors),
+        ),
+        "smartrecruiters": _ProviderFunnelCounts(
+            configured_companies=len(smartrecruiters_companies),
+            raw_fetched=smartrecruiters_watch_result.raw_fetched,
+            title_prefilter_pass=smartrecruiters_watch_result.title_matched_count,
+            watcher_errors=len(smartrecruiters_watch_result.errors) + len(smartrecruiters_watch_result.job_errors),
         ),
     }
 
@@ -1618,8 +1778,9 @@ def _run_target_companies_cycle(
         f"send_errors={result.send_errors}",
         component="main",
     )
-    for provider_name in ("greenhouse", "lever", "ashby"):
+    for provider_name in ("greenhouse", "lever", "ashby", "smartrecruiters"):
         _log_provider_funnel(provider_name, provider_funnels[provider_name])
+    _log_smartrecruiters_bounds(smartrecruiters_watch_result)
     _log_target_company_outcomes(outcome_counts)
     if verbose:
         for error in watch_errors:
@@ -1690,6 +1851,20 @@ def _deliver_target_company_item(
         recommended_resume=evaluation.recommended_resume.value,
     )
     warnings, info_items = card_display_sections(evaluation)
+    if is_wise_smartrecruiters_source(vacancy.source):
+        # Prepended: the formatter keeps only the first 3 warnings / 5 infos.
+        wise_correction = detect_wise_sponsorship_correction(vacancy.to_analysis_text())
+        if wise_correction is not None:
+            warnings = [wise_correction.warning, *(w for w in warnings if w != wise_correction.warning)]
+        elif item.feasibility is not None and item.feasibility.visa_sponsorship == "unknown":
+            warnings = [
+                WISE_UNKNOWN_SPONSORSHIP_WARNING,
+                *(w for w in warnings if w != WISE_UNKNOWN_SPONSORSHIP_WARNING),
+            ]
+        info_items = [
+            WISE_MANUAL_EMPLOYER_SITE_INFO,
+            *(i for i in info_items if i != WISE_MANUAL_EMPLOYER_SITE_INFO),
+        ]
     card = TelegramVacancyCard(
         source=vacancy.source,
         external_id=vacancy.external_id,

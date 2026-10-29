@@ -337,6 +337,61 @@ def test_application_prepare_is_not_supported_for_generic_ashby_source() -> None
     assert source_supports_application_prepare("ashbyhq") is False
 
 
+def test_target_company_smartrecruiters_callback_round_trip() -> None:
+    full_wise = "target_company:smartrecruiters:wise"
+    assert map_source_to_code(full_wise) == "tcs.wise"
+    assert map_source_to_code("tcs.wise") == "tcs.wise"
+    assert map_code_to_source("tcs.wise") == full_wise
+    assert map_code_to_source(full_wise) == full_wise
+    assert map_code_to_source(map_source_to_code(full_wise)) == full_wise
+
+    assert parse_callback_data("skip:tcs.wise:901") == ("skip", full_wise, "901", None)
+    assert parse_callback_data("applied:tcs.wise:901") == ("applied", full_wise, "901", None)
+    assert parse_callback_data("undo:tcs.wise:901:abc12345") == (
+        "undo",
+        full_wise,
+        "901",
+        "abc12345",
+    )
+
+    # SmartRecruiters codes never collide with Greenhouse/Lever/Ashby
+    # target-company codes.
+    assert map_source_to_code(full_wise) != map_source_to_code("target_company:greenhouse:wise")
+    assert map_source_to_code(full_wise) != map_source_to_code("target_company:lever:wise")
+    assert map_source_to_code(full_wise) != map_source_to_code("target_company:ashby:wise")
+
+
+def test_prepare_is_never_offered_for_target_company_smartrecruiters() -> None:
+    # SmartRecruiters has no autofill adapter at all (unlike Ashby, which
+    # has AshbyAdapter): no Prepare/Resume/Submit action may ever be
+    # offered for this source, only manual Applied/Skip/Open vacancy.
+    url = "https://jobs.smartrecruiters.com/Wise/901"
+    target_full = build_action_buttons("target_company:smartrecruiters:wise", "901", url)
+    target_code = build_action_buttons("tcs.wise", "901", url)
+
+    assert source_supports_prepare("target_company:smartrecruiters:wise") is False
+    assert source_supports_prepare("tcs.wise") is False
+    assert source_supports_application_prepare("target_company:smartrecruiters:wise") is False
+    assert source_supports_application_prepare("tcs.wise") is False
+
+    for buttons in (target_full, target_code):
+        labels = [button.text for row in buttons for button in row]
+        assert "🛠 Prepare" not in labels
+        assert APPLICATION_PREPARE_BUTTON_TEXT not in labels
+        assert labels == ["✅ Applied", "⏭ Skip", "🔗 Open vacancy"]
+        assert buttons[0][0].callback_data == "applied:tcs.wise:901"
+        assert buttons[1][0].callback_data == "skip:tcs.wise:901"
+    assert target_full[-1][0].url == url
+
+
+def test_application_prepare_is_not_supported_for_generic_smartrecruiters_source() -> None:
+    # Only the explicit target_company:smartrecruiters:* namespace is
+    # even mapped at all -- a bare/generic source string must never match,
+    # and must never gain Prepare either way.
+    assert source_supports_application_prepare("smartrecruiters") is False
+    assert source_supports_application_prepare("tcs") is False
+
+
 def test_send_prepared_application_payload_contains_buttons(monkeypatch) -> None:
     calls: list[tuple[str, dict]] = []
     responses = [
