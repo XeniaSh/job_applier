@@ -36,13 +36,14 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 
 ---
 
-## Current capability and acceptance checkpoint — 2026-10-29
+## Current capability and acceptance checkpoint — 2026-10-31
 
 - Greenhouse, Lever and Ashby have runtime discovery, resolver, Telegram Prepare
   routing and autofill implementations. SmartRecruiters has verified standalone
   read-only discovery and a completed Wise pilot. TASK-094 adds Wise-only regular
-  discovery with manual employer-site applications; local verification passes,
-  and the first supervised production run remains pending.
+  discovery with manual employer-site applications; the user now reports Wise
+  cards delivered in production. Task-095 Prepare is approved but awaits actual
+  form evidence; no SmartRecruiters Prepare button or adapter is enabled yet.
   Workday has no collector; HH remains CLI-only.
 - Four resume variants and their shared selection/attachment path are implemented
   (`23de715`); Greenhouse completed-widget verification is implemented (`1a7b24a`).
@@ -61,11 +62,11 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   persistence after blur. Other requires that question's explicit instruction.
   Forty-seven focused country tests pass; full supervised Prepare acceptance is
   pending. Uncertain values and unconfirmed clearing remain manual.
-- TASK-090 profile safety, TASK-091 country correction and TASK-092 discovery
-  pilot have completed their local iterations. The user approved TASK-094
-  Wise-only production discovery next, ahead of TASK-093 scoring evaluation.
-  Stop after TASK-094's verified commit/report; supervised production acceptance
-  remains separate from automated verification.
+- TASK-090..092 and TASK-094 have completed their local iterations. The current
+  request is TASK-095 SmartRecruiters Prepare and independent TASK-096 desired
+  salary autofill, with separate commits. TASK-095 is blocked on a connected
+  browser/rendered form evidence; TASK-096 is locally verified. TASK-093 scoring
+  remains unstarted. Automated and supervised acceptance stay separate.
 - No automatic submission, CAPTCHA bypass, Workday/HH expansion, broad refactor,
   production cache reset or whole-backlog reanalysis is authorized in this phase.
 
@@ -1741,6 +1742,57 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   during implementation. Existing `Software Engineer I` seniority limitation
   remains for the separate scoring evaluation. Stop after this iteration's report.
 
+### TASK-095 — Evidence-backed Wise/SmartRecruiters Prepare Application
+
+- **Status:** approved, blocked on rendered form evidence; no implementation or
+  feature commit. Existing SmartRecruiters Prepare gates remain disabled.
+- **Inspection:** Existing source-aware resolvers/adapters and the shared
+  AutofillService answer, four-resume and review lifecycle were inspected.
+  Public Wise posting `744000156787429` returned HTTP 200. Its public application
+  link is produced by `ONECLICKDATA` and the posting's public JavaScript.
+  The actual oneclick application URL returned HTTP 403 with a CAPTCHA/anti-bot
+  document; the posting HTML itself contains no application form.
+- **Human boundary:** No CUA browser is connected (`listBrowsers: []`), including
+  after the user selected Connect a browser and after a later recheck. No
+  challenge solving/bypass, alternate application endpoint, candidate entry,
+  resume upload or submission was attempted. Sanitized inspection notes are in
+  ignored `data/smartrecruiters-prepare-evidence/report.md`; raw challenge data
+  must not be committed.
+- **Acceptance criteria:** Inspect the actual rendered blank form, then add only
+  evidenced support through existing Prepare/resolver/adapter/review components.
+  Enable a Telegram action only for supported vacancies; verify supported
+  factual fields and the selected PDF from the four configured variants. Leave
+  ambiguous/unsupported/challenged controls manual. Preserve Done reviewing,
+  manual Submit and existing providers. Focused tests and a separate standalone
+  commit follow only when support is established.
+
+### TASK-096 — Desired-salary autofill across existing ATS adapters
+
+- **Status:** locally complete; supervised real-candidate form acceptance pending.
+- **Implementation:** One deterministic shared salary resolver runs before the
+  existing fill fast-return for Greenhouse, Lever and Ashby. It uses an applicable
+  configured preference, otherwise a single explicit published-range midpoint,
+  otherwise an explicitly reviewed, sourced, dated matching benchmark. No real
+  benchmark figures or exchange rates are supplied or fetched. An existing
+  disabled salary block opts out; an absent block permits published fallback.
+- **Safety:** Own-label currency/period/gross-net proof, no conversions, exact
+  configured location scopes, date freshness, current/prior-pay exclusion,
+  ambiguous/component/scaled-amount manual fallback and strict numeric read-back.
+  Missing units never inherit sibling context or example profile facts. Chosen
+  amount/units/safe source/date appear in logs and field notes. Submission,
+  four-resume, candidate facts and nonsalary flows are unchanged.
+- **Verification:** Focused resolver/service tests cover all three ATS sources
+  with offline fakes and the real Ashby adjustment hook. Shared question/service
+  and profile-loader regressions pass. The isolated Ashby local-currency salary
+  browser fixture passes. A broader browser run exposed an unrelated existing
+  location assertion, reproduced with the original salary guard; its failed
+  cleanup also caused an event-loop cascade. No unrelated adapter fix was made.
+  Ruff and diff checks pass; exact counts are recorded in `PROGRESS.md`.
+- **Acceptance:** See `docs/salary-autofill.md`. Supervise an existing supported
+  ATS Prepare, review chosen amount, units and evidence, then Done reviewing
+  without Submit. TASK-095 remains independently blocked; do not invent its
+  adapter or a second feature commit from unsupported form assumptions.
+
 ### TASK-093 — Isolated evaluation of historical scoring/filter decisions
 
 - **Status:** approved, not started
@@ -1764,6 +1816,7 @@ manual Submit, existing caches and the drained-backlog behavior intact.
 TASK-045 Workday and HH promotion are not authorized in this phase. TASK-050
 remains deferred pending a demonstrated live-resolver need. TASK-047/048 exist
 locally, but auto-submit stays disabled/manual; no enablement or submission is
-part of this phase. SmartRecruiters autofill and general architecture changes
-are not approved. Historical task acceptance describes its original milestone;
+part of this phase. SmartRecruiters Prepare is authorized only under the
+evidence boundary in TASK-095; general architecture changes are not approved.
+Historical task acceptance describes its original milestone;
 later corrections and current supervised acceptance notes take precedence.

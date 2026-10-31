@@ -44,6 +44,7 @@ from app.application.autofill.resume import (
     ResumeResolutionError,
     resolve_autofill_resume_selection,
 )
+from app.application.autofill.salary import numeric_readback_matches, resolve_desired_salary
 from app.application.autofill.submit import (
     SubmitAdapter,
     attempt_auto_submit,
@@ -883,6 +884,60 @@ def _maybe_cover_letter(
     return cleaned or None
 
 
+def _decide_salary(
+    item: ClassifiedField, *, profile: CandidateProfile, vacancy: ResolvedVacancy
+) -> ClassifiedField:
+    """Shared desired-salary decision for every adapter (see `salary.py`).
+
+    Overrides the classifier's/adapter's salary result in both directions: a
+    fill is only kept when the resolver can prove an exact-unit answer, and
+    an adapter-reverted item may be filled from a published/benchmark source.
+    Absent `salary_expectations` permits the published-range fallback; an
+    existing object with `fill_salary` false is an opt-out, and the item is
+    still validated so no legacy adapter fill survives it.
+    """
+    if item.inactive_conditional:
+        return item
+    decision = resolve_desired_salary(
+        item.field,
+        profile.employment.salary_expectations,
+        title=vacancy.title,
+        vacancy=vacancy.vacancy,
+    )
+    logger.info(
+        "salary_autofill outcome=%s source=%s amount=%s currency=%s basis=%s period=%s evidence_url=%s evidence_date=%s reason=%s",
+        "chosen" if decision.fill else "manual",
+        decision.source_kind,
+        decision.amount,
+        decision.currency,
+        decision.basis,
+        decision.period,
+        decision.evidence_url,
+        decision.evidence_date,
+        decision.reason,
+    )
+    if decision.fill:
+        return replace(
+            item,
+            classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+            value=decision.amount,
+            fill=True,
+            generated=False,
+            unresolved_reason=decision.note(),
+        )
+    unresolved = (
+        FieldClassification.UNKNOWN_REQUIRED if item.field.required else FieldClassification.UNKNOWN_OPTIONAL
+    )
+    return replace(
+        item,
+        classification=unresolved,
+        value=None,
+        fill=False,
+        generated=False,
+        unresolved_reason=decision.note(),
+    )
+
+
 def _enrich_unresolved(
     item: ClassifiedField,
     *,
@@ -894,6 +949,8 @@ def _enrich_unresolved(
     sibling_kinds: frozenset[QuestionKind] = frozenset(),
     sibling_has_dedicated_new_zealand_question: bool = False,
 ) -> ClassifiedField:
+    if item.kind is QuestionKind.SALARY:
+        return _decide_salary(item, profile=profile, vacancy=vacancy)
     if item.fill:
         return item
     if item.kind is QuestionKind.COVER_LETTER and cover_letter_text:
@@ -1381,6 +1438,9 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
             for expected_value in expected_lower
         )
     wanted = str(expected).strip()
+    if item.kind is QuestionKind.SALARY:
+        # Strict numeric equality only: no substring/unit-suffix acceptance.
+        return numeric_readback_matches(wanted, actual)
     if item.kind is QuestionKind.ACADEMIC_LEVEL:
         from app.application.candidate_profile import canonical_academic_level
 

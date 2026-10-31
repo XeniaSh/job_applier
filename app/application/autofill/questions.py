@@ -39,6 +39,7 @@ from app.application.autofill.options import (
     parse_years_experience_technology,
     split_technology_scope_terms,
 )
+from app.application.autofill.salary import is_prior_pay_text
 from app.application.candidate_profile import CandidateProfile
 
 _WORK_IN_RE = re.compile(
@@ -1346,7 +1347,7 @@ def _is_current_salary(label: str) -> bool:
     field's unrelated "current ..." wording living in shared `field.context`
     must never make this field itself look like a current-salary question.
     """
-    return "current" in label
+    return is_prior_pay_text(label)
 
 
 def _is_notice_period(text: str) -> bool:

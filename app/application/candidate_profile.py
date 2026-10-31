@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import math
 import re
 
@@ -238,8 +239,51 @@ class ProfessionalLinks(BaseModel):
         return cleaned
 
 
+class SalaryPreference(BaseModel):
+    """One explicit desired-salary figure, optionally scoped to markets/roles.
+
+    Empty `markets`/`roles` mean "any". Nothing is inferred or converted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount: int | None = None
+    currency: str | None = None
+    period: str | None = None
+    basis: str | None = None  # "gross" or "net"
+    markets: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+
+
+class SalaryBenchmark(BaseModel):
+    """An explicitly reviewed, dated, public salary benchmark (see docs/salary-autofill.md).
+
+    The application ships none; entries only exist when the user configures them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    market: str
+    seniority: str
+    amount: int  # must be > 0; the resolver rejects anything else
+    currency: str
+    period: str
+    basis: str
+    source_url: str
+    # Date of the underlying source data (freshness is judged on this), the
+    # date a human reviewed it, and the explicit review attestation. A record
+    # without `source_date` or with `reviewed` false is never used.
+    source_date: date | None = None
+    reviewed_on: date
+    reviewed: bool = False
+
+
 class SalaryExpectations(BaseModel):
-    """Optional salary data. Stage 1 does not fill salary unless fill_salary is true."""
+    """Optional private salary preferences; an existing disabled block opts out.
+
+    An absent block still permits the service's verified published-range fallback.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -248,6 +292,12 @@ class SalaryExpectations(BaseModel):
     period: str | None = None
     notes: str | None = None
     fill_salary: bool = False
+    # Explicit "gross"/"net" for the top-level figure; required before a write.
+    basis: str | None = None
+    markets: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+    preferences: list[SalaryPreference] = Field(default_factory=list)
+    benchmarks: list[SalaryBenchmark] = Field(default_factory=list)
 
 
 class TechnologyExperience(BaseModel):
