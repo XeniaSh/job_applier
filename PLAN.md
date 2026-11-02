@@ -45,6 +45,11 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   cards delivered in production. Task-095 Prepare is approved but awaits actual
   form evidence; no SmartRecruiters Prepare button or adapter is enabled yet.
   Workday has no collector; HH remains CLI-only.
+- TASK-097 (same employer-facing resume basename, separate per-profile dirs):
+  locally verified (110 focused tests, Ruff and diff checks); private PDF
+  migration and supervised live acceptance remain pending (README Resume Setup).
+  GH/Lever no longer accept a same-basename attachment after a failed/no-op
+  write. Four profile keys and selection rules are unchanged.
 - Four resume variants and their shared selection/attachment path are implemented
   (`23de715`); Greenhouse completed-widget verification is implemented (`1a7b24a`).
   Preserve all four variants. Local automated tests do not replace outstanding

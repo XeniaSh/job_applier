@@ -6,6 +6,7 @@ with no actual page content.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fpdf import FPDF
@@ -28,6 +29,20 @@ def _build_alternate_valid_pdf() -> bytes:
     pdf.add_page()
     pdf.set_font("Helvetica", size=12)
     pdf.cell(text="Synthetic test resume, alternate revision -- not a real document.")
+    return bytes(pdf.output())
+
+
+def build_labeled_valid_pdf(label: str) -> bytes:
+    """A real, parseable one-page synthetic PDF whose bytes differ per
+    `label` -- for tests that must tell several same-basename files apart by
+    content.
+    """
+    pdf = FPDF(format="A4")
+    # Fixed, timezone-aware creation date: output must not vary per call.
+    pdf.creation_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+    pdf.cell(text=f"Synthetic test resume variant {label} -- not a real document.")
     return bytes(pdf.output())
 
 

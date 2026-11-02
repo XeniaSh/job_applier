@@ -358,6 +358,52 @@ class FakeUploadDiagnosticsPage:
         pass
 
 
+class _FakeNoInputLocator:
+    first = None
+
+    def __init__(self) -> None:
+        self.first = self
+
+    def count(self) -> int:
+        return 0
+
+
+class _FakeNoopUploadPage(FakeUploadDiagnosticsPage):
+    """No resume input exists (write is a no-op) while the page still shows
+    a completed same-name readout / file list."""
+
+    url = "file:///fake.html"
+
+    def __init__(self, filename: str) -> None:
+        super().__init__(set_files_error=PlaywrightError("unused"), completed_filename=filename)
+        self._filename = filename
+
+    def locator(self, _selector: str) -> _FakeNoInputLocator:  # type: ignore[override]
+        return _FakeNoInputLocator()
+
+
+def test_greenhouse_noop_write_does_not_accept_preexisting_same_name_completed() -> None:
+    page = _FakeNoopUploadPage("Resume.pdf")
+    field = DiscoveredField(label="Resume/CV", field_type="file", required=True, element_id="resume")
+    assert GreenhouseAdapter().upload_resume(page, Path("/x/other/Resume.pdf"), field) is False
+
+
+def test_lever_failed_write_does_not_accept_preexisting_same_name() -> None:
+    from app.application.autofill.lever import LeverAdapter
+
+    class _Page(FakeUploadDiagnosticsPage):
+        url = "file:///fake.html"
+
+        def evaluate(self, script: str, _arg: object = None) -> list[str]:  # type: ignore[override]
+            return ["Resume.pdf"]
+
+    page = _Page(set_files_error=PlaywrightError("write failed"), completed_filename="Resume.pdf")
+    field = DiscoveredField(
+        label="Resume", field_type="file", required=True, element_id="resume-upload-input"
+    )
+    assert LeverAdapter().upload_resume(page, Path("/x/other/Resume.pdf"), field) is False
+
+
 def test_upload_resume_diagnostic_log_is_bounded_and_never_leaks_raw_error_or_path(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -368,11 +414,10 @@ def test_upload_resume_diagnostic_log_is_bounded_and_never_leaks_raw_error_or_pa
     the `upload_resume` diagnostic log line must stay one bounded line that
     names only the error's *class*, never its message, and never any
     filesystem path (not even this call's own resume path, only its
-    basename). The expected and observed (widget-reported) basenames are
-    the same here only so `_wait_for_resume_attached` confirms on its very
-    first check -- this test is about the log line's shape, not the
-    boolean outcome, and a real per-call timeout override (as other tests
-    in this module use) is not available through this public method.
+    basename). The widget-reported basename equals the expected one, yet
+    because the write failed the result is False (a stale same-name
+    readout is never trusted); this test is mainly about the log line's
+    shape, and the failed write also skips the attachment poll.
     """
     sensitive_message = (
         "Timeout 5000ms exceeded.\n=== logs ===\nwaiting for locator "
@@ -390,7 +435,9 @@ def test_upload_resume_diagnostic_log_is_bounded_and_never_leaks_raw_error_or_pa
             page, Path("/private/tmp/some-run") / basename, field
         )
 
-    assert result is True
+    # The write failed, so a preexisting same-name readout (possibly another
+    # profile's file) must not count as the newly selected PDF.
+    assert result is False
     traces = [
         record.getMessage()
         for record in caplog.records

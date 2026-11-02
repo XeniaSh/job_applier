@@ -236,14 +236,38 @@ Buttons and statuses:
 ## Resume Setup
 
 There are exactly four canonical resume variants, configured in
-`resume_profiles.yaml` under these four keys/filenames:
+`resume_profiles.yaml` under these four keys, each in its own directory:
 
 | Key | Expected file | Resume title |
 | --- | --- | --- |
-| `java_backend` | `resumes/java-backend.pdf` | Java Backend Engineer |
-| `ai_backend` | `resumes/ai-backend.pdf` | Software Engineer \| AI Automation & LLM Integration |
-| `java_backend_nz` | `resumes/java-backend-nz.pdf` | Java Backend Engineer (New Zealand) |
-| `ai_backend_nz` | `resumes/ai-backend-nz.pdf` | Software Engineer \| Backend & AI Integration (New Zealand) |
+| `java_backend` | `resumes/java_backend/FirstName_LastName_Resume.pdf` | Java Backend Engineer |
+| `ai_backend` | `resumes/ai_backend/FirstName_LastName_Resume.pdf` | Software Engineer \| AI Automation & LLM Integration |
+| `java_backend_nz` | `resumes/java_backend_nz/FirstName_LastName_Resume.pdf` | Java Backend Engineer (New Zealand) |
+| `ai_backend_nz` | `resumes/ai_backend_nz/FirstName_LastName_Resume.pdf` | Software Engineer \| Backend & AI Integration (New Zealand) |
+
+`FirstName_LastName_Resume.pdf` is a placeholder; the committed config never
+contains a real name. The basename of the `pdf` path is the exact filename
+employers see on upload, so all four profiles use the **same** basename in
+**separate** directories. There is no separate upload-filename setting.
+Relative `pdf` paths resolve against the config file's location.
+
+**Private migration (manual, nothing is moved by the code):**
+
+1. Create the four profile directories if needed. Copy (never move) each original PDF into its profile
+   directory under the actual-name basename; do not overwrite existing files.
+   Run `shasum -a 256` on every SOURCE original and its DESTINATION copy and
+   confirm each pair matches (byte-for-byte); originals stay untouched.
+2. Keep the originals until you have verified the copies.
+3. Copy `resume_profiles.yaml` to the git-ignored `resume_profiles.local.yaml`,
+   set each `pdf` to the same actual-name basename, and point
+   `RESUME_PROFILES_PATH` at that file, e.g.
+   `RESUME_PROFILES_PATH=resume_profiles.local.yaml AUTO_SUBMIT_ENABLED=false uv run python -m app run`.
+   If the local config already exists, preserve it and update only its four
+   `pdf` paths instead of overwriting the file.
+
+`resumes/**/*.pdf` and `resume_profiles.local.yaml` are git-ignored. If an
+upload write fails, the autofill does not trust a same-named file already
+shown on the page; it reports the resume as unconfirmed for manual handling.
 
 Each profile entry has an `id`, a short `description`, and a relative `pdf`
 path. The four keys above are relied on by code (`app.resume_policy`); do not

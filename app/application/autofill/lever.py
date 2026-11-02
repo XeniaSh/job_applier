@@ -623,12 +623,17 @@ class LeverAdapter:
         path = str(resume_path)
         filename = resume_path.name
         locator = _field_locator(page, field)
+        # A same-basename file from another profile may already be shown, so
+        # the filename alone only counts after a write of this full path
+        # succeeded. A failed/no-op write stays unconfirmed (manual).
+        written = False
         try:
             if locator.count() > 0:
                 locator.set_input_files(path, timeout=5_000, no_wait_after=True)
+                written = True
         except PlaywrightError:
             pass
-        if _wait_for_resume_attached(page, field, filename):
+        if written and _wait_for_resume_attached(page, field, filename):
             return True
         if not page.url.startswith("file:"):
             trigger = _resume_upload_trigger(locator)
@@ -637,11 +642,12 @@ class LeverAdapter:
                     with page.expect_file_chooser(timeout=5_000) as chooser:
                         trigger.click(timeout=3_000)
                     chooser.value.set_files(path)
+                    written = True
                 except PlaywrightError:
                     pass
-                if _wait_for_resume_attached(page, field, filename):
+                if written and _wait_for_resume_attached(page, field, filename):
                     return True
-        return _resume_is_attached(page, field, filename)
+        return written and _resume_is_attached(page, field, filename)
 
     def verify_resume_attached(self, page: Page, field: DiscoveredField, filename: str) -> bool:
         """Re-check, with a short bounded wait, that the resume control this

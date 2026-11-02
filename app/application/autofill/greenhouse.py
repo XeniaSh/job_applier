@@ -644,16 +644,19 @@ class GreenhouseAdapter:
         path = str(resume_path)
         filename = resume_path.name
         set_files_error: str | None = None
+        written = False
         try:
-            _set_resume_files(page, field, path)
+            written = _set_resume_files(page, field, path)
         except PlaywrightError as exc:
             set_files_error = type(exc).__name__
         # A single write, then the same bounded poll `verify_resume_attached`
         # uses for its final re-check -- the modern widget's completion may
         # arrive a beat after the write returns (a genuine upload/network
         # round-trip), and this is never a second `_set_resume_files` call,
-        # only repeated readback.
-        attached = _wait_for_resume_attached(page, field, filename)
+        # only repeated readback. A failed or no-op write is never confirmed
+        # from the filename alone: another profile's same-basename file may
+        # already be shown.
+        attached = written and _wait_for_resume_attached(page, field, filename)
         logger.warning(
             "greenhouse_resume stage=upload_attempt operation=set_resume_files outcome=%s "
             "set_files_error_class=%s expected_basename=%s %s",
@@ -1433,7 +1436,8 @@ def _field_locator(page: Page, field: DiscoveredField) -> Locator:
     return locator
 
 
-def _set_resume_files(page: Page, field: DiscoveredField, path: str) -> None:
+def _set_resume_files(page: Page, field: DiscoveredField, path: str) -> bool:
+    """Returns True only when a full-path write completed without error."""
     # The discovered resume file input is always preferred, over file:// and
     # HTTP(S) alike: a nearby button is never assumed to be the attach
     # trigger just because the transport is HTTP(S). Only when no resume
@@ -1447,25 +1451,26 @@ def _set_resume_files(page: Page, field: DiscoveredField, path: str) -> None:
     target = _resume_file_locator(page, field)
     if target.count() > 0:
         target.set_input_files(path, timeout=5_000, no_wait_after=True)
-        return
+        return True
     if page.url.startswith("file:"):
-        return
+        return False
     # The adjacent-chooser fallback only ever opens the *default* "#resume"
     # widget's own chooser. A field that explicitly identifies a different,
     # missing control must stay missing -- it must never fall through to
     # some other control's nearby chooser button just because one happens to
     # exist next to "#resume" elsewhere on the page.
     if field.element_id and field.element_id != "resume":
-        return
+        return False
     # A submit control is never the resume-attach trigger; excluding it keeps
     # this path from ever mistaking a nearby Submit button for one (no submit
     # capability exists anywhere in this adapter).
     button = page.locator("#resume").locator("xpath=..").locator('button:not([type="submit"])')
     if button.count() == 0:
-        return
+        return False
     with page.expect_file_chooser(timeout=5_000) as chooser:
         button.first.click(timeout=3_000)
     chooser.value.set_files(path)
+    return True
 
 
 def _resume_file_locator(page: Page, field: DiscoveredField) -> Locator:

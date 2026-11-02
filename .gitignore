@@ -9,6 +9,8 @@ data/
 data/debug/
 *.eml
 resumes/*.pdf
+resumes/**/*.pdf
+resume_profiles.local.yaml
 !resumes/.gitkeep
 target_companies_*_output.*
 target_companies_titles.txt
