@@ -20,4 +20,6 @@ data/target_company_analysis_cache.json
 candidate_profile.local.yaml
 candidate_profile.local.*
 PROGRESS.md
+resume_profiles.local.yaml
+resume_profiles.local.*
 
