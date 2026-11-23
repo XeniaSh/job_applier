@@ -67,6 +67,15 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   persistence after blur. Other requires that question's explicit instruction.
   Forty-seven focused country tests pass; full supervised Prepare acceptance is
   pending. Uncertain values and unconfirmed clearing remain manual.
+- TASK-098 (accepted locally; supervised Prepare pending): modern Greenhouse phone
+  dialing-country picker is now filled from the configured international phone
+  only (calling code resolved from the control's own displayed options; shared,
+  missing or non-international codes stay manual; blur-persisted own-display
+  proof plus exact sibling phone digits and a final paired-control recheck).
+  Codex verified 204 focused checks, Ruff and diff checks. Supersedes the "phone dialing country
+  is manual" note above for that case; TASK-091 status stays historical. See
+  `docs/greenhouse-country-control-evidence.md`; supervised no-Submit smoke
+  check pending.
 - TASK-090..092 and TASK-094 have completed their local iterations. The current
   request is TASK-095 SmartRecruiters Prepare and independent TASK-096 desired
   salary autofill, with separate commits. TASK-095 is blocked on a connected

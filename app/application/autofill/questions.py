@@ -117,6 +117,7 @@ class QuestionKind(StrEnum):
     FULL_NAME = "full_name"
     EMAIL = "email"
     PHONE = "phone"
+    PHONE_DIAL_COUNTRY = "phone_dial_country"
     LOCATION = "location"
     COUNTRY = "country"
     ANTICIPATED_WORK_COUNTRY = "anticipated_work_country"
@@ -192,6 +193,7 @@ LLM_FORBIDDEN_KINDS = frozenset(
         QuestionKind.FULL_NAME,
         QuestionKind.EMAIL,
         QuestionKind.PHONE,
+        QuestionKind.PHONE_DIAL_COUNTRY,
         QuestionKind.LOCATION,
         QuestionKind.COUNTRY,
         QuestionKind.ANTICIPATED_WORK_COUNTRY,

@@ -32,6 +32,51 @@ manual/unsupported, preserving native or visual required markers. It never
 fills it from residence, citizenship, travel location, employer or a generated
 answer. The actual phone-number input and legacy `.iti` handling are unchanged.
 
+#### Scoped phone dialing-country fill (task 098)
+
+The historical manual/unsupported behaviour above is superseded only for a
+configured international (`+`-prefixed, 8-15 digit) `identity.phone`; residence,
+citizenship and location are never consulted (`QuestionKind.PHONE_DIAL_COUNTRY`,
+never LLM-enriched). The adapter opens this control's own scoped listbox and
+resolves the calling code from the *displayed* options (`"<Country> +<code>"`):
+exactly one displayed code may prefix the number and exactly one option may carry
+it, so overlapping (`+1` vs `+1242`) codes, a code not offered, or a
+missing/non-international/malformed number stay manual with a warning. Codes in
+a small documented known-shared set (`phone.SHARED_CALLING_CODES`: `+1`, `+7`,
+`+39`, `+44`, `+47`, `+61`, `+212`, `+262`, `+358`, `+590`, `+599`) never
+resolve, even when a partial/filtered/virtualized list renders only one matching
+country (a configured number cannot prove US vs Canada, or Russia vs
+Kazakhstan). This is not complete world phone validation: any other shared code
+is only caught when several matching options are displayed. Unique codes such as
+`+998` and `+49` work. If the widget auto-prepends the picked code onto its own
+phone input, the configured number is retyped through that input's ordinary
+interaction and exact digits plus the committed country are re-verified (else
+manual); the modern phone input is likewise verified together with its own
+country in either field order. Proofs are scoped to the current page/URL and
+cleared on each Prepare. It clicks that option, then requires this control's own visible
+committed display (flag plus exactly that `+code`, empty search input) to match
+immediately, after blur and through a bounded settle window. Independent
+read-back re-reads the same display and additionally requires the sibling
+`.phone-input` phone input to hold the configured digits, an empty or code-only
+input being tolerated there only because the phone field may not have been
+filled yet (a dropped, doubled or substituted code is unconfirmed). At the end of
+Prepare, after every other fill and upload, a strict final recheck re-reads each
+filled dialing country and its own paired phone input: the country display must
+still match and, if the phone was filled, its input must hold exactly the
+configured digits (empty or code-only is never complete). A failed recheck, such
+as a later phone blur clearing the country, removes the stale filled record(s)
+and reports them unresolved with a manual warning; a country committed before a
+phone write that is empty afterwards also fails that write. Typed text, placeholders, live regions, highlighted options and
+unrelated widgets are never evidence. The plain phone input keeps the full
+international number; legacy `.iti` national formatting is unchanged. Limit: the
+code is resolved only from options rendered in the open listbox (no prefix-query
+typing), so a virtualized list that omits the code fails closed.
+
+Minimal supervised no-Submit smoke check: on one real modern Greenhouse form with
+a configured `+998...` phone, run Prepare, confirm the picker shows the Uzbekistan
+flag and `+998` after blur, the phone input shows exactly the configured digits,
+residence is unchanged, and stop before Submit.
+
 ### Residence instructions and committed state
 
 Both Stripe residence questions explicitly instructed selecting Other when the

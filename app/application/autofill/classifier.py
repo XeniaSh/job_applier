@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.models import FieldClassification
+from app.application.autofill.phone import international_phone_digits
 from app.application.autofill.questions import QuestionKind, QuestionValue, map_question
 from app.application.candidate_profile import CandidateProfile
 
@@ -13,13 +14,16 @@ _UNSUPPORTED_TYPES = frozenset({"signature", "captcha", "unknown"})
 # (`greenhouse._PHONE_DIAL_COUNTRY_FIELD_TYPE`, discovered only via its
 # evidenced `.phone-input__country` structural nesting) is never the
 # residence/citizenship/work-country question `QuestionKind.COUNTRY` maps
-# to -- it must stay unresolved regardless of any profile data, and is kept
-# out of `map_question` entirely rather than risk it ever being matched by
-# a country-shaped kind.
+# to -- no residence/citizenship/location profile data can ever resolve it,
+# and it is kept out of `map_question` entirely rather than risk it ever
+# being matched by a country-shaped kind. It is driven only by the
+# configured international phone number (`QuestionKind.PHONE_DIAL_COUNTRY`);
+# without one (missing/non-international) it stays unresolved and manual.
+# Older evidence (never filled) predates this phone-only path.
 _PHONE_DIAL_COUNTRY_TYPE = "phone_dial_country"
 _PHONE_DIAL_COUNTRY_UNRESOLVED_REASON = (
     "Phone dialing country code selector (not country of residence/citizenship) "
-    "-- requires manual selection."
+    "-- requires manual selection (configured phone is missing or not international)."
 )
 
 
@@ -39,12 +43,25 @@ class ClassifiedField:
 
 def classify_field(field: DiscoveredField, profile: CandidateProfile) -> ClassifiedField:
     if field.field_type == _PHONE_DIAL_COUNTRY_TYPE:
+        # The value is only ever the configured international phone number
+        # (never residence/citizenship/location); the adapter resolves the
+        # calling code from the control's own displayed options. A missing,
+        # non-international, or malformed number stays manual.
+        digits = international_phone_digits(profile.identity.phone)
+        if digits is None:
+            return ClassifiedField(
+                field=field,
+                classification=FieldClassification.UNSUPPORTED,
+                fill=False,
+                kind=QuestionKind.PHONE_DIAL_COUNTRY,
+                unresolved_reason=_PHONE_DIAL_COUNTRY_UNRESOLVED_REASON,
+            )
         return ClassifiedField(
             field=field,
-            classification=FieldClassification.UNSUPPORTED,
-            fill=False,
-            kind=QuestionKind.UNKNOWN,
-            unresolved_reason=_PHONE_DIAL_COUNTRY_UNRESOLVED_REASON,
+            classification=FieldClassification.SUPPORTED_DETERMINISTIC,
+            value=f"+{digits}",
+            fill=True,
+            kind=QuestionKind.PHONE_DIAL_COUNTRY,
         )
     if field.field_type in _UNSUPPORTED_TYPES:
         return ClassifiedField(

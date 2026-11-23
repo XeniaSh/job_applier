@@ -30,8 +30,11 @@ from app.application.autofill.options import (
 from app.application.candidate_profile import canonical_academic_level
 from app.application.autofill.phone import (
     calling_code_occurs_once,
+    digits_only,
     extract_calling_code,
+    international_phone_digits,
     national_number_for_calling_code,
+    resolve_dial_option,
 )
 from app.application.autofill.questions import QuestionKind
 from app.application.autofill import react_controls
@@ -79,14 +82,32 @@ _COMBOBOX_IDS = frozenset({"country", "candidate-location", "candidate_location"
 # way to tell it apart from a genuine residence/citizenship country question
 # sharing the same accessible name is this exact nesting under
 # `.phone-input__country`. `field_type="phone_dial_country"` (never reused
-# for any other control) routes it straight to the existing
-# UNSUPPORTED/manual-completion path in `classifier.classify_field` -- it is
-# never mapped through `QuestionKind.COUNTRY`, so no residence, citizenship,
-# temporary current_location, or employer value (and no generated LLM
-# answer, which the service's UNSUPPORTED classification check keeps from
-# reaching the DOM) can ever be written into it.
+# for any other control) is classified by `classifier.classify_field` from
+# the configured international phone number only (`QuestionKind.PHONE_DIAL_COUNTRY`,
+# see `_fill_phone_dial_country`); with no such number it stays on the
+# UNSUPPORTED/manual-completion path. It is never mapped through
+# `QuestionKind.COUNTRY`, so no residence, citizenship, temporary
+# current_location, or employer value (and no generated LLM answer) can ever
+# be written into it.
 _PHONE_DIAL_COUNTRY_FIELD_TYPE = "phone_dial_country"
 _PHONE_DIAL_COUNTRY_ANCESTOR_JS = "el => el.closest('.phone-input__country') !== null"
+# The one plain phone input sharing this dialing-country control's own
+# `.phone-input` wrapper (null when absent or ambiguous -- never a page-wide
+# or unrelated widget's input).
+_PHONE_SIBLING_VALUE_JS = """el => {
+    const root = el.closest('.phone-input');
+    if (!root) return null;
+    const inputs = Array.from(root.querySelectorAll('input')).filter(input =>
+        input !== el
+        && input.getAttribute('role') !== 'combobox'
+        && !input.closest('.phone-input__country')
+        && !['hidden', 'submit', 'button', 'reset', 'image'].includes(input.type));
+    return inputs.length === 1 ? (inputs[0].value || '') : null;
+}"""
+
+
+def _phone_dial_key(field: DiscoveredField) -> str:
+    return field.element_id or field.name or field.label
 
 # Structural evidence that an anchor is Greenhouse's own apply action on a
 # target company's custom careers domain (see `GreenhouseTargetVacancyResolver`
@@ -297,6 +318,16 @@ class GreenhouseAdapter:
     last_choice_selected: str | None = None
     last_choice_trace: dict[str, object] | None = None
 
+    # Proof recorded by a confirmed phone dialing-country fill, keyed by the
+    # control's identity: (page object, page URL, calling code, option
+    # country name, expected phone digits). `read_back` only confirms against
+    # a proof made on that same page and URL (never a prior page's), and every
+    # `prepare_page` clears them. Created lazily per instance so subclasses
+    # that skip `__init__` still work.
+    @property
+    def _phone_dial_proofs(self) -> dict[str, tuple[object, str, str, str, str]]:
+        return self.__dict__.setdefault("_phone_dial_proofs_store", {})
+
     def recognize(self, page: Page) -> bool:
         return is_greenhouse_application_page(page)
 
@@ -315,6 +346,7 @@ class GreenhouseAdapter:
         UNSUPPORTED_FORM rather than guessing at an unfamiliar page.
         Local fixtures skip the extra settle.
         """
+        self._phone_dial_proofs.clear()
         already_form = self.recognize(page)
         logger.warning(
             "greenhouse_prepare stage=detail_detection already_form=%s page_host=%s",
@@ -470,6 +502,8 @@ class GreenhouseAdapter:
             return self.fill_cover_letter(page, str(classified.value))
         locator = _field_locator(page, field)
         try:
+            if classified.kind is QuestionKind.PHONE_DIAL_COUNTRY:
+                return self._fill_phone_dial_country(page, locator, field, str(classified.value))
             if isinstance(classified.value, list) or field.field_type == "multiselect":
                 values = classified.value if isinstance(classified.value, list) else [str(classified.value)]
                 selected = _fill_multiselect(page, locator, field, values, classified.max_choices)
@@ -549,6 +583,16 @@ class GreenhouseAdapter:
                     }
                 return ok
             if classified.kind is QuestionKind.PHONE:
+                modern_dial = _modern_phone_dial_locator(locator)
+                if modern_dial is not None:
+                    committed_before = [
+                        proof
+                        for proof in self._phone_dial_proofs.values()
+                        if proof[0] is page and proof[1] == page.url
+                    ]
+                    return _fill_modern_phone(
+                        page, locator, modern_dial, str(classified.value), committed_before
+                    )
                 return _fill_phone(page, locator, str(classified.value), classified.country)
             if classified.kind is QuestionKind.PRIMARY_LANGUAGE:
                 return _fill_primary_language(page, locator, field, str(classified.value))
@@ -568,6 +612,134 @@ class GreenhouseAdapter:
         except PlaywrightError:
             return False
         return False
+
+    def _fill_phone_dial_country(
+        self, page: Page, locator: Locator, field: DiscoveredField, phone: str
+    ) -> bool:
+        """Select the phone widget's dialing country from this control's own
+        scoped listbox, using only the configured international phone number.
+
+        The calling code is resolved from the displayed options (never
+        inferred from the whole number, never a hardcoded country): exactly
+        one displayed code must prefix the number and exactly one option may
+        carry it, so shared (+1) or overlapping codes fail closed. The click
+        is confirmed from this control's own committed display, persisted
+        past blur, and any proof is recorded only after that.
+        """
+        key = _phone_dial_key(field)
+        self._phone_dial_proofs.pop(key, None)
+        digits = international_phone_digits(phone)
+        if digits is None:
+            return False
+        try:
+            locator.click(timeout=3_000)
+        except PlaywrightError:
+            locator.click(force=True, timeout=3_000)
+        texts = react_controls.scoped_visible_option_texts(page, locator)
+        resolved = resolve_dial_option(texts, digits)
+        if resolved is None:
+            logger.warning("phone_dial_country_unresolved element_id=%r options=%d", field.element_id, len(texts))
+            return _fail_combobox_fill(page, locator, None)
+        for _attempt in range(2):
+            option = react_controls.scoped_matching_option_exact_normalized(page, locator, resolved.text)
+            if option is None:
+                break
+            try:
+                option.click(timeout=3_000)
+            except PlaywrightError:
+                try:
+                    option.click(force=True, timeout=3_000)
+                except PlaywrightError:
+                    break
+            if react_controls.confirm_phone_dial_country_committed(page, locator, resolved.code, resolved.name):
+                if not react_controls.confirm_phone_dial_country_persists_after_blur(
+                    page, locator, resolved.code, resolved.name
+                ):
+                    break
+                _dismiss_overlays(page)
+                # The widget may auto-prepend the picked code onto its own
+                # phone input; restore the configured number through that
+                # input's ordinary interaction, never leaving a doubled code.
+                if not _restore_phone_after_dial(page, locator, resolved.code, resolved.name, phone, digits):
+                    break
+                self._phone_dial_proofs[key] = (page, page.url, resolved.code, resolved.name, digits)
+                return True
+        return _fail_combobox_fill(page, locator, None)
+
+    def _read_back_phone_dial_country(self, page: Page, field: DiscoveredField) -> str | None:
+        proof = self._phone_dial_proofs.get(_phone_dial_key(field))
+        if proof is None:
+            return None
+        proof_page, proof_url, code, name, digits = proof
+        if proof_page is not page or proof_url != page.url:
+            return None
+        locator = _field_locator(page, field)
+        try:
+            display = react_controls.read_phone_dial_committed_display(locator)
+            if not react_controls.phone_dial_display_matches(display, code, name):
+                return None
+            sibling = locator.evaluate(_PHONE_SIBLING_VALUE_JS)
+        except PlaywrightError:
+            return None
+        if sibling is None:
+            return None
+        sibling_digits = digits_only(str(sibling))
+        # The phone input is this selector's own; it may still be empty or
+        # hold only the code the widget seeded (the phone field's own
+        # read-back confirms the number), otherwise its digits must equal
+        # the configured number exactly (no dropped, doubled, or substituted
+        # code).
+        if sibling_digits not in ("", code, digits):
+            return None
+        return f"+{code}"
+
+    def final_phone_dial_check(
+        self,
+        page: Page,
+        dial_field: DiscoveredField,
+        phone_field: DiscoveredField | None,
+        phone_value: str | None,
+    ) -> tuple[bool, bool | None]:
+        """End-of-Prepare recheck of one confirmed modern phone dialing
+        country and, if it was filled, its own paired phone input.
+
+        Returns `(dial_ok, phone_ok)`. `phone_ok` is None when no filled phone
+        was paired with this widget. Stricter than `read_back` (which accepts
+        an empty/code-only sibling before the phone is filled): the paired
+        phone input must hold exactly the configured digits now, so a phone
+        later cleared or reverted is never complete, and the country is not
+        complete when its own paired phone is not. Everything is read from
+        this widget's own controls and the fill proof; never page-wide.
+        """
+        proof = self._phone_dial_proofs.get(_phone_dial_key(dial_field))
+        if proof is None or proof[0] is not page or proof[1] != page.url:
+            return False, None
+        _, _, code, name, _ = proof
+        try:
+            dial = _field_locator(page, dial_field)
+            if not react_controls.phone_dial_display_matches(
+                react_controls.read_phone_dial_committed_display(dial), code, name
+            ):
+                return False, None
+            # The widget's own paired phone input must exist exactly once and
+            # be readable before dial can be complete, even when no candidate
+            # phone field matches (a removed/ambiguous sibling fails closed).
+            own_phone = _phone_input_for_dial(dial)
+            if own_phone is None or dial.evaluate(_PHONE_SIBLING_VALUE_JS) is None:
+                return False, None
+            if phone_field is None:
+                return True, None
+            expected = international_phone_digits(phone_value)
+            phone = _field_locator(page, phone_field)
+            if expected is None or own_phone is None or phone.count() != 1:
+                return True, None
+            handle = phone.element_handle()
+            if not own_phone.evaluate("(el, other) => el === other", handle):
+                return True, None
+            phone_ok = digits_only(phone.input_value()) == expected and expected.startswith(code)
+        except PlaywrightError:
+            return False, None
+        return phone_ok, phone_ok
 
     def _record_privacy_trace(self, classified: ClassifiedField, trace: dict[str, object]) -> None:
         field = classified.field
@@ -747,6 +919,8 @@ class GreenhouseAdapter:
                 return str(completed) if completed else None
             names = _file_names(page, field)
             return names[0] if names else None
+        if field.field_type == _PHONE_DIAL_COUNTRY_FIELD_TYPE:
+            return self._read_back_phone_dial_country(page, field)
         locator = _field_locator(page, field)
         if field.field_type == "checkbox":
             return "true" if react_controls.is_checked(locator) else "false"
@@ -911,7 +1085,7 @@ def _discover_control(
     elif not required and field_type in _ORDINARY_VISUAL_REQUIRED_TYPES:
         required = _has_ordinary_visual_required_marker(locator, label)
     if phone_dial_country_relabel:
-        label = f"{label} (phone dialing country -- select manually)".strip()
+        label = f"{label} (phone dialing country)".strip()
     return DiscoveredField(
         label=label,
         name=name,
@@ -1612,6 +1786,121 @@ def _fill_phone(page: Page, locator: Locator, value: str, country: str | None) -
             return False
     actual_digits = "".join(ch for ch in composed if ch.isdigit())
     return filled and bool(national and (national in composed or "".join(ch for ch in national if ch.isdigit()) in actual_digits))
+
+
+# Modern `.phone-input` widget pairing: the phone input and its own dialing
+# country control are only ever paired through their shared `.phone-input`
+# wrapper, and only when each side is unique inside it (never page-wide).
+_PHONE_ROOT_XPATH = "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' phone-input ')][1]"
+_PHONE_PLAIN_INPUT_CSS = (
+    "input:not([role='combobox']):not(.phone-input__country *)"
+    ":not([type='hidden']):not([type='submit']):not([type='button'])"
+    ":not([type='reset']):not([type='image'])"
+)
+_PHONE_DIAL_COMBOBOX_CSS = ".phone-input__country input[role='combobox']"
+
+
+def _modern_phone_dial_locator(phone: Locator) -> Locator | None:
+    """This phone input's own dialing-country combobox, or None unless it sits
+    in a `.phone-input` widget with exactly one of each (legacy `.iti` and
+    plain phone inputs return None and keep their existing handling)."""
+    try:
+        root = phone.locator(_PHONE_ROOT_XPATH)
+        if root.count() != 1:
+            return None
+        dial = root.locator(_PHONE_DIAL_COMBOBOX_CSS)
+        inputs = root.locator(_PHONE_PLAIN_INPUT_CSS)
+        if dial.count() != 1 or inputs.count() != 1:
+            return None
+        if not phone.evaluate("(el, sel) => el.matches(sel)", _PHONE_PLAIN_INPUT_CSS):
+            return None
+        return dial
+    except PlaywrightError:
+        return None
+
+
+def _phone_input_for_dial(dial: Locator) -> Locator | None:
+    try:
+        root = dial.locator(_PHONE_ROOT_XPATH)
+        if root.count() != 1:
+            return None
+        inputs = root.locator(_PHONE_PLAIN_INPUT_CSS)
+        return inputs if inputs.count() == 1 else None
+    except PlaywrightError:
+        return None
+
+
+def _type_phone_input(phone: Locator, value: str) -> None:
+    # Ordinary click + fill only; never a DOM value injection.
+    try:
+        phone.click(timeout=3_000)
+    except PlaywrightError:
+        phone.click(force=True, timeout=3_000)
+    phone.fill("", timeout=5_000)
+    phone.fill(value, timeout=5_000)
+    phone.blur(timeout=1_000)
+
+
+def _fill_modern_phone(
+    page: Page,
+    phone: Locator,
+    dial: Locator,
+    value: str,
+    committed_before: list[tuple[object, str, str, str, str]] | None = None,
+) -> bool:
+    """Fill a modern `.phone-input` phone and verify it together with its own
+    dialing country: the input's digits must equal the configured number
+    exactly (no code doubled by the widget's formatter), and any committed
+    country must be a calling-code prefix of it. An uncommitted country is
+    fine here -- its own fill (either field order) verifies and, if the
+    widget prepends the code, restores this number. A country that was
+    already confirmed on this page (`committed_before`) must still show that
+    same selection after this write: one the write cleared or changed is not
+    an "uncommitted" country, so this fails and the final recheck reports it."""
+    digits = international_phone_digits(value)
+    if digits is None:
+        return _fill_text(page, phone, value)
+    for _attempt in range(2):
+        try:
+            _type_phone_input(phone, value)
+            if digits_only(phone.input_value()) == digits:
+                break
+        except PlaywrightError:
+            return False
+    else:
+        return False
+    display = react_controls.read_phone_dial_committed_display(dial)
+    if committed_before:
+        return any(
+            react_controls.phone_dial_display_matches(display, proof[2], proof[3])
+            and digits.startswith(proof[2])
+            for proof in committed_before
+        )
+    if display is None:
+        return True
+    code = extract_calling_code(display)
+    return code is not None and digits.startswith(code)
+
+
+def _restore_phone_after_dial(
+    page: Page, dial: Locator, code: str, name: str, phone: str, digits: str
+) -> bool:
+    """After a confirmed country pick: its own phone input must be empty,
+    hold only the seeded code, or already equal the number; if the widget
+    prepended the code onto a filled number, retype the configured number and
+    require exact digits and the committed country to still hold."""
+    phone_input = _phone_input_for_dial(dial)
+    if phone_input is None:
+        return False
+    try:
+        if digits_only(phone_input.input_value()) in ("", code, digits):
+            return True
+        _type_phone_input(phone_input, phone)
+        if digits_only(phone_input.input_value()) != digits:
+            return False
+    except PlaywrightError:
+        return False
+    return react_controls.confirm_phone_dial_country_persists_after_blur(page, dial, code, name)
 
 
 def _looks_like_phone_widget(page: Page, locator: Locator) -> bool:

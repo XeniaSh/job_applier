@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 import logging
+import re
 import tempfile
 import time
 
@@ -394,6 +395,7 @@ class AutofillService:
         resume_attachment_failed_required = False
 
         resume_items: list[ClassifiedField] = []
+        phone_widget_items: list[ClassifiedField] = []
         observe_final_fill_plan = getattr(adapter, "observe_final_fill_plan", None)
 
         sibling_kinds = frozenset(item.kind for item in classified)
@@ -556,6 +558,8 @@ class AutofillService:
             if item.fill:
                 if _fill_and_confirm(adapter, page, item, field_index=field_index):
                     filled.append(record)
+                    if item.kind in (QuestionKind.PHONE_DIAL_COUNTRY, QuestionKind.PHONE):
+                        phone_widget_items.append(item)
                     if item.kind is QuestionKind.SANCTIONS_RESIDENCE_NONE_OF_ABOVE:
                         sanctions_none_of_above_confirmed = True
                     if item.kind is QuestionKind.COVER_LETTER:
@@ -576,6 +580,11 @@ class AutofillService:
                             f"Residence country selection for '{item.field.label}' was not "
                             "confirmed: any visible selection must be checked and corrected "
                             "manually."
+                        )
+                    elif item.kind is QuestionKind.PHONE_DIAL_COUNTRY:
+                        warnings.append(
+                            f"Phone dialing country selection for '{item.field.label}' was not "
+                            "confirmed: check and select it manually."
                         )
                     else:
                         warnings.append(f"Read-back failed for '{item.field.label}'.")
@@ -697,6 +706,37 @@ class AutofillService:
                     warnings.append(
                         f"Resume attachment for '{item.field.label}' could not be confirmed at the "
                         "end of Prepare; please attach it manually before submitting."
+                    )
+
+        final_phone_dial_check = getattr(adapter, "final_phone_dial_check", None)
+        if final_phone_dial_check is not None:
+            # Modern Greenhouse phone dialing country, rechecked after every
+            # other fill/upload: a later phone write/blur or other field
+            # event may have cleared or reverted it or its own paired phone.
+            # Demotes only the stale filled record(s); other items, status
+            # and submit/resume handling are untouched.
+            phone_items = [item for item in phone_widget_items if item.kind is QuestionKind.PHONE]
+            for dial_item in [item for item in phone_widget_items if item.kind is QuestionKind.PHONE_DIAL_COUNTRY]:
+                dial_ok, paired_phone_ok, paired_phone = True, None, None
+                for phone_item in phone_items:
+                    dial_ok, paired_phone_ok = final_phone_dial_check(
+                        page, dial_item.field, phone_item.field, str(phone_item.value)
+                    )
+                    if paired_phone_ok is not None:
+                        paired_phone = phone_item
+                        break
+                if paired_phone_ok is None:
+                    dial_ok, _ = final_phone_dial_check(page, dial_item.field, None, None)
+                demote = [] if dial_ok else [dial_item]
+                if paired_phone is not None and paired_phone_ok is False:
+                    demote.append(paired_phone)
+                for stale in demote:
+                    identity = (stale.field.label, stale.field.name)
+                    filled[:] = [record for record in filled if (record.label, record.name) != identity]
+                    _append_unresolved(stale, _field_result(stale), unresolved_required, unresolved_optional)
+                    warnings.append(
+                        f"Phone dialing country/phone for '{stale.field.label}' could not be confirmed "
+                        "at the end of Prepare: check and correct both manually."
                     )
 
         privacy_trace = _build_privacy_acknowledgement_trace(classified, adapter, filled)
@@ -951,6 +991,9 @@ def _enrich_unresolved(
 ) -> ClassifiedField:
     if item.kind is QuestionKind.SALARY:
         return _decide_salary(item, profile=profile, vacancy=vacancy)
+    if item.kind is QuestionKind.PHONE_DIAL_COUNTRY:
+        # Driven only by the configured phone number; never LLM-enriched.
+        return item
     if item.fill:
         return item
     if item.kind is QuestionKind.COVER_LETTER and cover_letter_text:
@@ -1438,6 +1481,20 @@ def _readback_matches(item: ClassifiedField, raw: str | None) -> bool:
             for expected_value in expected_lower
         )
     wanted = str(expected).strip()
+    if item.kind is QuestionKind.PHONE_DIAL_COUNTRY:
+        # `actual` is the adapter's proven "+<code>"; it must prefix the
+        # configured international number.
+        from app.application.autofill.phone import digits_only
+
+        code = digits_only(actual)
+        wanted_digits = digits_only(wanted)
+        return (
+            re.fullmatch(r"\+\d{1,4}", actual) is not None
+            and wanted.startswith("+")
+            and bool(code)
+            and wanted_digits.startswith(code)
+            and len(wanted_digits) > len(code)
+        )
     if item.kind is QuestionKind.SALARY:
         # Strict numeric equality only: no substring/unit-suffix acceptance.
         return numeric_readback_matches(wanted, actual)

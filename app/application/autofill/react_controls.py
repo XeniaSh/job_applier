@@ -532,6 +532,85 @@ def confirm_country_selection_persists_after_blur(
             return False
 
 
+_PHONE_DIAL_DISPLAY_CODE_RE = re.compile(r"(?<!\d)\+\s?(\d{1,4})(?!\d)")
+_LETTERS_RE = re.compile(r"[^\W\d_]+")
+
+
+def read_phone_dial_committed_display(locator: Locator) -> str | None:
+    """This phone dialing-country control's own committed display text
+    (e.g. a flag glyph plus "+998"), read only from its own visible
+    single-value node with its own search input confirmed empty -- never
+    typed text, a placeholder, a live region, a highlighted option, or any
+    sibling/page-wide node. Kept separate from `read_country_committed_label`
+    (which intentionally rejects a bare dialing code for residence country).
+    """
+    node = _single_value_node(locator)
+    if node is None:
+        return None
+    try:
+        if not node.is_visible():
+            return None
+        text = " ".join((node.inner_text() or "").split())
+        typed = (locator.input_value() or "").strip()
+    except PlaywrightError:
+        return None
+    if typed or not text:
+        return None
+    return text
+
+
+def phone_dial_display_matches(display: str | None, code: str, name: str) -> bool:
+    """True only when `display` carries exactly the one expected `+code`
+    token and any country-name letters it also shows equal the clicked
+    option's own name (a flag glyph/image alone contributes no letters)."""
+    if not display or not code:
+        return False
+    tokens = _PHONE_DIAL_DISPLAY_CODE_RE.findall(display)
+    if tokens != [code]:
+        return False
+    remainder = _PHONE_DIAL_DISPLAY_CODE_RE.sub(" ", display)
+    if not _LETTERS_RE.search(remainder):
+        return True
+    return match_option_exact_normalized(name, [" ".join(remainder.split())]) is not None
+
+
+def confirm_phone_dial_country_committed(
+    page: Page, locator: Locator, code: str, name: str, timeout: int = 2_500
+) -> bool:
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        if phone_dial_display_matches(read_phone_dial_committed_display(locator), code, name):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            page.wait_for_timeout(50)
+        except PlaywrightError:
+            return False
+
+
+def confirm_phone_dial_country_persists_after_blur(
+    page: Page, locator: Locator, code: str, name: str, timeout: int = 300
+) -> bool:
+    """Blur, then require the committed display to keep matching for the
+    whole bounded window -- fails the instant a read stops matching (blur
+    revert or a transient/async re-render)."""
+    try:
+        locator.blur(timeout=1_000)
+    except PlaywrightError:
+        return False
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        if not phone_dial_display_matches(read_phone_dial_committed_display(locator), code, name):
+            return False
+        if time.monotonic() >= deadline:
+            return True
+        try:
+            page.wait_for_timeout(50)
+        except PlaywrightError:
+            return False
+
+
 def selection_display_is_dial_code_fragment(locator: Locator) -> bool:
     return _dial_code_fragment(locator) is not None
 

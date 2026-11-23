@@ -5,7 +5,7 @@ import pytest
 from app.application.autofill.classifier import classify_field
 from app.application.autofill.fields import DiscoveredField
 from app.application.autofill.models import FieldClassification
-from app.application.autofill.questions import SENSITIVE_DECLINE_INTENT
+from app.application.autofill.questions import SENSITIVE_DECLINE_INTENT, QuestionKind
 from app.application.candidate_profile import CandidateProfile
 
 
@@ -259,16 +259,16 @@ def test_unrecognized_control_is_unsupported() -> None:
     assert classified.fill is False
 
 
-def test_phone_dial_country_control_stays_unsupported_and_required_regardless_of_profile_country() -> None:
+def test_phone_dial_country_control_is_driven_by_phone_not_profile_country() -> None:
     """Greenhouse's phone-widget dialing-code country picker
     (`greenhouse._PHONE_DIAL_COUNTRY_FIELD_TYPE`, discovered only via its
     evidenced `.phone-input__country` nesting -- see
     `test_greenhouse_country_fill_diagnostics_fake_dom.py`) must never be
     filled from residence, citizenship, current_location, or employer --
-    it must stay UNSUPPORTED/unfilled even when every one of those is
-    explicitly set on the profile, and its own `required` marker must
-    survive untouched into the classified result (so it still counts as a
-    required field left unresolved, never silently dropped).
+    even when every one of those is explicitly set, only the configured
+    international phone number drives it (the older "always unsupported"
+    behaviour now applies only without such a number), and its own
+    `required` marker must survive untouched into the classified result.
     """
     profile = _profile(
         identity={
@@ -289,7 +289,7 @@ def test_phone_dial_country_control_stays_unsupported_and_required_regardless_of
 
     classified = classify_field(
         DiscoveredField(
-            label="Country(*) (phone dialing country -- select manually)",
+            label="Country(*) (phone dialing country)",
             field_type="phone_dial_country",
             required=True,
             element_id="country",
@@ -297,13 +297,61 @@ def test_phone_dial_country_control_stays_unsupported_and_required_regardless_of
         profile,
     )
 
+    # Driven only by the configured international phone number, never by
+    # the Canada residence/citizenship/location set on this profile.
+    assert classified.classification is FieldClassification.SUPPORTED_DETERMINISTIC
+    assert classified.kind is QuestionKind.PHONE_DIAL_COUNTRY
+    assert classified.fill is True
+    assert classified.value == "+15555550100"
+    assert classified.field.required is True
+    assert classified.country is None
+
+
+def _phone_dial_field() -> DiscoveredField:
+    return DiscoveredField(
+        label="Country(*) (phone dialing country)",
+        field_type="phone_dial_country",
+        required=True,
+        element_id="country",
+    )
+
+
+def test_phone_dial_country_uses_configured_phone_not_residence() -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": "+998 90 123 45 67",
+            "country": "Germany",
+        }
+    )
+    classified = classify_field(_phone_dial_field(), profile)
+    assert classified.kind is QuestionKind.PHONE_DIAL_COUNTRY
+    assert classified.fill is True
+    assert classified.value == "+998901234567"
+    assert "Germany" not in str(classified.value)
+
+
+@pytest.mark.parametrize("phone", ["0901234567", "998901234567", "+99", "+12345678901234567", "+998 abc 123 4567"])
+def test_phone_dial_country_stays_manual_without_valid_international_phone(phone: str) -> None:
+    profile = _profile(
+        identity={
+            "first_name": "Ada",
+            "last_name": "Example",
+            "email": "ada.example@example.test",
+            "phone": phone,
+            "country": "Uzbekistan",
+        }
+    )
+    classified = classify_field(_phone_dial_field(), profile)
     assert classified.classification is FieldClassification.UNSUPPORTED
+    assert classified.kind is QuestionKind.PHONE_DIAL_COUNTRY
     assert classified.fill is False
     assert classified.value is None
     assert classified.field.required is True
-    assert classified.unresolved_reason is not None
-    assert "Canada" not in (classified.unresolved_reason or "")
-    assert "Acme" not in (classified.unresolved_reason or "")
+    assert classified.unresolved_reason
+    assert "Uzbekistan" not in classified.unresolved_reason
 
 
 def test_work_auth_without_country_authorization_is_not_deterministic() -> None:

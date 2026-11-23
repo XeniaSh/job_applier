@@ -455,10 +455,11 @@ def test_other_fallback_blur_revert_fails_the_fill_and_stays_manual() -> None:
 
 
 # --- Phone dialing-country widget: real structural discovery, required
-# asterisk preserved without a native required attribute, never filled ----
+# asterisk preserved without a native required attribute; an unresolvable
+# (shared +1 / no options) phone code stays unfilled ----
 
 
-def test_phone_dial_country_widget_is_discovered_required_and_never_filled() -> None:
+def test_phone_dial_country_widget_is_discovered_required_and_shared_plus_one_stays_unfilled() -> None:
     session = _open()
     try:
         adapter = GreenhouseAdapter()
@@ -490,15 +491,20 @@ def test_phone_dial_country_widget_is_discovered_required_and_never_filled() -> 
             }
         )
         classified_phone = classify_field(phone_field, profile)
-        assert classified_phone.fill is False
-        assert classified_phone.value is None
+        # Driven only by the configured phone, never the Uzbekistan residence.
+        assert classified_phone.kind is QuestionKind.PHONE_DIAL_COUNTRY
+        assert classified_phone.fill is True
+        assert classified_phone.value == "+15555550100"
 
         classified_residence = classify_field(residence_field, profile)
         assert classified_residence.kind is QuestionKind.COUNTRY
         assert classified_residence.value == "Uzbekistan"
 
-        # No fill was ever attempted for the phone dial-country field --
-        # its own display must stay exactly as rendered, never touched.
+        # This fixture's picker offers no options and the configured +1
+        # number is not resolvable anyway: the fill fails closed, nothing is
+        # committed, and no proof exists for a read-back to confirm.
+        assert adapter.fill_field(session.page, classified_phone) is False
+        assert adapter.read_back(session.page, phone_field) is None
         assert session.page.locator(
             "#phone-widget .select__single-value"
         ).inner_text().strip() == ""
@@ -509,9 +515,9 @@ def test_phone_dial_country_widget_is_discovered_required_and_never_filled() -> 
 
 
 # --- Service-level boundary: the required phone dialing-country picker
-# must stay unsupported/unfilled through the *whole* real service pipeline,
-# never only `classify_field` in isolation -- even with a generator
-# available and willing to answer anything --------------------------------
+# must stay unfilled (here: unresolvable shared +1, no options) through the
+# *whole* real service pipeline, never only `classify_field` in isolation --
+# even with a generator available and willing to answer anything ----------
 
 _MINIMAL_PHONE_WIDGET_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -570,11 +576,8 @@ class _AnyAnswerGenerator:
     including the phone dialing-country picker -- so this test proves a
     generator merely being *available* (and willing to answer anything)
     can never leak a fabricated value into that control. `classify_field`
-    already routes it to UNSUPPORTED/`fill=False` before
-    `_enrich_unresolved` is ever reached for it, and the service's own
-    UNSUPPORTED-classification branch never reaches the generic DOM-fill
-    path regardless of what `_enrich_unresolved` does to
-    `item.fill`/`item.value` afterwards.
+    classifies it from the configured phone only (never a generated
+    value), and the adapter fails closed when that code cannot be resolved.
     """
 
     def generate(
@@ -591,17 +594,17 @@ class _AnyAnswerGenerator:
         return "United States"
 
 
-def test_required_phone_dial_country_stays_unsupported_and_unfilled_through_full_service_with_generator(
+def test_required_unresolvable_phone_dial_country_stays_unfilled_through_full_service_with_generator(
     tmp_path: Path,
 ) -> None:
     """End-to-end through the real service pipeline
     (`AutofillService._fill_open_page` -> `discover_fields` ->
-    `classify_field` -> `_enrich_unresolved` -> the fill loop's own
-    UNSUPPORTED-classification branch), never only `classify_field` in
+    `classify_field` -> fill loop), never only `classify_field` in
     isolation: even with a generator available and willing to answer any
-    field, the required phone dialing-country picker must still be
-    reported as both unsupported and unresolved-required, must never
-    receive a DOM fill, and the form must never be submitted. Uses a
+    field, the required phone dialing-country picker (shared +1, no
+    options) must still be reported unresolved-required with a manual
+    warning, must never receive a fabricated value, and the form must
+    never be submitted. Uses a
     minimal, test-local page (just the phone widget) rather than the
     shared multi-field evidence fixture, so this generator can never be
     handed, and so never leak a fabricated value into, any other field.
@@ -634,20 +637,19 @@ def test_required_phone_dial_country_stays_unsupported_and_unfilled_through_full
             vacancy, profile, Path("unused_resume.pdf"), session, GreenhouseAdapter()
         )
 
-        phone_unsupported = [
-            record
-            for record in result.unsupported_fields
-            if record.note and "Phone dialing country code selector" in record.note
-        ]
-        assert len(phone_unsupported) == 1
-        assert phone_unsupported[0].required is True
-
+        # The configured +1 number is ambiguous/unresolvable for this
+        # picker (no options), so the fill fails closed: never confirmed,
+        # reported unresolved-required with a manual-selection warning, and
+        # the generator's fabricated answer never reaches the control.
+        assert not [r for r in result.filled_fields if "phone dialing country" in r.label.lower()]
         phone_unresolved = [
             record
             for record in result.unresolved_required_fields
-            if record.note and "Phone dialing country code selector" in record.note
+            if "phone dialing country" in record.label.lower()
         ]
         assert len(phone_unresolved) == 1
+        assert phone_unresolved[0].required is True
+        assert any("Phone dialing country selection" in w for w in result.warnings)
 
         assert session.page.locator(
             "#phone-widget .select__single-value"
