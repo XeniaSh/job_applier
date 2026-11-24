@@ -257,8 +257,11 @@ def test_connection_failure(monkeypatch) -> None:
         adapter=None,
     )
 
+    # Public list_mailboxes() runs in a supervised child process that would not see
+    # this monkeypatch (and would hit the real network), so exercise the direct path.
+    # Supervision itself is covered by loopback tests in test_imap_runtime_reliability.py.
     with pytest.raises(EmailConnectionError):
-        client.list_mailboxes()
+        client._list_mailboxes_direct()
 
 
 def test_incremental_uid_search_falls_back_to_all_filter_when_server_returns_stale_uid() -> None:

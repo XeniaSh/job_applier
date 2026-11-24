@@ -16,7 +16,7 @@ import re
 import sys
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 
 import typer
 from pydantic import ValidationError
@@ -377,6 +377,54 @@ def _build_linkedin_email_collector(
     return LinkedInEmailCollector(**kwargs)
 
 
+def _build_email_client(settings: Settings, *, mark_as_read: bool | None = None) -> EmailIMAPClient:
+    return EmailIMAPClient(
+        host=settings.linkedin_email_imap_host,
+        port=settings.linkedin_email_imap_port,
+        username=settings.linkedin_email_username,
+        password=settings.linkedin_email_password,
+        folder=settings.linkedin_email_folder,
+        search_days=settings.linkedin_email_search_days,
+        mark_as_read=settings.linkedin_email_mark_as_read if mark_as_read is None else mark_as_read,
+        socket_timeout_seconds=settings.linkedin_email_imap_timeout_seconds,
+        collection_timeout_seconds=settings.linkedin_email_collection_timeout_seconds,
+    )
+
+
+def _build_runtime_collectors(
+    *,
+    settings: Settings,
+    analyzer: VacancyAnalyzer,
+    seen_jobs: SeenJobsStorage,
+    email_client: EmailIMAPClient,
+) -> list[RuntimeCollector]:
+    """Regular-run collectors. LINKEDIN_EMAIL_ENABLED=false only skips email discovery."""
+    runtime_collectors: list[RuntimeCollector] = []
+    if settings.linkedin_email_enabled:
+        linkedin_collector = _build_linkedin_email_collector(
+            settings=settings,
+            analyzer=analyzer,
+            seen_jobs=seen_jobs,
+            email_client=email_client,
+        )
+        runtime_collectors.append(
+            RuntimeCollector(
+                name="linkedin-email",
+                collect_fn=linkedin_collector.collect,
+                diagnostics_fn=getattr(linkedin_collector, "last_sync_diagnostics", None),
+            )
+        )
+    else:
+        _run_log(
+            "linkedin-email: disabled (LINKEDIN_EMAIL_ENABLED=false); skipping email discovery, ATS discovery continues",
+            component="main",
+        )
+    if settings.greenhouse_boards:
+        greenhouse_collector = GreenhouseCollector(boards=settings.greenhouse_boards)
+        runtime_collectors.append(RuntimeCollector(name="greenhouse", collect_fn=greenhouse_collector.collect))
+    return runtime_collectors
+
+
 def _linkedin_account_key(username: str) -> str:
     digest = hashlib.sha256(username.strip().lower().encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -417,15 +465,7 @@ def collect_linkedin_email(
 
     analyzer = build_analyzer(settings)
     seen_jobs = SeenJobsStorage()
-    email_client = EmailIMAPClient(
-        host=settings.linkedin_email_imap_host,
-        port=settings.linkedin_email_imap_port,
-        username=settings.linkedin_email_username,
-        password=settings.linkedin_email_password,
-        folder=settings.linkedin_email_folder,
-        search_days=settings.linkedin_email_search_days,
-        mark_as_read=settings.linkedin_email_mark_as_read,
-    )
+    email_client = _build_email_client(settings)
     collector = _build_linkedin_email_collector(
         settings=settings,
         analyzer=analyzer,
@@ -1563,6 +1603,27 @@ def _log_smartrecruiters_bounds(result: SmartRecruitersWatchResult) -> None:
     )
 
 
+def _run_watch_stage(provider: str, companies: list[Any], watch: Callable[[list[Any]], Any]) -> Any:
+    """Run one ATS watcher with sanitized start/done/failed progress logs."""
+    _run_log(f"Collect start: source=ats:{provider} companies={len(companies)}", component="main")
+    started = time.monotonic()
+    try:
+        result = watch(companies)
+    except Exception as exc:
+        _run_log(
+            f"Collect failed: source=ats:{provider} error_type={type(exc).__name__} "
+            f"elapsed_ms={max(0, int((time.monotonic() - started) * 1000))}",
+            component="main",
+        )
+        raise
+    _run_log(
+        f"Collect done: source=ats:{provider} vacancies={len(result.vacancies)} errors={len(result.errors)} "
+        f"elapsed_ms={max(0, int((time.monotonic() - started) * 1000))}",
+        component="main",
+    )
+    return result
+
+
 def _run_target_companies_cycle(
     *,
     settings: Settings,
@@ -1624,15 +1685,17 @@ def _run_target_companies_cycle(
         item.name.casefold(): item
         for item in (*greenhouse_companies, *lever_companies, *ashby_companies, *smartrecruiters_companies)
     }
-    greenhouse_watch_result = (watcher or GreenhouseTargetWatcher()).watch(greenhouse_companies)
-    lever_watch_result = (lever_watcher or LeverTargetWatcher()).watch(lever_companies)
-    ashby_watch_result = (ashby_watcher or AshbyTargetWatcher()).watch(ashby_companies)
+    greenhouse_watch_result = _run_watch_stage(
+        "greenhouse", greenhouse_companies, (watcher or GreenhouseTargetWatcher()).watch
+    )
+    lever_watch_result = _run_watch_stage("lever", lever_companies, (lever_watcher or LeverTargetWatcher()).watch)
+    ashby_watch_result = _run_watch_stage("ashby", ashby_companies, (ashby_watcher or AshbyTargetWatcher()).watch)
     if smartrecruiters_watcher is None and smartrecruiters_companies:
         smartrecruiters_watcher = SmartRecruitersTargetWatcher(
             page_limit=100, max_pages=10, max_detail_fetches=100
         )
     smartrecruiters_watch_result = (
-        smartrecruiters_watcher.watch(smartrecruiters_companies)
+        _run_watch_stage("smartrecruiters", smartrecruiters_companies, smartrecruiters_watcher.watch)
         if smartrecruiters_watcher is not None
         else SmartRecruitersWatchResult(vacancies=[], errors=[])
     )
@@ -2430,15 +2493,7 @@ def send_linkedin_telegram(
     analyzer = build_analyzer(settings)
     seen_jobs = SeenJobsStorage()
     deliveries = TelegramDeliveryStorage()
-    email_client = EmailIMAPClient(
-        host=settings.linkedin_email_imap_host,
-        port=settings.linkedin_email_imap_port,
-        username=settings.linkedin_email_username,
-        password=settings.linkedin_email_password,
-        folder=settings.linkedin_email_folder,
-        search_days=settings.linkedin_email_search_days,
-        mark_as_read=settings.linkedin_email_mark_as_read,
-    )
+    email_client = _build_email_client(settings)
     collector = _build_linkedin_email_collector(
         settings=settings,
         analyzer=analyzer,
@@ -2604,15 +2659,7 @@ def prepare_telegram_applications(
         model=settings.llm_model,
     )
     resume_profiles = _load_configured_resume_profiles(settings)
-    email_client = EmailIMAPClient(
-        host=settings.linkedin_email_imap_host,
-        port=settings.linkedin_email_imap_port,
-        username=settings.linkedin_email_username,
-        password=settings.linkedin_email_password,
-        folder=settings.linkedin_email_folder,
-        search_days=settings.linkedin_email_search_days,
-        mark_as_read=False,
-    )
+    email_client = _build_email_client(settings, mark_as_read=False)
     storage = TelegramDeliveryStorage()
     service = PreparationService(
         analyzer=analyzer,
@@ -2675,33 +2722,15 @@ def run_pipeline(
         model=settings.llm_model,
     )
     resume_profiles = _load_configured_resume_profiles(settings)
-    email_client = EmailIMAPClient(
-        host=settings.linkedin_email_imap_host,
-        port=settings.linkedin_email_imap_port,
-        username=settings.linkedin_email_username,
-        password=settings.linkedin_email_password,
-        folder=settings.linkedin_email_folder,
-        search_days=settings.linkedin_email_search_days,
-        mark_as_read=settings.linkedin_email_mark_as_read,
-    )
+    email_client = _build_email_client(settings)
     seen_jobs = SeenJobsStorage()
     deliveries = TelegramDeliveryStorage()
-    linkedin_collector = _build_linkedin_email_collector(
+    runtime_collectors = _build_runtime_collectors(
         settings=settings,
         analyzer=analyzer,
         seen_jobs=seen_jobs,
         email_client=email_client,
     )
-    runtime_collectors: list[RuntimeCollector] = [
-        RuntimeCollector(
-            name="linkedin-email",
-            collect_fn=linkedin_collector.collect,
-            diagnostics_fn=getattr(linkedin_collector, "last_sync_diagnostics", None),
-        )
-    ]
-    if settings.greenhouse_boards:
-        greenhouse_collector = GreenhouseCollector(boards=settings.greenhouse_boards)
-        runtime_collectors.append(RuntimeCollector(name="greenhouse", collect_fn=greenhouse_collector.collect))
     collectors: list[Collector] = runtime_collectors
     telegram_client = _telegram_client_for(settings, TelegramDestination.LINKEDIN)
     _recover_and_requeue_abandoned_preparations(
@@ -2995,6 +3024,14 @@ def run_pipeline(
         _run_log("Poller exiting", component="poller")
         _run_log("Signaling pipeline thread", component="main")
         pipeline_stop_event.set()
+        try:
+            from app.collectors import imap_helper
+
+            cancelled = imap_helper.cancel_active_helpers()
+            if cancelled:
+                _run_log(f"Cancelled {cancelled} in-flight IMAP helper(s)", component="main")
+        except Exception as exc:  # noqa: BLE001
+            _run_log(f"IMAP helper cancel failed: {type(exc).__name__}", component="main")
         try:
             pipeline_thread.join(timeout=_PIPELINE_JOIN_TIMEOUT_SECONDS)
             if pipeline_thread.is_alive():
@@ -3559,9 +3596,16 @@ def _collect_pipeline_items(
 ) -> PipelineResult:
     items: list[PipelineItem] = []
     for collector in collectors:
+        _run_log(f"Collect start: source={collector.name}", component="main")
+        collect_started = time.monotonic()
         try:
             result = collector.collect()
         except Exception as exc:  # noqa: BLE001
+            _run_log(
+                f"Collect failed: source={collector.name} error_type={type(exc).__name__} "
+                f"elapsed_ms={max(0, int((time.monotonic() - collect_started) * 1000))}",
+                component="main",
+            )
             items.append(
                 PipelineItem(
                     source=collector.name,
@@ -3571,6 +3615,11 @@ def _collect_pipeline_items(
             )
             continue
 
+        _run_log(
+            f"Collect done: source={collector.name} vacancies={len(result.vacancies)} "
+            f"elapsed_ms={max(0, int((time.monotonic() - collect_started) * 1000))}",
+            component="main",
+        )
         for vacancy in result.vacancies:
             identity = vacancy_identity(vacancy)
             storage_key = _identity_storage_key(identity=identity, vacancy=vacancy)
@@ -4293,15 +4342,7 @@ def list_imap_folders() -> None:
         )
         raise typer.Exit(code=2) from exc
 
-    email_client = EmailIMAPClient(
-        host=settings.linkedin_email_imap_host,
-        port=settings.linkedin_email_imap_port,
-        username=settings.linkedin_email_username,
-        password=settings.linkedin_email_password,
-        folder=settings.linkedin_email_folder,
-        search_days=settings.linkedin_email_search_days,
-        mark_as_read=settings.linkedin_email_mark_as_read,
-    )
+    email_client = _build_email_client(settings)
 
     try:
         folders = email_client.list_mailboxes()
@@ -4331,15 +4372,7 @@ def preview_linkedin_email(
         )
         raise typer.Exit(code=2) from exc
 
-    email_client = EmailIMAPClient(
-        host=settings.linkedin_email_imap_host,
-        port=settings.linkedin_email_imap_port,
-        username=settings.linkedin_email_username,
-        password=settings.linkedin_email_password,
-        folder=settings.linkedin_email_folder,
-        search_days=settings.linkedin_email_search_days,
-        mark_as_read=False,
-    )
+    email_client = _build_email_client(settings, mark_as_read=False)
 
     try:
         messages = email_client.fetch_linkedin_messages()

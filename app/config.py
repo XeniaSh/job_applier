@@ -1,3 +1,5 @@
+import math
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
@@ -54,6 +56,9 @@ class Settings(BaseSettings):
     linkedin_email_bootstrap_message_limit: int = 500
     linkedin_email_bootstrap_lookback_days: int = 7
     linkedin_email_batch_size: int = 200
+    linkedin_email_enabled: bool = True
+    linkedin_email_imap_timeout_seconds: float = 30.0
+    linkedin_email_collection_timeout_seconds: float = 75.0
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     resumes_dir: Path = Path("resumes")
     resume_profiles_path: Path = Path(__file__).resolve().parent.parent / "resume_profiles.yaml"
@@ -68,6 +73,16 @@ class Settings(BaseSettings):
     undo_window_seconds: int = 600
     auto_submit_enabled: bool = False
     greenhouse_boards: Annotated[list[str], NoDecode] = []
+
+    @field_validator(
+        "linkedin_email_imap_timeout_seconds",
+        "linkedin_email_collection_timeout_seconds",
+    )
+    @classmethod
+    def validate_positive_finite_timeout(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("timeout must be a positive finite number of seconds")
+        return value
 
     @field_validator("greenhouse_boards", mode="before")
     @classmethod

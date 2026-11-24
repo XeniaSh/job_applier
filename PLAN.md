@@ -1807,6 +1807,26 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   without Submit. TASK-095 remains independently blocked; do not invent its
   adapter or a second feature commit from unsupported form assumptions.
 
+### TASK-099 — Bounded IMAP runtime reliability
+
+- **Status:** accepted locally (2026-11-25); supervised production restart pending.
+- **Scope:** A silent IMAP TLS peer blocked the whole regular cycle (including
+  all ATS discovery). Real IMAP operations now run in one supervised short-lived
+  helper under a hard total deadline (default 75s + ~2s reap), with a 30s socket
+  timeout, no in-cycle retries, sanitized errors, and no partial result or
+  checkpoint write on failure. `LINKEDIN_EMAIL_ENABLED=false` skips only regular
+  run email discovery. Per-source collect start/done/failed logs with
+  `elapsed_ms` cover email and each ATS watcher. No filter, resume, ATS Prepare,
+  salary, discovery-selection or provider changes.
+- **Details and restart procedure:** `docs/imap-runtime-reliability.md`.
+- **Verification:** 60 new reliability/privacy checks and 89 existing regression
+  checks pass; Ruff and diff checks pass. One existing worker-shutdown fixture
+  fails without its temporary resume configuration, reproduced with the
+  unchanged pre-fix worker; it is excluded from the final regression run.
+  Helpers are reaped on deadline/cancellation, have an independent child
+  deadline, and return no incomplete batch. Classification diagnostics omit
+  private subject previews. Production data and the live process are untouched.
+
 ### TASK-093 — Isolated evaluation of historical scoring/filter decisions
 
 - **Status:** approved, not started

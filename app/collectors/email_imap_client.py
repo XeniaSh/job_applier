@@ -3,6 +3,7 @@ from __future__ import annotations
 import imaplib
 import html
 import logging
+import math
 import re
 import ssl
 import time
@@ -16,6 +17,9 @@ from email.utils import parsedate_to_datetime
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_IMAP_SOCKET_TIMEOUT_SECONDS = 30.0
+DEFAULT_COLLECTION_TIMEOUT_SECONDS = 75.0
 
 
 class EmailConnectionError(Exception):
@@ -119,7 +123,17 @@ class EmailIMAPClient:
         search_days: int,
         mark_as_read: bool,
         adapter: IMAPAdapter | None = None,
+        socket_timeout_seconds: float = DEFAULT_IMAP_SOCKET_TIMEOUT_SECONDS,
+        collection_timeout_seconds: float = DEFAULT_COLLECTION_TIMEOUT_SECONDS,
     ) -> None:
+        for name, value in (
+            ("socket_timeout_seconds", socket_timeout_seconds),
+            ("collection_timeout_seconds", collection_timeout_seconds),
+        ):
+            if not math.isfinite(float(value)) or float(value) <= 0:
+                raise ValueError(f"{name} must be a positive finite number")
+        self._socket_timeout = float(socket_timeout_seconds)
+        self._collection_timeout = float(collection_timeout_seconds)
         self._host = host
         self._port = port
         self._username = username
@@ -149,7 +163,51 @@ class EmailIMAPClient:
         )
         return result.messages
 
+    def _helper_config(self) -> dict[str, object]:
+        return {
+            "host": self._host,
+            "port": self._port,
+            "username": self._username,
+            "password": self._password,
+            "folder": self._folder,
+            "search_days": self._search_days,
+            "mark_as_read": self._mark_as_read,
+            "socket_timeout_seconds": self._socket_timeout,
+        }
+
     def fetch_linkedin_messages_sync(
+        self,
+        *,
+        checkpoint_uid: int | None,
+        checkpoint_uidvalidity: str | None,
+        incremental_enabled: bool,
+        bootstrap_lookback_days: int,
+        bootstrap_message_limit: int,
+        batch_size: int,
+        rescan: bool,
+    ) -> ImapSyncResult:
+        kwargs = {
+            "checkpoint_uid": checkpoint_uid,
+            "checkpoint_uidvalidity": checkpoint_uidvalidity,
+            "incremental_enabled": incremental_enabled,
+            "bootstrap_lookback_days": bootstrap_lookback_days,
+            "bootstrap_message_limit": bootstrap_message_limit,
+            "batch_size": batch_size,
+            "rescan": rescan,
+        }
+        if self._provided_adapter is not None:
+            return self._fetch_sync_direct(**kwargs)
+        # Real network path: one supervised short-lived helper under a hard deadline.
+        from app.collectors import imap_helper
+
+        return imap_helper.run_supervised(
+            operation="sync",
+            config=self._helper_config(),
+            args=kwargs,
+            timeout_seconds=self._collection_timeout,
+        )
+
+    def _fetch_sync_direct(
         self,
         *,
         checkpoint_uid: int | None,
@@ -166,12 +224,11 @@ class EmailIMAPClient:
         timings_ms["connect"] = max(0, int((time.monotonic() - start_connect) * 1000))
         mode = "incremental"
         start_select = time.monotonic()
+        network_broken = False
         try:
             status, _ = client.select(f'"{self._folder}"')
             if status != "OK":
-                raise EmailConnectionError(
-                    f"Cannot select mailbox folder: {self._folder}"
-                )
+                raise EmailConnectionError("Cannot select mailbox.")
             timings_ms["select"] = max(0, int((time.monotonic() - start_select) * 1000))
 
             uidvalidity = self._read_uidvalidity(client)
@@ -273,10 +330,7 @@ class EmailIMAPClient:
                     has_job_link=self._has_linkedin_job_link(raw_message.email_message),
                 )
                 classification_counts[classification.reason] += 1
-                classification_events.append(
-                    f"UID={uid} classification={classification.reason} "
-                    f"subject_preview={_subject_preview(classification.normalized_subject)}"
-                )
+                classification_events.append(f"UID={uid} classification={classification.reason}")
                 if not classification.accepted:
                     rejected_subject += 1
                     rejection_events.append(
@@ -318,19 +372,36 @@ class EmailIMAPClient:
                 messages=messages,
             )
 
+        except (OSError, imaplib.IMAP4.error) as exc:
+            network_broken = True
+            raise _normalize_connection_error(exc) from None
         finally:
-            self._cleanup_client(client)
+            self._cleanup_client(client, abort=network_broken)
 
     def list_mailboxes(self) -> list[str]:
+        if self._provided_adapter is not None:
+            return self._list_mailboxes_direct()
+        from app.collectors import imap_helper
+
+        return imap_helper.run_supervised(
+            operation="list",
+            config=self._helper_config(),
+            args={},
+            timeout_seconds=self._collection_timeout,
+        )
+
+    def _list_mailboxes_direct(self) -> list[str]:
         client = self._open_authenticated_client()
+        network_broken = False
 
         try:
             try:
                 status, data = client.list()
-            except imaplib.IMAP4.error as exc:
-                raise EmailConnectionError(
-                    f"Cannot list IMAP mailboxes: {exc}"
-                ) from exc
+            except (OSError, imaplib.IMAP4.error) as exc:
+                network_broken = True
+                if isinstance(exc, OSError) or isinstance(exc, imaplib.IMAP4.abort):
+                    raise _normalize_connection_error(exc) from None
+                raise EmailConnectionError("Cannot list IMAP mailboxes.") from None
 
             if status != "OK":
                 raise EmailConnectionError("Cannot list IMAP mailboxes.")
@@ -353,7 +424,7 @@ class EmailIMAPClient:
             return result
 
         finally:
-            self._cleanup_client(client)
+            self._cleanup_client(client, abort=network_broken)
 
     def _fetch_message_payload_by_uid(
         self,
@@ -473,18 +544,22 @@ class EmailIMAPClient:
                     self._host,
                     self._port,
                     ssl_context=context,
+                    timeout=self._socket_timeout,
                 )
-            except (OSError, ssl.SSLError) as exc:
-                raise EmailConnectionError("IMAP connection failed.") from exc
+            except (OSError, ssl.SSLError, imaplib.IMAP4.error) as exc:
+                raise _normalize_connection_error(exc) from None
 
         try:
             client.login(
                 self._username,
                 self._password,
             )
-        except imaplib.IMAP4.error as exc:
+        except (OSError, imaplib.IMAP4.abort) as exc:
+            self._cleanup_client(client, abort=True)
+            raise _normalize_connection_error(exc) from None
+        except imaplib.IMAP4.error:
             self._cleanup_client(client)
-            raise EmailAuthenticationError("IMAP authentication failed.") from exc
+            raise EmailAuthenticationError("IMAP authentication failed.") from None
 
         logger.info("Connected to IMAP")
 
@@ -544,16 +619,37 @@ class EmailIMAPClient:
         return None
 
     @staticmethod
-    def _cleanup_client(client: IMAPAdapter) -> None:
-        try:
-            client.close()
-        except (imaplib.IMAP4.error, OSError):
-            pass
+    def _cleanup_client(client: IMAPAdapter, *, abort: bool = False) -> None:
+        if not abort:
+            try:
+                client.close()
+            except (imaplib.IMAP4.error, OSError):
+                pass
 
-        try:
-            client.logout()
-        except (imaplib.IMAP4.error, OSError):
-            pass
+            try:
+                client.logout()
+            except (imaplib.IMAP4.error, OSError):
+                pass
+            return
+
+        # Broken connection: skip protocol cleanup (each step could burn a full
+        # socket timeout) and just drop the socket locally.
+        shutdown = getattr(client, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown()
+            except (imaplib.IMAP4.error, OSError):
+                pass
+
+
+def _normalize_connection_error(exc: BaseException) -> EmailConnectionError:
+    """Map low-level network failures to a safe error without server text."""
+    text = str(exc).lower()
+    if isinstance(exc, TimeoutError) or "timed out" in text:
+        return EmailConnectionError("IMAP connection timeout.")
+    if isinstance(exc, ssl.SSLError):
+        return EmailConnectionError("IMAP SSL failure.")
+    return EmailConnectionError("IMAP connection failed.")
 
 
 def _parse_mailbox_name(
@@ -702,13 +798,3 @@ def _sender_domain(from_address: str) -> str | None:
         if domain:
             return domain
     return None
-
-
-def _subject_preview(normalized_subject: str) -> str:
-    value = normalized_subject
-    value = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[redacted-email]", value)
-    value = re.sub(r"https?://\S+", "[link]", value)
-    value = re.sub(r"\b[a-z0-9_-]{24,}\b", "[token]", value, flags=re.IGNORECASE)
-    value = re.sub(r"^[A-Z][a-z]{1,24},\s+", "", value)
-    value = value[:80]
-    return f"\"{value}\""
