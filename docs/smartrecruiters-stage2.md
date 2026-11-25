@@ -1,10 +1,12 @@
 # SmartRecruiters Prepare Stage 2
 
-Status: **locally verified, opt-in and unregistered**, 2026-11-25. No live
+Status: **locally verified Stage 2 baseline**, 2026-11-25. No live
 application, production activation, candidate-profile change or submission was
-performed. Stage 3 is not started. Source of form truth:
-[the verified inspection](smartrecruiters-form-inspection.md). Stage 1 remains
-the default behavior; Stage 2 requires an explicitly injected
+performed. [Stage 3](smartrecruiters-stage3.md) is now wired and verified offline;
+live acceptance and production activation remain pending. Source of form truth:
+[the verified inspection](smartrecruiters-form-inspection.md). Standalone adapter
+construction defaults to Stage 1; the registered Wise provider explicitly opts
+into Stage 2. The opt-in implementation described below uses
 `SmartRecruitersAdapter(prepare_screening=True)`.
 
 ## Preparation and safety

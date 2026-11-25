@@ -32,7 +32,8 @@ from app.application.autofill.models import (
     stage1_autofill_result,
 )
 from app.application.autofill.options import match_option, match_option_exact_normalized, match_yes_no
-from app.application.autofill.smartrecruiters import SmartRecruitersFormError
+from app.application.autofill.smartrecruiters import SmartRecruitersAdapter, SmartRecruitersFormError
+from app.application.autofill.smartrecruiters_url import supports_prepare_source
 from app.application.autofill.questions import QuestionKind
 from app.application.autofill.resolver import (
     TARGET_COMPANY_ASHBY_PREFIX,
@@ -87,6 +88,8 @@ class AutofillAdapter(Protocol):
     # Optional prepare_remaining_stages(page, result, *, fill_stage) performs
     # bounded provider navigation and uses the same one-stage fill callback.
     # allow_auto_submit=False forbids even an explicitly injected submit adapter.
+    # bind_vacancy supplies provider-specific resolved identity before opening;
+    # entry_is_usable may recognize a safe entry page after a goto timeout.
 
     # `upload_cover_letter_file` is a further optional hook, like
     # `prepare_page`/`adjust_classified_field`/`observe_final_fill_plan`/
@@ -107,6 +110,11 @@ class AutofillAdapter(Protocol):
 def default_adapter_for_source(source: str) -> AutofillAdapter:
     """Source-aware ATS adapter selection. Unknown sources keep the historical Greenhouse default."""
     cleaned = source.strip()
+    if supports_prepare_source(cleaned):
+        logger.info("autofill_adapter_dispatch provider=smartrecruiters company=wise")
+        return SmartRecruitersAdapter(prepare_screening=True, require_posting_identity=True)
+    if cleaned.startswith("target_company:smartrecruiters:"):
+        raise SmartRecruitersFormError("unsupported SmartRecruiters Prepare source")
     if cleaned.startswith(TARGET_COMPANY_LEVER_PREFIX):
         logger.warning(
             "autofill_adapter_dispatch provider=lever adapter=LeverAdapter source=%s",
@@ -174,6 +182,9 @@ class AutofillService:
         try:
             vacancy = self._resolver.resolve(source, external_id)
             adapter = self._explicit_adapter or self._adapter_for_source(vacancy.source)
+            bind_vacancy = getattr(adapter, "bind_vacancy", None)
+            if bind_vacancy is not None:
+                bind_vacancy(vacancy)
             profile = self._profile_loader()
             # A configured variant is resolved on every run, injected or not:
             # when no `resume_profiles` was wired in, the same normal,
@@ -205,7 +216,7 @@ class AutofillService:
                 )
             session = self._browser_factory()
             session.keep_open = keep_open
-            session.open(vacancy.application_url, is_usable=adapter.recognize)
+            session.open(vacancy.application_url, is_usable=getattr(adapter, "entry_is_usable", adapter.recognize))
             result = self._fill_open_page(vacancy, profile, resume_path, session, adapter)
             remaining_stages = getattr(adapter, "prepare_remaining_stages", None)
             if remaining_stages is not None and result.status is not AutofillStatus.FAILED:

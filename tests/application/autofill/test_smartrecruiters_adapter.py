@@ -945,9 +945,14 @@ def test_default_resume_policy_selects_the_variant_without_an_override(
     run.assert_closed()
 
 
-def test_production_smartrecruiters_prepare_gate_and_other_adapters_are_unchanged() -> None:
-    assert source_supports_application_prepare("target_company:smartrecruiters:wise") is False
-    assert not isinstance(default_adapter_for_source("target_company:smartrecruiters:wise"), SmartRecruitersAdapter)
+def test_production_wise_prepare_gate_and_other_adapters_are_unchanged() -> None:
+    assert source_supports_application_prepare("target_company:smartrecruiters:wise") is True
+    adapter = default_adapter_for_source("target_company:smartrecruiters:wise")
+    assert isinstance(adapter, SmartRecruitersAdapter)
+    assert adapter._prepare_screening and adapter._require_posting_identity and not adapter.allow_auto_submit
+    assert source_supports_application_prepare("target_company:smartrecruiters:canva") is False
+    with pytest.raises(SmartRecruitersFormError):
+        default_adapter_for_source("target_company:smartrecruiters:canva")
     assert type(default_adapter_for_source("target_company:lever:acme")) is LeverAdapter
     assert type(default_adapter_for_source("target_company:ashby:acme")) is AshbyAdapter
     assert type(default_adapter_for_source("target_company:greenhouse:acme")) is GreenhouseAdapter

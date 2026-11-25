@@ -14,6 +14,7 @@ from app.collectors.greenhouse_collector import (
     greenhouse_job_to_normalized,
 )
 from app.application.autofill.ashby_url import is_canonical_ashby_hosted_url, is_same_job_apply_url
+from app.application.autofill.smartrecruiters_url import WISE_PREPARE_SOURCE, parse_posting_url
 from app.collectors.vacancy_collector import NormalizedVacancy
 from app.company_watch.watchers.ashby import (
     AshbyCollectionError,
@@ -28,6 +29,11 @@ from app.company_watch.watchers.lever import (
     build_lever_http_client,
     fetch_lever_postings,
     lever_job_to_normalized,
+)
+from app.company_watch.watchers.smartrecruiters import (
+    SmartRecruitersCollectionError,
+    fetch_smartrecruiters_posting_detail,
+    smartrecruiters_detail_to_normalized,
 )
 
 TARGET_COMPANY_GREENHOUSE_PREFIX = "target_company:greenhouse:"
@@ -302,10 +308,12 @@ class DefaultVacancyResolver:
         greenhouse_resolver: GreenhouseTargetVacancyResolver | None = None,
         lever_resolver: LeverTargetVacancyResolver | None = None,
         ashby_resolver: AshbyTargetVacancyResolver | None = None,
+        smartrecruiters_resolver: SmartRecruitersTargetVacancyResolver | None = None,
     ) -> None:
         self._greenhouse = greenhouse_resolver or GreenhouseTargetVacancyResolver()
         self._lever = lever_resolver or LeverTargetVacancyResolver()
         self._ashby = ashby_resolver or AshbyTargetVacancyResolver()
+        self._smartrecruiters = smartrecruiters_resolver or SmartRecruitersTargetVacancyResolver()
 
     def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
         cleaned = source.strip()
@@ -315,4 +323,59 @@ class DefaultVacancyResolver:
             return self._lever.resolve(cleaned, external_id)
         if cleaned.startswith(TARGET_COMPANY_ASHBY_PREFIX):
             return self._ashby.resolve(cleaned, external_id)
+        if cleaned == WISE_PREPARE_SOURCE:
+            return self._smartrecruiters.resolve(cleaned, external_id)
         raise VacancyResolveError(f"Unsupported vacancy source: {source}")
+
+
+class SmartRecruitersTargetVacancyResolver:
+    """Fresh Wise detail -> public numeric posting -> browser-verified Apply link.
+
+    No listing scan, cached publication URL, applyUrl shortcut or guessed UUID.
+    Discovery normalization may repair invalid URLs; Prepare explicitly may not.
+    """
+
+    def __init__(self, *, timeout_seconds: float = 20.0, user_agent: str = "job-vacancy-analyzer/0.1") -> None:
+        self._timeout_seconds = timeout_seconds
+        self._user_agent = user_agent
+
+    def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
+        wanted = str(external_id).strip()
+        reference = parse_posting_url(f"https://jobs.smartrecruiters.com/Wise/{wanted}")
+        if source != WISE_PREPARE_SOURCE or reference is None or reference.posting_id != wanted:
+            raise VacancyResolveError("Unsupported SmartRecruiters Prepare identity.")
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(connect=5.0, read=self._timeout_seconds, write=10.0, pool=5.0),
+                headers={"User-Agent": self._user_agent}, follow_redirects=False,
+            ) as client:
+                detail = fetch_smartrecruiters_posting_detail("Wise", wanted, client=client)
+        except (SmartRecruitersCollectionError, httpx.HTTPError):
+            # No response snippets, endpoint/query text or chained payload in diagnostics.
+            raise VacancyResolveError("SmartRecruiters posting is unavailable; review the employer page manually.") from None
+        company = detail.get("company")
+        if (str(detail.get("id") or "") != wanted or detail.get("active") is False
+                or not isinstance(company, dict)
+                or str(company.get("identifier") or "").casefold() != "wise"):
+            raise VacancyResolveError("SmartRecruiters posting identity/company is unconfirmed or inactive.")
+        posting_url = detail.get("postingUrl")
+        posting = parse_posting_url(posting_url if isinstance(posting_url, str) else None)
+        if posting != reference:
+            raise VacancyResolveError("SmartRecruiters posting URL does not match the requested Wise posting.")
+        location = detail.get("location")
+        if isinstance(location, dict):
+            # The public API supplies ISO codes as well as country names.
+            # Translate only the two observed markets' explicit codes; never
+            # infer work rights/residence from a city, phone or job default.
+            country = {"ee": "Estonia", "gb": "United Kingdom"}.get(str(location.get("country") or "").lower())
+            if country:
+                detail = {**detail, "location": {**location, "country": country}}
+        normalized = smartrecruiters_detail_to_normalized(
+            detail, fallback_row={}, identity=wanted, slug="Wise", source=source, company="Wise",
+        )
+        if normalized is None or normalized.external_id != wanted:
+            raise VacancyResolveError("SmartRecruiters posting content is unavailable or inconsistent.")
+        return ResolvedVacancy(
+            source=source, external_id=wanted, title=normalized.title, company="Wise",
+            url=normalized.url, application_url=normalized.url, vacancy=normalized,
+        )

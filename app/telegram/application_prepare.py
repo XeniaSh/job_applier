@@ -1,4 +1,4 @@
-"""Telegram explicit prepare for Target Company Greenhouse vacancies.
+"""Telegram explicit prepare for supported Target Company ATS vacancies.
 
 Telegram is the control UI. It resolves source + external_id, loads the
 cached recommendation, and calls PrepareApplicationService with EXPLICIT
@@ -21,6 +21,7 @@ from app.application.prepare_application import (
 )
 from app.company_watch.analysis_cache import TargetCompanyAnalysisCache
 from app.telegram.client import source_supports_application_prepare
+from app.application.autofill.smartrecruiters_url import supports_prepare_source
 
 
 UNKNOWN_RECOMMENDATION = "UNKNOWN"
@@ -103,9 +104,14 @@ def format_application_prepare_failed_text(result: AutofillResult | None = None)
 
 
 def format_application_prepare_completed_text(result: AutofillResult) -> str:
+    wise_incomplete = supports_prepare_source(result.source) and (
+        result.status is AutofillStatus.NEEDS_MANUAL_INTERVENTION or bool(result.unresolved_required_fields)
+    )
     heading = (
         "Preparation incomplete: the required resume attachment could not be confirmed."
         if result.resume_attachment_incomplete
+        else "Preparation incomplete: the Wise form needs manual action."
+        if wise_incomplete
         else "Preparation completed."
     )
     lines = [
@@ -127,6 +133,8 @@ def format_application_prepare_completed_text(result: AutofillResult) -> str:
         lines.append("Manual review needed.")
     if result.status is AutofillStatus.NEEDS_MANUAL_INTERVENTION:
         lines.append(f"Reason: {_manual_intervention_reason(result)}")
+    if wise_incomplete:
+        lines.append("Check candidate information, Screening answers and the resume attachment in the browser.")
     if _has_residence_country_unconfirmed_warning(result.warnings):
         lines.append(RESIDENCE_COUNTRY_UNCONFIRMED_TEXT)
     lines.append("Submit was not performed.")
@@ -165,7 +173,12 @@ def _manual_intervention_reason(result: AutofillResult) -> str:
     if challenge is not None:
         return f"{challenge} was detected in the browser."
     if result.resume_attachment_incomplete:
-        reason = "the required resume attachment could not be confirmed; attach it manually before submitting."
+        reason = (
+            "the required resume attachment could not be confirmed; inspect its current attachment "
+            "before replacing or attaching the selected resume manually."
+            if supports_prepare_source(result.source)
+            else "the required resume attachment could not be confirmed; attach it manually before submitting."
+        )
         if result.resume_variant:
             variant_note = f"Selected resume variant: {result.resume_variant}"
             if result.resume_file:

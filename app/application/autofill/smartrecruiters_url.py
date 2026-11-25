@@ -1,6 +1,6 @@
 """Pure, browser-free URL checks for SmartRecruiters OneClick application support.
 
-Stage 1 is deliberately Wise-only (`SUPPORTED_COMPANIES`) and unregistered.
+Prepare is deliberately Wise-only (`SUPPORTED_COMPANIES`).
 The publication UUID of the application form is never derived from the
 numeric posting ID: it only ever comes from a validated, visible link on the
 public posting page (or a directly supplied, validated base publication URL).
@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 SMARTRECRUITERS_HOST = "jobs.smartrecruiters.com"
 SUPPORTED_COMPANIES = frozenset({"Wise"})
+WISE_PREPARE_SOURCE = "target_company:smartrecruiters:wise"
 
 _POSTING_PATH_RE = re.compile(r"^/(?P<company>[A-Za-z0-9_-]+)/(?P<posting_id>\d{6,})(?:-[A-Za-z0-9%._~-]*)?/?$")
 _APPLICATION_PATH_RE = re.compile(
@@ -65,6 +66,16 @@ def parse_posting_url(url: str | None) -> PostingRef | None:
     if match is None or match["company"] not in SUPPORTED_COMPANIES:
         return None
     return PostingRef(company=match["company"], posting_id=match["posting_id"])
+
+
+def supports_prepare_source(source: str) -> bool:
+    return source == WISE_PREPARE_SOURCE
+
+
+def supports_prepare_vacancy(source: str, external_id: str, url: str) -> bool:
+    """Cheap button/callback gate; fresh resolver/browser checks still apply."""
+    ref = parse_posting_url(url)
+    return supports_prepare_source(source) and ref is not None and ref.posting_id == external_id
 
 
 def parse_application_url(url: str | None) -> ApplicationRef | None:

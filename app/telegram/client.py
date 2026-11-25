@@ -5,6 +5,7 @@ import re
 import httpx
 import threading
 from pathlib import Path
+from app.application.autofill.smartrecruiters_url import supports_prepare_source, supports_prepare_vacancy
 
 from app.telegram.formatter import (
     format_application_ready_card_html,
@@ -391,7 +392,10 @@ def build_action_buttons(source: str, external_id: str, url: str) -> list[list[T
     skip_data = _callback_data("skip", compact_source, external_id)
     applied_data = _callback_data("applied", compact_source, external_id)
     rows: list[list[TelegramInlineButton]] = []
-    if source_supports_application_prepare(source):
+    if source_supports_application_prepare(source) and (
+        not _canonical_source(source).startswith(_TARGET_COMPANY_SMARTRECRUITERS_SOURCE_PREFIX)
+        or supports_prepare_vacancy(_canonical_source(source), external_id, validated_url)
+    ):
         prepare_data = _callback_data(APPLICATION_PREPARE_ACTION, compact_source, external_id)
         rows.append(
             [TelegramInlineButton(text=APPLICATION_PREPARE_BUTTON_TEXT, callback_data=prepare_data)]
@@ -532,6 +536,7 @@ def source_supports_application_prepare(source: str) -> bool:
         canonical.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX)
         or canonical.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX)
         or canonical.startswith(_TARGET_COMPANY_ASHBY_SOURCE_PREFIX)
+        or supports_prepare_source(canonical)
     )
 
 

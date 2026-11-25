@@ -43,10 +43,11 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   read-only discovery and a completed Wise pilot. TASK-094 adds Wise-only regular
   discovery with manual employer-site applications; the user now reports Wise
   cards delivered in production. TASK-095 form evidence is complete
-  (`docs/smartrecruiters-form-inspection.md`); Stage 1 page one and opt-in Stage 2
-  Screening are locally verified but UNREGISTERED. Stage 2 has 389 focused
-  passing checks across relevant runs; live acceptance remains pending.
-  No SmartRecruiters Prepare button, resolver or default dispatch is enabled.
+  (`docs/smartrecruiters-form-inspection.md`); Stage 1/2 and Wise-only Stage 3
+  registration are locally verified. Updated code offers Prepare only for
+  canonical matching Wise numeric postings and uses the shared worker/review
+  lifecycle. Live acceptance and production activation remain pending; no
+  deployment or unsolicited message was performed. See `docs/smartrecruiters-stage3.md`.
   Workday has no collector; HH remains CLI-only.
 - TASK-097 (same employer-facing resume basename, separate per-profile dirs):
   locally verified (110 focused tests, Ruff and diff checks); private PDF
@@ -1772,12 +1773,20 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   pass across relevant runs; Ruff/diff checks pass. Resume proof is still UI-only;
   recreated or unavailable widgets stay manual. One old Ashby notice-period
   assertion is confirmed stale against unchanged code; no unrelated repair.
-  Stage 3 (registration/resolver/Telegram button) is not started. Revised estimate:
-  2-3 engineering days plus supervised live acceptance, with evidence-backed
-  proof adjustment if needed before activation. Existing SmartRecruiters Prepare
-  gates remain disabled. No live applications/submissions were run. Stop after
-  Stage 2 pending approval. See `docs/smartrecruiters-stage1.md` and
-  `docs/smartrecruiters-stage2.md`.
+  Stage 3 is implemented and verified offline (2026-11-26), directly by Codex:
+  strict Wise-only button/callback/default provider routing, fresh same-numeric-ID
+  public-detail resolver, bound browser entry, complete two-stage preparation and
+  existing session-specific review handoff. Eligible existing SENT cards can use
+  normal reconciliation; no resends or cache resets. Partial/challenge/resume
+  outcomes are explicit and Submit is always blocked for SmartRecruiters.
+  58 new checks, 107 existing browser checks and focused provider/salary/phone/
+  Telegram/discovery/IMAP regressions pass; Ruff/diff checks pass. Five older
+  review-lifecycle fixtures lack a candidate overlay and reproduce failure with
+  the pre-change service; they are not weakened. Current-main plus approved
+  Stage 1/2 compatibility is checked separately without launcher changes.
+  STOP after offline commit/report: supervised acceptance and production
+  activation await separate approval. See `docs/smartrecruiters-stage1.md`,
+  `docs/smartrecruiters-stage2.md` and `docs/smartrecruiters-stage3.md`.
 - **Historical (superseded) blocker:** the first attempt was blocked on rendered
   form evidence, now captured; the notes below describe that earlier state.
 - **Inspection:** Existing source-aware resolvers/adapters and the shared

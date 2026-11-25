@@ -76,10 +76,10 @@ from app.company_watch.watchers.smartrecruiters import (
 from app.company_watch.wise_eligibility import (
     CORRECTION_EXPLICIT_REFUSAL,
     CORRECTION_LOCAL_TRANSFER_ONLY,
-    WISE_MANUAL_EMPLOYER_SITE_INFO,
     WISE_UNKNOWN_SPONSORSHIP_WARNING,
     detect_wise_sponsorship_correction,
     is_wise_smartrecruiters_source,
+    wise_application_display_info,
 )
 from app.collectors.email_imap_client import (
     EmailAuthenticationError,
@@ -1359,11 +1359,10 @@ def _has_unconfirmed_application_form(vacancy: NormalizedVacancy) -> bool:
     is no autofill adapter at all yet: a recognized canonical public job URL
     is only a delivery eligibility signal (this is Ashby's own job-board
     shape, safe to send), never confirmation that an Ashby application-form
-    adapter exists or that autofill is supported. SmartRecruiters has no
-    autofill adapter either: the gate below only recognizes Wise's own
+    adapter exists or that autofill is supported. The gate below recognizes Wise's own
     public posting URL shape (jobs.smartrecruiters.com/Wise/{posting-id})
-    for the matching vacancy external_id, as a manual-application delivery
-    signal, never Prepare/autofill confirmation.
+    for the matching vacancy external_id as a delivery signal. The registered
+    Wise Prepare path separately revalidates fresh identity and the rendered form.
     """
     if vacancy.source.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX):
         return not is_canonical_lever_hosted_url(vacancy.url)
@@ -1924,10 +1923,7 @@ def _deliver_target_company_item(
                 WISE_UNKNOWN_SPONSORSHIP_WARNING,
                 *(w for w in warnings if w != WISE_UNKNOWN_SPONSORSHIP_WARNING),
             ]
-        info_items = [
-            WISE_MANUAL_EMPLOYER_SITE_INFO,
-            *(i for i in info_items if i != WISE_MANUAL_EMPLOYER_SITE_INFO),
-        ]
+        info_items = wise_application_display_info(vacancy.source, info_items)
     card = TelegramVacancyCard(
         source=vacancy.source,
         external_id=vacancy.external_id,
@@ -4653,10 +4649,19 @@ def _dispatch_target_company_application_prepare(
     prepare_service: object | None,
     analysis_cache: TargetCompanyAnalysisCache | None,
     sync: bool,
+    vacancy_url: str | None = None,
 ) -> None:
     if not source_supports_application_prepare(source):
         answer_once("Preparation is not available for this vacancy.")
         return
+    if source.startswith(_TARGET_COMPANY_SMARTRECRUITERS_SOURCE_PREFIX):
+        # Revalidate the stored/current card identity before launching a worker.
+        # A stale or forged callback must not open another employer/job.
+        from app.application.autofill.smartrecruiters_url import supports_prepare_vacancy
+
+        if not vacancy_url or not supports_prepare_vacancy(source, external_id, vacancy_url):
+            answer_once("Preparation is not available for this Wise posting URL.")
+            return
     answer_once(STARTING_TEXT)
     service = prepare_service
     cache = analysis_cache
@@ -5061,6 +5066,7 @@ def _process_callback_update(
                 prepare_service=application_prepare_service,
                 analysis_cache=application_prepare_cache,
                 sync=application_prepare_sync,
+                vacancy_url=url,
             )
         elif action == "copy":
             get_preparation = getattr(storage, "get_preparation", None)
@@ -5660,6 +5666,7 @@ def _rebuild_sent_card(
         try:
             evaluation = VacancyEvaluation.model_validate_json(str(cached["evaluation_json"]))
             warnings, info_items = card_display_sections(evaluation)
+            info_items = wise_application_display_info(source, info_items)
             card = TelegramVacancyCard(
                 source=map_source_to_code(source),
                 external_id=external_id,

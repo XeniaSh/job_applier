@@ -508,8 +508,8 @@ def test_first_cycle_counts_labels_and_wise_only_allowlist(world: _World, tmp_pa
     assert work_rights.feasibility.work_authorization_requirement == "required"
     assert work_rights.feasibility.location_restrictions == [f"{CONDITIONAL_TEXT} {RESTRICTION_TEXT}"]
 
-    # Only the three eligible titles were delivered; only canonical URLs and
-    # no Prepare button were offered for the Wise cards.
+    # Delivery selection is unchanged; eligible canonical Wise cards now gain
+    # exactly the application Prepare action (never the LinkedIn artifact action).
     assert set(world.successful_titles) == {html.escape(title, quote=True) for title in _sent_titles()}
     assert len(world.successful_titles) == 3
     for key in SENT_KEYS:
@@ -519,9 +519,9 @@ def test_first_cycle_counts_labels_and_wise_only_allowlist(world: _World, tmp_pa
         buttons = [button for row in rows for button in row]
         assert [button.get("url") for button in buttons if "url" in button] == [job.url]
         callbacks = [button["callback_data"] for button in buttons if "callback_data" in button]
-        assert callbacks == [f"applied:tcs.wise:{job.posting_id}", f"skip:tcs.wise:{job.posting_id}"]
-        assert not any("prep" in data.lower() for data in callbacks)
-        assert not any("prepare" in button["text"].lower() for button in buttons)
+        assert callbacks == [f"prepapp:tcs.wise:{job.posting_id}", f"applied:tcs.wise:{job.posting_id}", f"skip:tcs.wise:{job.posting_id}"]
+        assert not any(data.startswith("prepare:") for data in callbacks)
+        assert sum(button["text"] == "Prepare application" for button in buttons) == 1
 
 
 def test_repeat_polls_and_restart_never_reanalyze_or_resend(world: _World, tmp_path: Path) -> None:
@@ -634,10 +634,10 @@ def test_cached_retry_card_keeps_the_same_wise_warning(world: _World, tmp_path: 
     assert html.escape(WISE_UNKNOWN_SPONSORSHIP_WARNING, quote=True) in unknown_text
 
 
-def test_smartrecruiters_has_no_prepare_capability_and_forged_prepapp_is_inert(monkeypatch) -> None:
+def test_prepare_is_wise_only_and_forged_other_employer_callback_is_inert(monkeypatch) -> None:
     for source in (WISE_SOURCE, "tcs.wise", "target_company:smartrecruiters:canva"):
         assert source_supports_prepare(source) is False
-        assert source_supports_application_prepare(source) is False
+        assert source_supports_application_prepare(source) is (source != "target_company:smartrecruiters:canva")
     url = "https://jobs.smartrecruiters.com/Wise/744000100001"
     callbacks = [
         button.callback_data
@@ -645,7 +645,8 @@ def test_smartrecruiters_has_no_prepare_capability_and_forged_prepapp_is_inert(m
         for button in row
         if button.callback_data
     ]
-    assert not any(data.startswith(("prepapp", "prepare")) for data in callbacks)
+    assert any(data.startswith("prepapp:tcs.wise:") for data in callbacks)
+    assert not any(data.startswith("prepare:") for data in callbacks)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("browser/autofill path must not be reached")
@@ -657,7 +658,7 @@ def test_smartrecruiters_has_no_prepare_capability_and_forged_prepapp_is_inert(m
     monkeypatch.setattr(cli_module, "default_review_registry", forbidden)
     answers: list[str | None] = []
     cli_module._dispatch_target_company_application_prepare(
-        source=WISE_SOURCE,
+        source="target_company:smartrecruiters:canva",
         external_id="744000100001",
         client=object(),
         storage=object(),

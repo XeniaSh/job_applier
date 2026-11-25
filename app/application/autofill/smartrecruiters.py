@@ -1,4 +1,4 @@
-"""SmartRecruiters OneClick adapter, UNREGISTERED (Stages 1 and opt-in 2).
+"""SmartRecruiters OneClick adapter (standalone and registered Wise Prepare).
 
 Scope (see docs/smartrecruiters-stage1.md and the inspection report): safe
 public-posting -> application-link navigation, hydrated page-one discovery
@@ -41,6 +41,7 @@ from app.application.autofill.smartrecruiters_url import (
     parse_application_url,
     parse_posting_url,
     same_company_application_ref,
+    supports_prepare_vacancy,
 )
 from app.application.candidate_profile import CandidateProfile
 
@@ -298,6 +299,7 @@ class SmartRecruitersAdapter:
         poll_ms: int = 150,
         stable_samples: int = 3,
         prepare_screening: bool = False,
+        require_posting_identity: bool = False,
     ) -> None:
         self._expected_posting_id = expected_posting_id
         self._hydration_timeout_ms = hydration_timeout_ms
@@ -307,6 +309,8 @@ class SmartRecruitersAdapter:
         self._poll_ms = poll_ms
         self._stable_samples = stable_samples
         self._prepare_screening = prepare_screening
+        self._require_posting_identity = require_posting_identity
+        self._entry_posting: PostingRef | None = None
         self._reset()
 
     def _reset(self) -> None:
@@ -372,10 +376,44 @@ class SmartRecruitersAdapter:
         return [[key, hook, selector.split("[")[0], typed[ftype]] for key, (hook, selector, _l, ftype) in _KNOWN.items()]
 
     # --------------------------------------------------------------- preparation
+    def bind_vacancy(self, vacancy: object) -> None:
+        """Bind production dispatch to the fresh resolver's numeric identity.
+
+        Standalone injected adapters retain the Stage 1/2 diagnostic contract;
+        default provider dispatch always requires binding before opening.
+        """
+        if not self._require_posting_identity:
+            return
+        self._entry_posting = None
+        source = getattr(vacancy, "source", "")
+        external_id = str(getattr(vacancy, "external_id", ""))
+        url = getattr(vacancy, "url", "")
+        normalized = getattr(vacancy, "vacancy", None)
+        if (not supports_prepare_vacancy(source, external_id, url)
+                or getattr(vacancy, "application_url", "") != url
+                or getattr(vacancy, "company", None) != "Wise"
+                or normalized is None or normalized.source != source
+                or normalized.external_id != external_id or normalized.url != url
+                or normalized.company != "Wise"):
+            raise SmartRecruitersFormError("unconfirmed Wise Prepare identity")
+        self._entry_posting = parse_posting_url(url)
+        self._expected_posting_id = self._entry_posting.posting_id
+
+    def entry_is_usable(self, page: Page) -> bool:
+        """A bound posting may survive goto timeout; it is not yet a form."""
+        return self.recognize(page) or bool(
+            self._require_posting_identity and self._entry_posting
+            and parse_posting_url(page.url) == self._entry_posting
+        )
+
     def prepare_page(self, page: Page) -> None:
         """Reach the page-one application form. Only an evidenced, validated
         same-company application link is ever followed, in the same tab."""
         self._reset()
+        if self._require_posting_identity and (
+            self._entry_posting is None or parse_posting_url(page.url) != self._entry_posting
+        ):
+            raise SmartRecruitersFormError("resolved posting identity changed")
         if self.detect_challenge(page):
             return
         try:
@@ -1012,7 +1050,9 @@ class SmartRecruitersAdapter:
 
     def _check_stage(self, page: Page, result: AutofillResult, *, include_hidden: bool = False) -> bool:
         """Re-read every successful value and account for newly required fields."""
-        if self.detect_challenge(page):
+        challenge = self.detect_challenge(page)
+        if challenge:
+            result.warnings.append("Security challenge detected: " + challenge)
             self._demote(result, result.filled_fields, "Challenge prevents final verification.")
             return False
         fields = self.discover_fields(page, include_hidden=include_hidden)
@@ -1095,6 +1135,9 @@ class SmartRecruitersAdapter:
             return self._stage_result(first, second, "required Screening answers remain manual")
         except (PlaywrightError, SmartRecruitersFormError):
             # No raw Playwright exception (it may contain values/paths).
+            challenge = self.detect_challenge(page)
+            if challenge:
+                first.warnings.append("Security challenge detected: " + challenge)
             if self._page_ok(page):
                 self._check_stage(page, first)
             else:
@@ -1115,6 +1158,8 @@ class SmartRecruitersAdapter:
         merged.warnings.append(
             "Resume proof is UI-only: selected bytes and the original settled widget; server acknowledgement is unverified."
         )
+        logger.info("smartrecruiters_prepare outcome=%s required_unresolved=%d resume_confirmed=%s",
+                    "complete" if complete else "partial", len(merged.unresolved_required_fields), merged.resume_uploaded)
         return merged
 
 

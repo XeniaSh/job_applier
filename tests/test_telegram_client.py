@@ -361,18 +361,17 @@ def test_target_company_smartrecruiters_callback_round_trip() -> None:
     assert map_source_to_code(full_wise) != map_source_to_code("target_company:ashby:wise")
 
 
-def test_prepare_is_never_offered_for_target_company_smartrecruiters() -> None:
-    # SmartRecruiters has no autofill adapter at all (unlike Ashby, which
-    # has AshbyAdapter): no Prepare/Resume/Submit action may ever be
-    # offered for this source, only manual Applied/Skip/Open vacancy.
+def test_prepare_is_not_offered_for_unconfirmed_smartrecruiters_posting_identity() -> None:
+    # Wise now supports Prepare, but this short/unverified posting identity
+    # must still expose only Applied/Skip/Open. Source support alone is not enough.
     url = "https://jobs.smartrecruiters.com/Wise/901"
     target_full = build_action_buttons("target_company:smartrecruiters:wise", "901", url)
     target_code = build_action_buttons("tcs.wise", "901", url)
 
     assert source_supports_prepare("target_company:smartrecruiters:wise") is False
     assert source_supports_prepare("tcs.wise") is False
-    assert source_supports_application_prepare("target_company:smartrecruiters:wise") is False
-    assert source_supports_application_prepare("tcs.wise") is False
+    assert source_supports_application_prepare("target_company:smartrecruiters:wise") is True
+    assert source_supports_application_prepare("tcs.wise") is True
 
     for buttons in (target_full, target_code):
         labels = [button.text for row in buttons for button in row]

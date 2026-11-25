@@ -9,8 +9,18 @@ from dataclasses import dataclass
 WISE_SMARTRECRUITERS_SOURCE = "target_company:smartrecruiters:wise"
 
 WISE_MANUAL_EMPLOYER_SITE_INFO = (
-    "Apply manually on the employer's SmartRecruiters page (no autofill for Wise)"
+    "Review and submit manually on the employer's SmartRecruiters page"
 )
+WISE_LEGACY_MANUAL_EMPLOYER_SITE_INFO = "Apply manually on the employer's SmartRecruiters page (no autofill for Wise)"
+
+
+def wise_application_display_info(source: str, info_items: list[str]) -> list[str]:
+    """Refresh the presentation of cached cards without rewriting any cache."""
+    if source != WISE_SMARTRECRUITERS_SOURCE:
+        return info_items
+    return [WISE_MANUAL_EMPLOYER_SITE_INFO, *(i for i in info_items if i not in {
+        WISE_MANUAL_EMPLOYER_SITE_INFO, WISE_LEGACY_MANUAL_EMPLOYER_SITE_INFO,
+    })]
 
 WISE_UNKNOWN_SPONSORSHIP_WARNING = (
     "Wise: visa sponsorship not confirmed in the posting - check manually before applying"
