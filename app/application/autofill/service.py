@@ -84,6 +84,10 @@ class AutofillAdapter(Protocol):
     def upload_resume(self, page: object, resume_path: Path, field: object) -> bool: ...
     def read_back(self, page: object, field: object) -> str | None: ...
 
+    # Optional prepare_remaining_stages(page, result, *, fill_stage) performs
+    # bounded provider navigation and uses the same one-stage fill callback.
+    # allow_auto_submit=False forbids even an explicitly injected submit adapter.
+
     # `upload_cover_letter_file` is a further optional hook, like
     # `prepare_page`/`adjust_classified_field`/`observe_final_fill_plan`/
     # `reconcile_discovered_fields` below -- not every adapter defines it
@@ -203,7 +207,16 @@ class AutofillService:
             session.keep_open = keep_open
             session.open(vacancy.application_url, is_usable=adapter.recognize)
             result = self._fill_open_page(vacancy, profile, resume_path, session, adapter)
-            if self._auto_submit_enabled and result.status is AutofillStatus.READY_FOR_REVIEW:
+            remaining_stages = getattr(adapter, "prepare_remaining_stages", None)
+            if remaining_stages is not None and result.status is not AutofillStatus.FAILED:
+                result = remaining_stages(
+                    session.page, result,
+                    fill_stage=lambda: self._fill_open_page(
+                        vacancy, profile, resume_path, session, adapter, prepare_stage=False,
+                    ),
+                )
+            if (self._auto_submit_enabled and result.status is AutofillStatus.READY_FOR_REVIEW
+                    and getattr(adapter, "allow_auto_submit", True)):
                 submit_adapter = self._explicit_submit_adapter or self._submit_adapter_for_source(
                     vacancy.source
                 )
@@ -305,10 +318,12 @@ class AutofillService:
         resume_path: Path,
         session: BrowserSession,
         adapter: AutofillAdapter,
+        *,
+        prepare_stage: bool = True,
     ) -> AutofillResult:
         page = session.page
         prepare = getattr(adapter, "prepare_page", None)
-        if prepare is not None:
+        if prepare_stage and prepare is not None:
             prepare(page)
         challenge = adapter.detect_challenge(page)
         if challenge:

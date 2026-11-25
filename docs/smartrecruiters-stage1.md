@@ -5,6 +5,11 @@ verified 22 URL checks and 64 offline browser checks across focused runs, plus
 143 existing regressions. Scoped Ruff and diff checks pass. Live acceptance is
 pending. Evidence: `docs/smartrecruiters-form-inspection.md` (agent-work `7f53124`).
 
+Stage 2 is now available only by explicit adapter opt-in; the default remains
+page one. See [Stage 2](smartrecruiters-stage2.md) for its local verification,
+persistence limits and revised Stage 3 estimate. The Stage 1 scope below is the
+historical accepted baseline.
+
 One existing review-handoff fixture fails with the pre-change service too: its
 fake browser session lacks the already-required `is_usable` argument. The wider
 run also encountered its missing resume-fixture configuration. No unrelated

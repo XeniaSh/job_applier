@@ -422,7 +422,19 @@ def _looks_like_unlabelled_pay(window: str, match: re.Match[str]) -> bool:
     return True
 
 
-def _from_published(units: FieldUnits, vacancy: NormalizedVacancy | None) -> SalaryDecision | None:
+@dataclass(frozen=True)
+class PublishedSalaryBand:
+    low: Decimal
+    high: Decimal
+    units: FieldUnits
+
+
+def published_salary_band(vacancy: NormalizedVacancy | None) -> PublishedSalaryBand | SalaryDecision | None:
+    """The single explicit published band, or the existing manual decision.
+
+    Shared by numeric salary resolution and band-acceptance questions. Parsing
+    establishes evidence only; it never establishes a candidate's consent.
+    """
     if vacancy is None:
         return None
     ranges: set[tuple[Decimal, Decimal, FieldUnits]] = set()
@@ -478,11 +490,42 @@ def _from_published(units: FieldUnits, vacancy: NormalizedVacancy | None) -> Sal
         return _manual("published salary range lacks explicit currency, period, or gross/net basis")
     if _multiple_locations(vacancy.location or ""):
         return _manual("published salary range cannot be tied to one market (multiple vacancy countries)")
+    return PublishedSalaryBand(low, high, range_units)
+
+
+def _from_published(units: FieldUnits, vacancy: NormalizedVacancy | None) -> SalaryDecision | None:
+    band = published_salary_band(vacancy)
+    if not isinstance(band, PublishedSalaryBand):
+        return band
+    range_units = band.units
     if range_units != units:
         return _manual(
             f"published range units ({_units_label(range_units)}) do not match field units ({_units_label(units)}); no conversion is made"
         )
-    return _decision(units, (low + high) / 2, SOURCE_PUBLISHED, public_url(vacancy.url), _published_date(vacancy))
+    return _decision(units, (band.low + band.high) / 2, SOURCE_PUBLISHED, public_url(vacancy.url), _published_date(vacancy))
+
+
+def resolve_salary_band_acceptance(
+    expectations: SalaryExpectations | None, *, title: str, vacancy: NormalizedVacancy | None,
+) -> tuple[bool | None, str]:
+    """Conservative judgement from explicit preference AND published evidence.
+
+    Inside the inclusive band means Yes; above it means No. A preference below
+    the band does not establish that this different band meets expectations.
+    Benchmarks and published midpoints are never candidate preferences.
+    """
+    if expectations is None or not expectations.fill_salary:
+        return None, "salary-band judgement requires enabled explicit candidate preferences"
+    band = published_salary_band(vacancy)
+    if not isinstance(band, PublishedSalaryBand):
+        return None, band.reason if band is not None else "no unambiguous published salary band"
+    candidate = _from_candidate(expectations, band.units, _vacancy_market(vacancy), title)
+    if candidate is None or not candidate.fill:
+        return None, candidate.reason if candidate is not None else "no applicable explicit candidate salary preference"
+    amount = Decimal(candidate.amount)
+    if amount < band.low:
+        return None, "candidate preference is below the band; acceptance requires manual judgement"
+    return amount <= band.high, "explicit candidate preference compared with one published band; no conversion"
 
 
 def _benchmark_is_valid(b: SalaryBenchmark, today: date) -> bool:

@@ -43,8 +43,9 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   read-only discovery and a completed Wise pilot. TASK-094 adds Wise-only regular
   discovery with manual employer-site applications; the user now reports Wise
   cards delivered in production. TASK-095 form evidence is complete
-  (`docs/smartrecruiters-form-inspection.md`); the Stage 1 page-one adapter is
-  accepted locally but UNREGISTERED (86 new checks and 143 existing checks pass).
+  (`docs/smartrecruiters-form-inspection.md`); Stage 1 page one and opt-in Stage 2
+  Screening are locally verified but UNREGISTERED. Stage 2 has 389 focused
+  passing checks across relevant runs; live acceptance remains pending.
   No SmartRecruiters Prepare button, resolver or default dispatch is enabled.
   Workday has no collector; HH remains CLI-only.
 - TASK-097 (same employer-facing resume basename, separate per-profile dirs):
@@ -1765,13 +1766,18 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   `app/application/autofill/smartrecruiters.py` + `smartrecruiters_url.py`) is
   accepted locally (2026-11-25): 22 URL checks and 64 offline browser checks
   passed across focused runs, plus 143 existing regressions; Ruff/diff checks pass.
-  Stages 2 (Screening; evidence already complete in the full investigation) and
-  3 (registration/resolver/Telegram button) are not started; supervised live
-  acceptance is pending. An old review-handoff fixture fails before the change
-  too (its fake session lacks the existing `is_usable` argument); it is not fixed
-  in this iteration. Rough estimate: Stage 2 2-4 engineering days, Stage 3 1-2 days
-  plus supervised acceptance. Existing SmartRecruiters
-  Prepare gates remain disabled. See `docs/smartrecruiters-stage1.md`.
+  Opt-in Stage 2 is locally verified (2026-11-25): bounded verified Next/Back,
+  separate Wise mappings, explicit salary-band judgement, candidate/answer/resume
+  persistence checks and accurate partial outcomes. 389 distinct focused checks
+  pass across relevant runs; Ruff/diff checks pass. Resume proof is still UI-only;
+  recreated or unavailable widgets stay manual. One old Ashby notice-period
+  assertion is confirmed stale against unchanged code; no unrelated repair.
+  Stage 3 (registration/resolver/Telegram button) is not started. Revised estimate:
+  2-3 engineering days plus supervised live acceptance, with evidence-backed
+  proof adjustment if needed before activation. Existing SmartRecruiters Prepare
+  gates remain disabled. No live applications/submissions were run. Stop after
+  Stage 2 pending approval. See `docs/smartrecruiters-stage1.md` and
+  `docs/smartrecruiters-stage2.md`.
 - **Historical (superseded) blocker:** the first attempt was blocked on rendered
   form evidence, now captured; the notes below describe that earlier state.
 - **Inspection:** Existing source-aware resolvers/adapters and the shared

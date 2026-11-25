@@ -1,13 +1,12 @@
-"""SmartRecruiters OneClick adapter, Stage 1: page one only, UNREGISTERED.
+"""SmartRecruiters OneClick adapter, UNREGISTERED (Stages 1 and opt-in 2).
 
 Scope (see docs/smartrecruiters-stage1.md and the inspection report): safe
 public-posting -> application-link navigation, hydrated page-one discovery
 through open shadow roots (native controls only), supported identity/email/
 residence-city/phone fills with committed read-back, and the Resume upload with
-local byte-digest proof. There is deliberately no Next/Back/Submit handling,
-no consent/import interaction and no screening-stage support; `partial_stage_reason`
-makes the shared service report page-one-only preparation as needing manual
-intervention. Exceptions and logs carry fixed tokens only: never candidate
+local byte-digest proof. Stage 2 explicitly enables bounded Next/Back and
+Screening, with employer semantics separated from DOM interaction. There is
+no Submit/import interaction. Exceptions and logs carry fixed tokens only: never candidate
 values, filenames/paths, queries or raw page text.
 """
 
@@ -18,13 +17,16 @@ import logging
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
 
 from app.application.autofill.classifier import ClassifiedField
 from app.application.autofill.fields import DiscoveredField
-from app.application.autofill.models import FieldClassification
+from app.application.autofill.models import AutofillFieldResult, AutofillResult, AutofillStatus, FieldClassification
+from app.application.autofill.smartrecruiters_screening import ScreeningControls
+from app.application.autofill.wise_screening import map_wise_screening, wise_screening_inventory_complete
 from app.application.autofill.options import match_option_exact_normalized
 from app.application.autofill.phone import (
     digits_only,
@@ -129,7 +131,7 @@ const closest = (el, sel) => { for (let p = el; p; p = parentOf(p)) { if (p.matc
 """
 
 _SNAPSHOT_JS = (
-    "(rules) => {"
+    "(args) => { const rules = Array.isArray(args) ? args : args.rules; const includeHidden = !Array.isArray(args) && args.includeHidden;"
     + _DEEP
     + """
   const rootHit = deepAll(document, 'oc-oneclick-form');
@@ -160,7 +162,7 @@ _SNAPSHOT_JS = (
   for (const el of controls) {
     const type = (el.getAttribute('type') || '').toLowerCase();
     if (type === 'hidden' || closest(el, excluded)) continue;
-    if (type !== 'file' && !visible(el)) continue;
+    if (type !== 'file' && !visible(el) && !includeHidden) continue;
     const label = labelOf(el);
     let key = null;
     for (const [k, hook, tag, typeRule] of rules) {
@@ -280,7 +282,10 @@ class _UploadProof:
 
 
 class SmartRecruitersAdapter:
-    """Page-one OneClick adapter. One instance serves one Prepare run."""
+    """OneClick adapter. One instance serves one Prepare run; Stage 2 is opt-in."""
+
+    # Independent of global configuration and completeness: Prepare never submits.
+    allow_auto_submit = False
 
     def __init__(
         self,
@@ -292,6 +297,7 @@ class SmartRecruitersAdapter:
         upload_timeout_ms: int = 15_000,
         poll_ms: int = 150,
         stable_samples: int = 3,
+        prepare_screening: bool = False,
     ) -> None:
         self._expected_posting_id = expected_posting_id
         self._hydration_timeout_ms = hydration_timeout_ms
@@ -300,6 +306,7 @@ class SmartRecruitersAdapter:
         self._upload_timeout_ms = upload_timeout_ms
         self._poll_ms = poll_ms
         self._stable_samples = stable_samples
+        self._prepare_screening = prepare_screening
         self._reset()
 
     def _reset(self) -> None:
@@ -310,10 +317,13 @@ class SmartRecruitersAdapter:
         # (page, url, wanted digits, code, country name)
         self._dial_proof: tuple[object, str, str, str, str] | None = None
         self._upload_proof: _UploadProof | None = None
+        self._screening = ScreeningControls(self._stable, self._screening_ok)
+        self.last_choice_selected = None
+        self._stage_complete = False
 
     # ------------------------------------------------------------- recognition
     def partial_stage_reason(self) -> str | None:
-        return PARTIAL_STAGE_REASON
+        return None if self._stage_complete else PARTIAL_STAGE_REASON
 
     def detect_challenge(self, page: Page) -> str | None:
         try:
@@ -328,6 +338,8 @@ class SmartRecruitersAdapter:
 
     def recognize(self, page: Page) -> bool:
         ref = parse_application_url(page.url)
+        if ref is not None and ref.screening:
+            return self._screening_ok(page) and self._screening.hydrated(page)
         if ref is None or ref.screening:
             return False
         if self._publication is not None and ref != self._publication:
@@ -436,8 +448,10 @@ class SmartRecruitersAdapter:
         logger.warning("smartrecruiters_prepare stage=hydration_timeout")
 
     # ----------------------------------------------------------------- discovery
-    def discover_fields(self, page: Page) -> list[DiscoveredField]:
-        snapshot = page.evaluate(_SNAPSHOT_JS, self._rules()) or []
+    def discover_fields(self, page: Page, *, include_hidden: bool = False) -> list[DiscoveredField]:
+        if self._screening_ok(page) and not include_hidden:
+            return self._screening.discover(page)
+        snapshot = page.evaluate(_SNAPSHOT_JS, {"rules": self._rules(), "includeHidden": include_hidden}) or []
         counts: dict[str, int] = {}
         for item in snapshot:
             counts[item["key"] or ""] = counts.get(item["key"] or "", 0) + 1
@@ -487,8 +501,9 @@ class SmartRecruitersAdapter:
         control -- unknown, duplicated, Facebook/X/website/message, history --
         is UNSUPPORTED so neither the generic classifier's guess nor generated
         answers can ever fill it; a required one stays unresolved."""
-        _ = vacancy
         name = item.field.name or ""
+        if name.startswith("sr:"):
+            return map_wise_screening(item, profile=profile, vacancy=vacancy)
         if name == "emailConfirmation":
             if not profile.identity.email:
                 return self._unsupported(item)
@@ -508,7 +523,8 @@ class SmartRecruitersAdapter:
                 classification=FieldClassification.SUPPORTED_DETERMINISTIC,
             )
         if _EXPECTED_KINDS.get(name) is item.kind and item.classification is not FieldClassification.UNSUPPORTED:
-            return item
+            # Missing factual profile data is manual, never generated prose.
+            return item if item.fill else self._unsupported(item)
         return self._unsupported(item)
 
     @staticmethod
@@ -528,6 +544,11 @@ class SmartRecruitersAdapter:
         ref = parse_application_url(page.url)
         return ref is not None and not ref.screening and ref == self._publication
 
+    def _screening_ok(self, page: Page) -> bool:
+        ref = parse_application_url(page.url)
+        return bool(self._prepare_screening and ref and ref.screening
+                    and replace(ref, screening=False) == self._publication)
+
     @staticmethod
     def _in(page: Page, selector: str):
         """`selector` scoped to the one recognised form root. Without exactly
@@ -545,7 +566,12 @@ class SmartRecruitersAdapter:
 
     def fill_field(self, page: Page, classified: ClassifiedField) -> bool:
         key = classified.field.name or ""
+        self.last_choice_selected = None
         try:
+            if self._screening_ok(page):
+                ok = self._screening.fill(page, classified)
+                self.last_choice_selected = self._screening.last_choice_selected
+                return ok
             if not self._page_ok(page):
                 return False
             if key in _TEXT_KEYS:
@@ -561,7 +587,10 @@ class SmartRecruitersAdapter:
         return False
 
     def _bound(self, page: Page, proof_page: object, proof_url: str) -> bool:
-        return proof_page is page and proof_url == page.url and self._page_ok(page)
+        return proof_page is page and (
+            (proof_url == page.url and self._page_ok(page))
+            or (self._screening_ok(page) and parse_application_url(proof_url) == self._publication)
+        )
 
     def _fill_text(self, page: Page, key: str, value: str) -> bool:
         locator = self._one(page, key)
@@ -786,7 +815,9 @@ class SmartRecruitersAdapter:
     def read_back(self, page: Page, field: DiscoveredField) -> str | None:
         key = field.name or ""
         try:
-            if not self._page_ok(page):
+            if self._screening_ok(page) and key.startswith("sr:"):
+                return self._screening.read_back(page, field)
+            if not self._page_ok(page) and not self._screening_ok(page):
                 return None
             if key in _TEXT_KEYS:
                 proof = self._writes.get(key)
@@ -896,7 +927,7 @@ class SmartRecruitersAdapter:
         """The attached filename once `stable_samples` consecutive samples all
         satisfy the full predicate (own row, delete action, enabled input, no
         pending/error, digest of the selected bytes); None otherwise."""
-        if proof is None or proof.page is not page or proof.url != page.url or not self._page_ok(page):
+        if proof is None or not self._bound(page, proof.page, proof.url):
             return None
         require_own = timeout_ms is None
         waited = 0
@@ -920,6 +951,171 @@ class SmartRecruitersAdapter:
             return proof is not None and filename == proof.name and self._resume_stable_state(page, proof) == filename
         except PlaywrightError:
             return False
+
+    # ----------------------------------------------------- bounded two-stage flow
+    def _navigate_stage(self, page: Page, *, forward: bool) -> None:
+        """Only observed Next/Back controls. Never infer safety from enabled/type alone."""
+        if self.detect_challenge(page) or not (self._page_ok(page) if forward else self._screening_ok(page)):
+            raise SmartRecruitersFormError("stage navigation refused")
+        container, hook, name = (
+            ("oc-nav-first-page", "footer-next", "Next") if forward
+            else ("oc-nav-screening-questions", "footer-back", "Back")
+        )
+        nav = page.locator(container)
+        if nav.count() != 1 or nav.locator(f'[data-test="{hook}"]').count() != 1:
+            raise SmartRecruitersFormError("ambiguous stage navigation")
+        button = nav.get_by_role("button", name=name, exact=True)
+        if button.count() != 1 or not button.is_visible() or not button.is_enabled():
+            raise SmartRecruitersFormError("unverified stage navigation")
+        element = button.element_handle()
+        guard = "(e, args) => {" + _DEEP + """
+          return e.isConnected && e.tagName==='BUTTON' && e.type==='button'
+            && !e.hasAttribute('formaction') && !e.hasAttribute('formmethod')
+            && !e.hasAttribute('form') && !e.disabled && e.getAttribute('aria-disabled')!=='true'
+            && !!closest(e, args.container) && !!closest(e, '[data-test="'+args.hook+'"]')
+            && !/submit|finish|send|apply/i.test([e.id,e.name,e.value].join(' '));
+        }"""
+        if element is None or not element.evaluate(guard, {"container": container, "hook": hook}):
+            raise SmartRecruitersFormError("unsafe stage navigation")
+        parts = urlsplit(page.url)
+        path = parts.path.rstrip("/")
+        path = path + "/screening" if forward else path.removesuffix("/screening")
+        expected = urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+        # Recheck accessible identity/route immediately before clicking the
+        # captured node; a changed locator must never select another action.
+        if (button.count() != 1 or not button.evaluate("(e, original) => e===original", element)
+                or not (self._page_ok(page) if forward else self._screening_ok(page))):
+            raise SmartRecruitersFormError("stage navigation changed")
+        element.click(timeout=self._navigation_timeout_ms)
+        page.wait_for_url(expected, timeout=self._navigation_timeout_ms)
+        if self.detect_challenge(page) or not (self._screening_ok(page) if forward else self._page_ok(page)):
+            raise SmartRecruitersFormError("unexpected stage destination")
+        hydrated = self._screening.hydrated if forward else self._hydrated
+        if not self._stable(page, lambda: hydrated(page), timeout_ms=self._hydration_timeout_ms):
+            raise SmartRecruitersFormError("stage hydration failed")
+
+    @staticmethod
+    def _signature(fields):
+        return sorted((f.name or "", f.label, f.field_type, f.required, f.context) for f in fields)
+
+    @staticmethod
+    def _demote(result: AutofillResult, records, reason: str) -> None:
+        for record in list(records):
+            identity = (record.name, record.label)
+            result.filled_fields[:] = [r for r in result.filled_fields if (r.name, r.label) != identity]
+            target = result.unresolved_required_fields if record.required else result.unresolved_optional_fields
+            if not any((r.name, r.label) == identity for r in target):
+                target.append(record.model_copy(update={"note": reason}))
+            if record.name == "resume":
+                result.resume_uploaded = False
+                result.resume_attachment_incomplete = True
+
+    def _check_stage(self, page: Page, result: AutofillResult, *, include_hidden: bool = False) -> bool:
+        """Re-read every successful value and account for newly required fields."""
+        if self.detect_challenge(page):
+            self._demote(result, result.filled_fields, "Challenge prevents final verification.")
+            return False
+        fields = self.discover_fields(page, include_hidden=include_hidden)
+        failed = []
+        for record in list(result.filled_fields):
+            matches = [f for f in fields if (f.name, f.label, f.field_type, f.required) ==
+                       (record.name, record.label, record.field_type, record.required)]
+            if len(matches) != 1 or self.read_back(page, matches[0]) is None:
+                failed.append(record)
+        # Read-back can span asynchronous rendering. Account for the schema
+        # again afterwards, including fields added during these samples.
+        fields = self.discover_fields(page, include_hidden=include_hidden)
+        for record in result.filled_fields:
+            matches = [f for f in fields if (f.name, f.label, f.field_type, f.required) ==
+                       (record.name, record.label, record.field_type, record.required)]
+            if len(matches) != 1 and record not in failed:
+                failed.append(record)
+        self._demote(result, failed, "Value or own validation could not be confirmed after stage transition.")
+        accounted = {(r.name, r.label) for r in result.filled_fields + result.unresolved_required_fields}
+        for field in fields:
+            if field.required and (field.name, field.label) not in accounted:
+                result.unresolved_required_fields.append(AutofillFieldResult(
+                    label=field.label, name=field.name, field_type=field.field_type,
+                    required=True, classification=FieldClassification.UNSUPPORTED,
+                    note="New or changed required field needs manual review.",
+                ))
+        return not failed
+
+    @staticmethod
+    def _combine(first: AutofillResult, second: AutofillResult | None) -> AutofillResult:
+        merged = first.model_copy(deep=True)
+        if second is not None:
+            for key in ("filled_fields", "unresolved_required_fields", "unresolved_optional_fields", "sensitive_fields",
+                        "unsupported_fields", "generated_fields", "warnings"):
+                getattr(merged, key).extend(getattr(second, key))
+        merged.warnings[:] = list(dict.fromkeys(w for w in merged.warnings if w != PARTIAL_STAGE_REASON))
+        return merged
+
+    def prepare_remaining_stages(self, page: Page, result: AutofillResult, *, fill_stage) -> AutofillResult:
+        if not self._prepare_screening:
+            return result
+        first, second = result.model_copy(deep=True), None
+        reason = "candidate-information preflight is incomplete"
+        self._stage_complete = False
+        try:
+            if not self._page_ok(page) or not self._check_stage(page, first) or first.unresolved_required_fields:
+                return self._stage_result(first, None, reason)
+            signature = self._signature(self.discover_fields(page))
+            self._navigate_stage(page, forward=True)
+            second = fill_stage()
+            reason = "Screening read-back is incomplete"
+            if second.status is AutofillStatus.FAILED or not self._check_stage(page, second):
+                return self._stage_result(first, second, reason)
+            screening_signature = self._signature(self.discover_fields(page))
+            self._navigate_stage(page, forward=False)
+            reason = "candidate information or resume did not survive Back"
+            candidate_ok = self._check_stage(page, first)
+            if self._signature(self.discover_fields(page)) != signature or not candidate_ok or first.unresolved_required_fields:
+                self._demote(second, second.filled_fields, "Screening persistence has not been verified.")
+                return self._stage_result(first, second, reason)
+            self._navigate_stage(page, forward=True)
+            reason = "Screening answers or requirements did not survive Next"
+            answers_ok = self._check_stage(page, second)
+            if self._signature(self.discover_fields(page)) != screening_signature or not answers_ok:
+                return self._stage_result(first, second, reason)
+            # The final Next can itself mutate candidate values or the upload.
+            # Only a retained, own widget can prove this on the final route;
+            # a recreated/name-only row never replaces original attempt proof.
+            candidate_ok = self._check_stage(page, first, include_hidden=True)
+            final_candidate_fields = self.discover_fields(page, include_hidden=True)
+            if not candidate_ok or self._signature(final_candidate_fields) != signature:
+                return self._stage_result(first, second, "final-route candidate/resume persistence could not be proven")
+            if (not self._check_stage(page, second)
+                    or self._signature(self.discover_fields(page)) != screening_signature):
+                return self._stage_result(first, second, "final Screening state changed during verification")
+            if not wise_screening_inventory_complete(self.discover_fields(page)):
+                return self._stage_result(first, second, "observed required Screening inventory is incomplete or changed")
+            self._stage_complete = (not first.unresolved_required_fields and not second.unresolved_required_fields
+                                    and not self.detect_challenge(page))
+            return self._stage_result(first, second, "required Screening answers remain manual")
+        except (PlaywrightError, SmartRecruitersFormError):
+            # No raw Playwright exception (it may contain values/paths).
+            if self._page_ok(page):
+                self._check_stage(page, first)
+            else:
+                self._demote(first, first.filled_fields, "Candidate-information persistence is unverified.")
+            if second is not None:
+                self._demote(second, second.filled_fields, "Screening persistence is unverified.")
+            return self._stage_result(first, second, "verified stage navigation did not complete")
+
+    def _stage_result(self, first, second, reason):
+        merged = self._combine(first, second)
+        complete = self._stage_complete and not merged.unresolved_required_fields and not merged.resume_attachment_incomplete
+        merged.status = AutofillStatus.READY_FOR_REVIEW if complete else AutofillStatus.NEEDS_MANUAL_INTERVENTION
+        merged.submit_performed = False
+        merged.warnings.append(
+            "SmartRecruiters preparation is complete for manual review; Submit was not activated."
+            if complete else "SmartRecruiters preparation is partial: " + reason + ". Submit was not activated."
+        )
+        merged.warnings.append(
+            "Resume proof is UI-only: selected bytes and the original settled widget; server acknowledgement is unverified."
+        )
+        return merged
 
 
 __all__ = ["PARTIAL_STAGE_REASON", "SUPPORTED_COMPANIES", "SmartRecruitersAdapter", "SmartRecruitersFormError"]
