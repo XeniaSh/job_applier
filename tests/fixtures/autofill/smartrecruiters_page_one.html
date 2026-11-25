@@ -1,0 +1,203 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Synthetic SmartRecruiters page one</title></head>
+<body>
+<!--
+SYNTHETIC fixture. Hooks/selectors/labels follow docs/smartrecruiters-form-inspection.md (observed:
+data-test hooks, open shadow DOM, aria-required without native required, separate import and resume
+file inputs, slotted country-code display, City listbox + "Clear City value", resume row/Delete
+button). Everything driven by `window.SR_INIT` (async delays, reverts, mangling, upload modes) is
+[synthetic]: it models failure branches that were not observed live.
+-->
+<oc-oneclick-form></oc-oneclick-form>
+<oc-nav-first-page>
+  <button type="button" data-test="footer-next">Next</button>
+  <!-- the observed final Submit is a type="button" (it is not present on page one live; synthetic here) -->
+  <button type="button" data-test="footer-submit">Submit</button>
+</oc-nav-first-page>
+<script>
+window.SR = Object.assign({
+  hydrateDelay: 0, cityDelay: 200, cityOptions: ["Tallinn, Estonia", "Tallinn, Virginia, United States"],
+  cityRevert: false, dialFilterDelay: 150, dialClick: "ok", dialRevert: false, phoneFirst: false,
+  phoneMangle: false, confirmSuffix: false, invalidOn: null, upload: "ok", uploadDelay: 150,
+  lateClear: 0, extraRequired: false, decoys: false, challenge: false,
+}, window.SR_INIT || {});
+const SR = window.SR;
+// [synthetic] Records every Next/Submit click, Enter keypress and form `submit` event (capture phase, so
+// nothing can hide one). Tests assert it stays empty.
+window.__srActions = [];
+document.addEventListener("click", (e) => {
+  for (const el of e.composedPath()) {
+    if (!el.getAttribute) continue;
+    const hook = el.getAttribute("data-test");
+    if (hook === "footer-next" || hook === "footer-submit" || el.getAttribute("type") === "submit") {
+      window.__srActions.push("click:" + (hook || "submit"));
+      return;
+    }
+  }
+}, true);
+document.addEventListener("submit", () => window.__srActions.push("form-submit"), true);
+document.addEventListener("keydown", (e) => { if (e.key === "Enter") window.__srActions.push("enter"); }, true);
+if (SR.challenge) document.body.append(Object.assign(document.createElement("div"), {className: "g-recaptcha"}));
+const h = (tag, attrs = {}, kids = []) => {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  el.append(...kids);
+  return el;
+};
+const input = (label, type, required, extra = {}) =>
+  h("input", {type, "aria-label": label, "aria-required": required, ...extra});
+const wrap = (hook, el) => h("div", {"data-test": hook}, [el]);
+const shadowWrap = (hook, el) => {
+  const host = h("spl-input", {"data-test": hook});
+  if (el.id) host.id = el.id; // observed: the custom host and its native input share one id
+  host.attachShadow({mode: "open"}).append(el);
+  return host;
+};
+
+function build() {
+  const sr = document.querySelector("oc-oneclick-form").attachShadow({mode: "open"});
+  const easy = h("oc-easy-apply", {}, [
+    h("div", {"data-test": "apply-with-resume-container"}, [h("input", {type: "file", id: "import-input"})]),
+  ]);
+
+  // Native `required` is deliberately absent (observed): requiredness is ARIA-only.
+  const confirm = input("Confirm your email", "email", "true", {id: "confirm-email-input"});
+  confirm.addEventListener("blur", () => {
+    if (SR.confirmSuffix) confirm.value += "x";
+  });
+  const first = input("First name", "text", "true", {id: "first-name-input"});
+  const personal = h("oc-personal-information", {}, [
+    shadowWrap("personal-info-first-name-input", first),
+    wrap("personal-info-last-name-input", input("Last name", "text", "true", {id: "last-name-input"})),
+    wrap("personal-info-email-input", input("Email", "email", "true", {id: "email-input"})),
+    wrap("personal-info-email-confirm-input", confirm),
+  ]);
+  // [synthetic] invalid-state hook for the own-validation checks.
+  personal.addEventListener("blur", (e) => {
+    const target = e.composedPath()[0];
+    if (SR.invalidOn && target.getAttribute("aria-label") === SR.invalidOn) target.setAttribute("aria-invalid", "true");
+  }, true);
+
+  // City search mode (observed shape); async options / revert-on-blur are [synthetic].
+  const city = h("spl-autocomplete", {"data-test": "personal-info-location"});
+  const cin = h("input", {role: "combobox", type: "text", "aria-label": "City", "aria-required": "true",
+    "aria-expanded": "false", "aria-invalid": "false", autocomplete: "off"});
+  const clist = h("div", {role: "listbox"});
+  const clear = h("button", {type: "button", "aria-label": "Clear City value"}, ["x"]);
+  city.append(cin, clist);
+  let timer;
+  cin.addEventListener("input", () => {
+    clist.replaceChildren(); clear.remove(); cin.setAttribute("aria-expanded", "false");
+    clearTimeout(timer);
+    if (!cin.value) return;
+    timer = setTimeout(() => {
+      clist.replaceChildren(...SR.cityOptions.map((o) => h("div", {role: "option"}, [o])));
+      cin.setAttribute("aria-expanded", "true");
+    }, SR.cityDelay);
+  });
+  clist.addEventListener("mousedown", (e) => e.preventDefault());
+  clist.addEventListener("click", (e) => {
+    const o = e.target.closest("[role=option]");
+    if (!o) return;
+    cin.value = o.textContent; clist.replaceChildren(); cin.setAttribute("aria-expanded", "false"); city.append(clear);
+  });
+  cin.addEventListener("blur", () => {
+    if (SR.cityRevert || !clear.isConnected) { cin.value = ""; clear.remove(); }
+  });
+  clear.addEventListener("click", () => { cin.value = ""; clear.remove(); });
+
+  // Phone: slotted flag/code display (observed); filter delay/ignore/revert/mangle are [synthetic].
+  const ALL = ["Estonia +372", "New Zealand +64", "United Kingdom +44", "Guernsey +44", "Uzbekistan +998",
+    "United States +1", "Canada +1"];
+  const flag = h("spl-country-flag", {alt: "United Kingdom"});
+  const code = h("spl-typography-body", {}, ["+44"]);
+  const btn = h("button", {type: "button", role: "combobox", "aria-label": "Country code", "aria-expanded": "false"},
+    [h("span", {slot: "triggerPrefix"}, [flag, code])]);
+  const dd = h("spl-dropdown-search");
+  const search = h("input", {role: "combobox", "aria-label": "Search by country/region or code", type: "text"});
+  const plist = h("div", {role: "listbox"});
+  dd.append(search, plist);
+  const render = (q) => plist.replaceChildren(...ALL.filter((o) => !q || o.toLowerCase().includes(q.toLowerCase()))
+    .map((o) => h("div", {role: "option"}, [o])));
+  const show = (name, c) => { flag.setAttribute("alt", name); code.textContent = "+" + c; };
+  const close = () => { dd.remove(); btn.setAttribute("aria-expanded", "false"); };
+  btn.addEventListener("click", () => {
+    if (dd.isConnected) return close();
+    render(""); phoneBox.append(dd); btn.setAttribute("aria-expanded", "true");
+  });
+  search.addEventListener("input", () => setTimeout(() => render(search.value), SR.dialFilterDelay));
+  plist.addEventListener("click", (e) => {
+    const o = e.target.closest("[role=option]");
+    if (!o || SR.dialClick === "ignore") return;
+    const m = /^(.*) \+(\d+)$/.exec(o.textContent);
+    show(m[1], m[2]); close();
+    if (SR.dialRevert) setTimeout(() => show("United Kingdom", "44"), 30);
+  });
+  const tel = input("Phone number", "tel", "false", {autocomplete: "off"});
+  tel.addEventListener("blur", () => { if (SR.phoneMangle && tel.value) tel.value = "0" + tel.value.replace(/^0+/, ""); });
+  const phoneBox = h("oc-phone-number", {}, SR.phoneFirst ? [wrap("personal-info-phone", tel), btn] : [btn, wrap("personal-info-phone", tel)]);
+  personal.append(city, phoneBox);
+  if (SR.extraRequired) personal.append(h("oc-question", {}, [input("Why us?", "text", "true")]));
+
+  const history = h("oc-experience", {}, [input("Employer", "text", "false", {id: "last-name-input"})]); // duplicate custom id in the same tree
+  const web = h("oc-web", {}, [["linkedin", "LinkedIn"], ["facebook", "Facebook"], ["twitter", "X (fka Twitter)"],
+    ["website", "Website"]].map(([k, label]) => wrap("web-profiles-" + k, input(label, "text", "false", {id: k + "-input"}))));
+  const msg = h("oc-hiring-manager-message", {}, [
+    wrap("hiring-manager-message-text", h("textarea", {"aria-label": "Let the company know about your interest working there", "aria-required": "false"})),
+  ]);
+
+  // Resume: separate from the import input; row/Delete markup observed, upload modes [synthetic].
+  const fin = h("input", {type: "file", accept: ".pdf"});
+  const ul = h("ul");
+  const upl = h("div", {"data-test": "resume-upload"}, [fin, ul]);
+  const resume = h("oc-resume-upload", {}, [
+    h("h2", {}, ["Resume ", h("span", {"data-test": "section-required-mark"}, ["*"])]), upl,
+  ]);
+  const row = (name) => {
+    const li = h("li", {class: "c-spl-file-list-item"}, [
+      h("span", {class: "c-spl-file-list-item-name"}, [name]), h("span", {class: "c-spl-file-list-item-size"}),
+      h("button", {type: "button", "aria-label": "Delete file " + name}, ["Delete"]),
+    ]);
+    li.querySelector("button").addEventListener("click", () => li.remove());
+    return li;
+  };
+  fin.addEventListener("change", () => {
+    const f = fin.files[0];
+    if (!f || SR.upload === "noop") return;
+    fin.disabled = true;
+    setTimeout(() => {
+      if (SR.upload === "sameRow" && ul.firstChild) ul.firstChild.querySelector(".c-spl-file-list-item-name").textContent = f.name;
+      else ul.replaceChildren(row(f.name));
+      if (SR.upload === "pending") upl.append(h("div", {role: "progressbar"}));
+      else fin.disabled = false;
+      if (SR.upload === "error") upl.append(h("div", {role: "alert"}, ["Upload failed"]));
+      if (SR.lateClear) setTimeout(() => ul.replaceChildren(), SR.lateClear);
+    }, SR.uploadDelay);
+  });
+  sr.append(easy, personal, history, web, resume, msg);
+
+  // [synthetic] Same-hook controls OUTSIDE the form root. They already hold values that would "confirm"
+  // a fill if the adapter ever looked at them; the adapter must scope every lookup to the form.
+  if (SR.decoys) {
+    const decoyEmail = input("Email", "email", "true");
+    decoyEmail.value = "ada.example@example.test";
+    const decoyCity = h("input", {role: "combobox", type: "text", "aria-label": "City", "aria-expanded": "false", "aria-invalid": "false"});
+    decoyCity.value = "Tallinn, Estonia";
+    const decoyDial = h("button", {type: "button", role: "combobox", "aria-label": "Country code", "aria-expanded": "false"},
+      [h("span", {slot: "triggerPrefix"}, [h("spl-country-flag", {alt: "Estonia"}), h("spl-typography-body", {}, ["+372"])])]);
+    const decoyTel = input("Phone number", "tel", "false");
+    decoyTel.value = "55501234";
+    document.body.append(h("div", {id: "decoys"}, [
+      wrap("personal-info-email-input", decoyEmail),
+      h("spl-autocomplete", {"data-test": "personal-info-location"},
+        [decoyCity, h("button", {type: "button", "aria-label": "Clear City value"}, ["x"])]),
+      h("oc-phone-number", {}, [decoyDial, wrap("personal-info-phone", decoyTel)]),
+      h("div", {"data-test": "resume-upload"}, [h("input", {type: "file", accept: ".pdf"}), h("ul", {}, [row("Resume.pdf")])]),
+    ]));
+  }
+}
+if (SR.hydrateDelay) setTimeout(build, SR.hydrateDelay); else build();
+</script>
+</body>
+</html>

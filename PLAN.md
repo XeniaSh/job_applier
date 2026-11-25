@@ -42,8 +42,10 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   routing and autofill implementations. SmartRecruiters has verified standalone
   read-only discovery and a completed Wise pilot. TASK-094 adds Wise-only regular
   discovery with manual employer-site applications; the user now reports Wise
-  cards delivered in production. Task-095 Prepare is approved but awaits actual
-  form evidence; no SmartRecruiters Prepare button or adapter is enabled yet.
+  cards delivered in production. TASK-095 form evidence is complete
+  (`docs/smartrecruiters-form-inspection.md`); the Stage 1 page-one adapter is
+  accepted locally but UNREGISTERED (86 new checks and 143 existing checks pass).
+  No SmartRecruiters Prepare button, resolver or default dispatch is enabled.
   Workday has no collector; HH remains CLI-only.
 - TASK-097 (same employer-facing resume basename, separate per-profile dirs):
   locally verified (110 focused tests, Ruff and diff checks); private PDF
@@ -78,8 +80,9 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   check pending.
 - TASK-090..092 and TASK-094 have completed their local iterations. The current
   request is TASK-095 SmartRecruiters Prepare and independent TASK-096 desired
-  salary autofill, with separate commits. TASK-095 is blocked on a connected
-  browser/rendered form evidence; TASK-096 is locally verified. TASK-093 scoring
+  salary autofill, with separate commits. TASK-095 has complete form evidence and
+  a locally verified Stage 1 adapter (Stages 2/3 not started, live
+  acceptance pending); TASK-096 is locally verified. TASK-093 scoring
   remains unstarted. Automated and supervised acceptance stay separate.
 - No automatic submission, CAPTCHA bypass, Workday/HH expansion, broad refactor,
   production cache reset or whole-backlog reanalysis is authorized in this phase.
@@ -1758,8 +1761,19 @@ manual Submit, existing caches and the drained-backlog behavior intact.
 
 ### TASK-095 — Evidence-backed Wise/SmartRecruiters Prepare Application
 
-- **Status:** approved, blocked on rendered form evidence; no implementation or
-  feature commit. Existing SmartRecruiters Prepare gates remain disabled.
+- **Status:** form evidence complete. Stage 1 (Wise-only, page one, unregistered
+  `app/application/autofill/smartrecruiters.py` + `smartrecruiters_url.py`) is
+  accepted locally (2026-11-25): 22 URL checks and 64 offline browser checks
+  passed across focused runs, plus 143 existing regressions; Ruff/diff checks pass.
+  Stages 2 (Screening; evidence already complete in the full investigation) and
+  3 (registration/resolver/Telegram button) are not started; supervised live
+  acceptance is pending. An old review-handoff fixture fails before the change
+  too (its fake session lacks the existing `is_usable` argument); it is not fixed
+  in this iteration. Rough estimate: Stage 2 2-4 engineering days, Stage 3 1-2 days
+  plus supervised acceptance. Existing SmartRecruiters
+  Prepare gates remain disabled. See `docs/smartrecruiters-stage1.md`.
+- **Historical (superseded) blocker:** the first attempt was blocked on rendered
+  form evidence, now captured; the notes below describe that earlier state.
 - **Inspection:** Existing source-aware resolvers/adapters and the shared
   AutofillService answer, four-resume and review lifecycle were inspected.
   Public Wise posting `744000156787429` returned HTTP 200. Its public application
@@ -1804,8 +1818,8 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   Ruff and diff checks pass; exact counts are recorded in `PROGRESS.md`.
 - **Acceptance:** See `docs/salary-autofill.md`. Supervise an existing supported
   ATS Prepare, review chosen amount, units and evidence, then Done reviewing
-  without Submit. TASK-095 remains independently blocked; do not invent its
-  adapter or a second feature commit from unsupported form assumptions.
+  without Submit. TASK-095 now has verified form evidence and a separate local
+  Stage 1 adapter; screening and production integration remain separate stages.
 
 ### TASK-099 — Bounded IMAP runtime reliability
 

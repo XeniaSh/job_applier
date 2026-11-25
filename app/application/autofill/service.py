@@ -32,6 +32,7 @@ from app.application.autofill.models import (
     stage1_autofill_result,
 )
 from app.application.autofill.options import match_option, match_option_exact_normalized, match_yes_no
+from app.application.autofill.smartrecruiters import SmartRecruitersFormError
 from app.application.autofill.questions import QuestionKind
 from app.application.autofill.resolver import (
     TARGET_COMPANY_ASHBY_PREFIX,
@@ -63,6 +64,7 @@ _UNSUPPORTED_FORM_ERRORS: tuple[type[Exception], ...] = (
     GreenhouseFormError,
     LeverFormError,
     AshbyFormError,
+    SmartRecruitersFormError,
 )
 
 # Sibling kinds eligible to carry the full New Zealand relocation fact set
@@ -746,9 +748,18 @@ class AutofillService:
             if _privacy_trace_should_warn(privacy_trace):
                 warnings.append(privacy_report)
 
+        # Optional hook (currently only the unregistered SmartRecruiters
+        # Stage 1 adapter): preparing only part of the application can never
+        # be reported READY_FOR_REVIEW, so it is also never auto-submittable.
+        partial_stage_reason = getattr(adapter, "partial_stage_reason", None)
+        partial_reason = partial_stage_reason() if partial_stage_reason is not None else None
+        partial_stage = isinstance(partial_reason, str) and bool(partial_reason)
+        if partial_stage:
+            warnings.append(partial_reason)
+
         status = (
             AutofillStatus.NEEDS_MANUAL_INTERVENTION
-            if resume_attachment_failed_required
+            if resume_attachment_failed_required or partial_stage
             else AutofillStatus.READY_FOR_REVIEW
         )
 
@@ -995,6 +1006,10 @@ def _enrich_unresolved(
         # Driven only by the configured phone number; never LLM-enriched.
         return item
     if item.fill:
+        return item
+    if item.classification is FieldClassification.UNSUPPORTED:
+        # Never filled by the loop (it `continue`s on UNSUPPORTED), so it must
+        # not reach generated answers either.
         return item
     if item.kind is QuestionKind.COVER_LETTER and cover_letter_text:
         return replace(
