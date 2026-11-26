@@ -1,6 +1,10 @@
 # Bounded proposal: Habr Career RSS discovery
 
-Status: **proposal only; no collector implemented or activated**. Uses the
+Historical proposal; superseded by the approved
+[Phase A implementation and measured report](habr-career-rss-pilot-2026-11-26.md).
+Phase B is stopped at the practical-quality gate; no runtime activation.
+
+Original proposal status: **no collector implemented or activated**. Uses the
 2026-11-26 research already recorded in the employment strategy; no new live
 requests, accounts, subscriptions or application sessions are required by this
 proposal. HH, Telegram scraping and application autofill are outside scope.
