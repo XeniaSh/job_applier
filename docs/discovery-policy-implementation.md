@@ -28,18 +28,19 @@ case becomes CHECK_MANUALLY; its integration tests still assert exact delivery,
 dedup, restart, retry, cache and enabled/disabled Prepare behavior. Explicit Wise
 refusals remain SKIP. Fixtures were not changed to invent eligibility evidence.
 
-Focused verification: 78 tests pass across eligibility conflicts, feasibility,
-recommendations and Wise integration. Ruff passes. Cache-derived recommendation
-refresh will be handled with the policy integration changes later in this phase;
-the technical evaluation must remain reusable without an LLM call.
+Initial verification: 78 tests passed across eligibility conflicts, feasibility,
+recommendations and Wise integration. Cache-derived policy refresh is now also
+implemented, as described below. Final geography review additionally scopes
+"only hire" to geographic context (not "only hire great engineers") and recognizes
+negated work-from-anywhere claims. The final relevant core run passes 87 tests.
 
 ## Seniority correction
 
 Explicit Senior now precedes the generic Engineer I band. Intern, management,
 staff/principal and explicit junior guards still precede Senior. The committed
-public-title fixture replays all49 Wise pilot titles and ten sanitized NZ titles:
-12 Wise titles change JUNIOR => SENIOR; the other37 and all ten NZ titles remain
-unchanged. This is not12 proven lost notifications or a retrospective score.
+public-title fixture replays all 49 Wise pilot titles and ten sanitized NZ titles:
+12 Wise titles change JUNIOR => SENIOR; the other 37 and all ten NZ titles remain
+unchanged. This is not 12 proven lost notifications or a retrospective score.
 Genuine Engineer I stays JUNIOR and its existing exclusion test remains intact.
 70 focused seniority/recommendation/conflict tests pass; Ruff passes.
 
@@ -117,9 +118,122 @@ Old card text and identity-only explicit Prepare lookups are not retroactively
 rewritten by discovery refresh. Explicit/manual Prepare remains a separate
 workflow, SmartRecruiters stays default-off, and submission remains manual.
 
-Final local verification for ordering/cache integration:127 focused tests pass
+Final local verification for ordering/cache integration: 127 focused tests pass
 (priority, cache, runtime, generic pipeline, Wise delivery and formatting), with
 the previously noted worker-fixture warning. Core eligibility/cache/Wise checks:
-89 pass. Additional provider/config/four-resume/IMAP/Telegram regressions:303 pass.
+89 pass before the final geographic wording correction; its relevant core run
+passes 87 tests. Additional provider/config/four-resume/IMAP/Telegram regressions:
+303 pass.
 These runs overlap; do not add the counts as a unique-test total. Ruff and diff
 checks pass. No full suite or live session was run.
+
+## Before/after evidence and historical replay
+
+| Evidence | Before | After / reason |
+| --- | --- | --- |
+| Generic worldwide wording plus explicit country-only hiring | APPLY_NOW | CHECK_MANUALLY: preserve restriction; no known candidate-country compatibility |
+| Relocation money, explicit no sponsorship, required relocation visa, no supported alternative | APPLY_NOW despite adverse feasibility | SKIP: moving assistance cannot supply the required visa route |
+| Limited remote alternative with unknown personal compatibility | Could be rejected as though every route required a relocation visa | CHECK_MANUALLY: retain alternative without claiming eligibility |
+| Approved Coinbase/Binance/Exness identity with a positive technical evaluation | Could proceed to analysis/delivery | Domain gate excludes independently of cached technical fit |
+| Genuine Engineer I without explicit Senior | JUNIOR / excluded | Unchanged |
+
+Offline replay used the saved 49 public Wise pilot descriptions, with a **fixed
+synthetic STRONG_MATCH evaluation** before and after to isolate deterministic
+policy. It did not retrieve historical scores, run an LLM or measure production
+notification outcomes. Baseline code was the strategy commit `2a8356e` before
+these implementation changes. Of the 12 corrected Senior labels, 11 resulting
+recommendations change SKIP => CHECK_MANUALLY:
+
+| Wise posting ID | Team/title suffix |
+| --- | --- |
+| 744000158265079 | Pricing Core |
+| 744000158109379 | Risk Control & Governance |
+| 744000158101614 | Account Integrity |
+| 744000157420370 | Product Eligibility |
+| 744000157078266 | Wise for Enterprise — Banks |
+| 744000156752984 | Risk Control & Governance |
+| 744000150224729 | Personal & Business Pricing |
+| 744000141541057 | Fincrime Requests |
+| 744000139108668 | Servicing Platform |
+| 744000127948469 | Receive |
+| 744000108484376 | Payment Processing Platform |
+
+The twelfth, `744000152127649` (Business Onboarding Verification), remains SKIP
+because of explicit sponsorship/relocation refusal. The other 37 Wise
+recommendations are unchanged in this controlled replay.
+
+All ten sanitized persisted NZ categorical cases retain their recommendations
+when replaying their saved flags and original titles. Only four have available
+same-hash full descriptions; the other six cannot support a full-text historical
+revalidation claim. Actual numeric production scores and historical CV choices
+are unavailable. Replay artifacts remain ignored under
+`data/strategy-research-20261126/`; the committed public-title fixture supplies
+the reproducible seniority regression. These results do not estimate precision,
+recall or the number of missed real applications.
+
+## Reproducible verification
+
+Focused ordering/cache/runtime/formatting run: **127 passed**, with the existing
+`test_linkedin_only_run_skips_target_companies_without_chat_id` background-thread
+warning: its temporary cwd lacks `resume_profiles.yaml`. The worker/profile path
+is unchanged; the warning is not presented as a clean full-suite result.
+
+```sh
+.venv/bin/pytest tests/company_watch/test_delivery_priority.py tests/company_watch/test_analysis_cache.py tests/test_pipeline_runtime.py tests/test_run_target_companies.py tests/test_smartrecruiters_wise_integration.py tests/test_telegram_formatter.py -q --tb=short
+```
+
+Final geographic correction: **87 passed** across eligibility conflicts,
+feasibility, recommendations and Wise integration. Separate seniority/replay
+run: **70 passed**. Final domain unit run: **30 passed**.
+
+Provider, configuration, four-resume, IMAP and Telegram run: **303 passed**:
+
+```sh
+.venv/bin/pytest tests/company_watch/watchers/test_greenhouse_watcher.py tests/company_watch/watchers/test_lever_watcher.py tests/company_watch/watchers/test_ashby_watcher.py tests/company_watch/watchers/test_smartrecruiters_watcher.py tests/company_watch/test_config_loader.py tests/company_watch/test_analysis_cache.py tests/company_watch/test_candidate_constraints.py tests/test_smartrecruiters_prepare_flag.py tests/test_resume_policy.py tests/test_resume_profiles.py tests/test_imap_runtime_reliability.py tests/test_telegram_client.py -q --tb=short
+```
+
+These overlapping focused runs are not a unique-test total. No full-suite,
+production, external application or live Telegram acceptance was performed.
+Claude was not invoked. Codex token/quota telemetry is unavailable; no usage
+estimate is asserted.
+
+## Main compatibility and exact integration order
+
+Verified against read-only current main
+`715279fe9cba35597eef21b3bfb98fdab111f9c3`: apply the ordered patches to an isolated
+`git archive` copy, then compare every affected file with the tested worktree.
+No checkout, main-ref update or operation on the production checkout is involved.
+The approved SmartRecruiters implementation and default-off flag are already
+present in this main; do not cherry-pick the original Stage 1–3 hashes again.
+
+Required order from that main (first two are previously accepted maintenance
+and documentation prerequisites, followed by this approved phase):
+
+1. `f4a17af93e280803adf4c7452a1c0eb87c9239f3` — private-independent lifecycle fixtures.
+2. `cbf9e783c9cd7b270b385a02398ae0d3d9a9f15d` — original audit/discovery documents and roadmap.
+3. `2a8356e8fe896ca9f3f99891a677087387d18e9b` — revised strategy documentation only.
+4. `c0519280329e768693f30c1e1ed25e8f9183b5b2` — eligibility conflict correction.
+5. `0c1de6834473ab0d089bc5607c39264ae3a3827a` — Senior/Engineer I precedence and replay fixture.
+6. `bff5d65e7ae5226235bac22826568a16360463cc` — configured domain exclusions.
+7. `286325bff48b54b182fc07bff04595645f4cf135` — stable priority, card notice and cached-policy refresh.
+8. `929421d728475f42924a1dbd78ffb1664f5f6028` — geographic wording regression correction.
+9. This final documentation commit (hash in the delivery report).
+
+Exclude launcher changes, including `57e30f5`. Older optional NZ research/export
+commits are historical context, not runtime prerequisites. Local commits do not
+activate these policies in production.
+
+## Remaining scope and next proposal
+
+Geographic/domain detectors are deliberately narrow, not comprehensive legal or
+industry classifiers. A richer country/contract/provenance schema remains a
+separate task. Batch priority cannot guarantee that lower-volume viable employers
+are discovered or analyzed before a different cycle/provider batch. Company
+outcome attribution and response/interview tracking are still absent; counts
+alone cannot prove improved employment outcomes. F2 lead-warning and F3/F4 AI
+evidence issues remain separate audit follow-ups.
+
+Next recommended implementation is checkpoint A of the
+[bounded Habr RSS proposal](habr-career-rss-proposal.md): read-only, discovery-only
+pilot first, with Telegram/runtime integration separately approved. No Habr, HH,
+new employer collector, deployment or production activation is included here.

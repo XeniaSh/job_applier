@@ -24,7 +24,8 @@ are custom/manual or unapproved sources, not operational collectors. Canva is
 configured but is outside the Wise-only runtime allowlist. Workday and Workable
 have no runtime collector. Source coverage and Prepare coverage are different.
 
-The [October NZ audit](nz-discovery-audit.md) inspected all then-supported 66
+The October NZ audit (`docs/nz-discovery-audit.md`, historical commit `eea1c96`)
+inspected all then-supported 66
 feeds: 155 NZ-location-metadata records, nine title passes, and persisted analysis
 for all nine. Thin suitable supply, specialist/level mismatches and unknown
 sponsorship were evidenced; analysis starvation was not. Historical per-cycle

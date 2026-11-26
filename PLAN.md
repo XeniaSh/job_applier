@@ -1963,42 +1963,54 @@ later corrections and current supervised acceptance notes take precedence.
 
 ## Recommended next implementation priorities — approval required
 
-### Approved first implementation phase — local progress
+### Approved first implementation phase — locally complete
 
 The user authorized eligibility conflicts, Senior/Engineer I, configurable
 domain exclusions and minimal delivery prioritization, with separate commits.
 Strategy documentation is committed separately (`2a8356e`). Eligibility conflict
-corrections are verified locally: 78 focused tests and Ruff pass. Explicit limits
+corrections (`c051928`, final wording regression `929421d`) are verified. Explicit limits
 cannot promote worldwide/APPLY_NOW; moving money cannot replace required visa
 support. Unknown country rights stay manual, including the Wise transfer/right
 fixture; explicit refusals stay rejected. See
-[implementation notes](docs/discovery-policy-implementation.md). Remaining tasks
-include deterministic cache-policy refresh, seniority, domain rules and bounded
-ordering. No production activation or Habr/HH collector is authorized.
+[implementation notes](docs/discovery-policy-implementation.md). All four approved
+implementation tasks are locally complete. No production activation or Habr/HH
+collector is authorized.
 
 Seniority is also verified locally: explicit Senior/Engineer I precedence fixed,
-with manager/staff/junior/intern guards retained. Public-title replay:12/49 Wise
-labels JUNIOR=>SENIOR,37 unchanged; all ten historical NZ titles unchanged.
-70 focused tests pass. Remaining domain, cache-policy refresh and ordering work
-continues within the approved phase; no production state is modified.
+with manager/staff/junior/intern guards retained (`0c1de68`). Public-title replay:
+12/49 Wise labels JUNIOR=>SENIOR, 37 unchanged; all ten historical NZ titles
+unchanged. 70 focused tests pass. Controlled fixed-technical-evaluation replay:
+11 Wise recommendations SKIP=>CHECK_MANUALLY; the twelfth retains explicit visa
+refusal. These are not historical production-score or lost-notification counts.
 
-Domain exclusions are implemented locally with `config/discovery_policy.yaml`:
+Domain exclusions (`bff5d65`) are implemented with `config/discovery_policy.yaml`:
 five configurable categories and approved exact Exness/Binance/Coinbase mappings.
 Target and regular email/Greenhouse pipelines gate before analysis/delivery,
 including cached positive target records. Missing custom policy preserves legacy
 behavior; malformed policy fails visibly. Ordinary fintech is retained. Domain,
-runtime and pipeline regressions pass; deterministic cache-derived policy refresh
-and minimal ordering are next. No collector or production activation occurs.
+runtime and pipeline regressions pass. No collector or production activation occurs.
 
-Minimal ordering and cache-policy refresh are now implemented locally. Supported
+Minimal ordering and cache-policy refresh (`286325b`) are implemented. Supported
 Russian/CIS worldwide remote and NZ visa opportunities precede other supported
 remote/relocation routes, then unclear international roles; A/B/C metadata is a
 secondary tie-breaker. No new quotas/queue or unknown-as-rejection policy. Cards
 show manual confirmation versus vacancy-side support. Target cached scores/CVs
 are reused while current derived policy is recomputed in memory before SKIP
 pruning and delivery, with zero LLM calls or cache-file writes on hits. Normal
-discovery only: no history replay/resends. Remaining steps are final regression,
-main compatibility verification and the Habr RSS proposal (not implementation).
+discovery only: no history replay/resends.
+
+Final verification: 127 ordering/cache/runtime/formatting tests, 303 provider/
+config/four-resume/IMAP/Telegram regressions, and 87 core eligibility/Wise tests
+after the final geographic wording correction pass. Runs overlap; counts are
+not a unique total. One existing missing-resume-config worker-fixture warning is
+documented, not hidden. No full suite or live acceptance was run. Patches apply
+to an isolated archive of current main `715279f`, with affected files compared
+against the tested worktree; main and production data remain untouched.
+
+The [bounded Habr RSS proposal](docs/habr-career-rss-proposal.md) is complete,
+**not implemented**. Next approval scope: checkpoint A, a read-only RSS pilot
+without LLM, DB writes or Telegram. Runtime delivery and detail enrichment are
+separate checkpoints. HH and larger architecture work remain unapproved.
 
 The proposals below are the strategy baseline; the approved subset above now
 takes precedence. Larger schema/queue work still requires separate approval.
@@ -2006,13 +2018,14 @@ takes precedence. Larger schema/queue work still requires separate approval.
 The revised [employment strategy](docs/employment-discovery-strategy-2026-11-26.md)
 supersedes the earlier Datacom/Xero/Endava-first international expansion order.
 Effort ranges are estimates, not vacancy/interview forecasts. None of these
-recommendations is implemented or authorized for production by this report.
+remaining recommendations is authorized for production by this report. The
+first three rows below record the accepted phase; Habr is the next proposed task.
 
 | Priority | Bounded task | Practical value / gap | Estimated effort |
 | --- | --- | --- | --- |
-| 1 | Shared eligibility conflict regressions/correction | Specific country limits must defeat generic worldwide marketing; relocation money must not imply sponsorship or override contradictory feasibility. Preserve unknown/manual and candidate factual boundaries, plus Wise corrections | 1–2 days bounded correction; richer country/contract schema and delivery lanes another 2–3 days, separately approved |
-| 2 | Correct explicit-Senior versus generic Engineer I precedence | Confirmed 12/49 title replay defect; smallest independent code task. Preserve junior/manager/staff guards, no broad threshold change or replay | 0.5 day |
-| 3 | Explicit domain policy and uncertain-delivery priority | Curated excluded employer/project identities with evidence, separate from immigration rejection. Actual priority wiring, no blanket fintech/gaming ban; preserve history and supported exceptions. Digest/caps require product approval | 0.5–1 day policy gate; priority/manual queue another 1–2 days, separately approved |
+| Done locally | Shared eligibility conflict correction | Limits defeat worldwide marketing; moving assistance cannot replace a required visa. Unknown/manual and supported alternative routes preserved | Richer country/contract schema remains separate |
+| Done locally | Explicit Senior versus generic Engineer I precedence | 12/49 Wise title corrections; genuine junior/manager/staff guards preserved | No bulk replay/resend |
+| Done locally | Explicit domain policy and minimal batch priority | Configured exclusions, supported-route tiers and current cache-policy refresh; no blanket fintech ban | Global queue, digest or quotas not implemented |
 | 4 | Habr Career advertised RSS discovery-only pilot | Working public feed and Russian JVM shortlist; stable IDs, snippet completeness, Russian role/QA/mobile/domain filtering and bounded manual links | 1–2 days pilot; approved detail/runtime integration another 1–2 days |
 | 5 | HH supported access and data normalization, then regular-run promotion | Current CLI-only client lacks host/area/work-format parameters and newer metadata; unauthenticated probe 403. Registered API access first, no workaround; preserve dedup/history and polling | 0.5 day access feasibility; 1–2 days client/normalizer; 2–3 days regular integration after access |
 | 6 | Employer/source outcome attribution and manual response/interview tracking | Existing stats do not measure response/interview rates; do not invent low-performing companies from totals. Additive design only, preserve application history/undo | 0.5–1 day sanitized aggregate design; 1–2 days minimal event tracking after approval |
@@ -2020,15 +2033,15 @@ recommendations is implemented or authorized for production by this report.
 | Parallel NZ lane | Datacom and Xero | Prior concrete evidence retained; not deferred until all CIS sources are exhausted. Datacom Java/API contracts; Xero low-cost Ashby/AI breadth with scope/geography checks | Datacom 1–2 days pilot; Xero 0.5–1 day; runtime integration separate |
 
 Immediate manual-source value: review current Uzum and a small Habr/getmatch
-shortlist; no automatic application or recruiter message. Fastest independent
-code task remains Senior/Engineer I; highest delivery-quality impact is the
-shared eligibility-conflict correction. Fastest evidenced new collector input
-is Habr RSS; HH reuse is conditional on legitimate API access. getmatch/Geekjob
+shortlist; no automatic application or recruiter message. The bounded
+code corrections to seniority and eligibility are now complete locally.
+Fastest evidenced next collector input is the bounded Habr RSS pilot; HH reuse
+is conditional on legitimate API access. getmatch/Geekjob
 supported-input validation and LinkedIn manual email alerts can complement this;
 Telegram scraping/LLM aggregation and LinkedIn site automation are not proposed.
 
-No blanket fintech ban. Propose explicit domain-policy exclusions for clear
-speculative-trading businesses and vacancy-level route checks elsewhere. Unknown
+No blanket fintech ban. Explicit domain-policy exclusions now cover approved
+speculative-trading/crypto-exchange identities and vacancy-level evidence. Unknown
 eligibility gets bounded manual attention; exact caps need a separate product
 decision. Preserve explicitly feasible remote/NZ/relocation exceptions and all
 history. Company delivery concentration/response rankings remain unmeasured

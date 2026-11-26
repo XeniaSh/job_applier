@@ -159,7 +159,8 @@ different snapshot. Current-source comparison uses the same existing normalizers
 and `vacancy_description_hash`, with no cache writes. Local public snapshots and
 CPU-only derivation are under ignored `data/discovery-research-20261126/`.
 The archived full NZ public snapshot from October is no longer available; the
-prior [NZ audit](nz-discovery-audit.md) remains secondary historical description
+prior NZ audit (`docs/nz-discovery-audit.md`, historical commit `eea1c96`)
+remains secondary historical description
 evidence for texts that changed or disappeared.
 
 **Recommended next implementation: F1, explicit-Senior precedence**, approximately
