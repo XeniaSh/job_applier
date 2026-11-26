@@ -38,6 +38,16 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 
 ## Current capability and acceptance checkpoint — 2026-11-26
 
+- **Search strategy changed by the user:** Russian-speaking/CIS-first viable
+  employment now supersedes the international-first source roadmap. Target
+  Senior/Middle+ Java/Kotlin backend (~7+ years) and substantive AI-backend work;
+  Russian/English teams, legitimate remote-from-abroad arrangements, protected
+  NZ visa-supported opportunities and accepted supported relocation. Avoid
+  gambling, defense, adult entertainment and speculative-trading businesses.
+  Nationality, temporary location, residence, work rights and employer location
+  are separate facts. See [employment strategy](docs/employment-discovery-strategy-2026-11-26.md).
+  This is research/planning approval only: no production filter/source change,
+  new collector, cache replay or application-history modification is authorized.
 - Greenhouse, Lever and Ashby have runtime discovery, resolver, Telegram Prepare
   routing and autofill implementations. SmartRecruiters has verified standalone
   read-only discovery and a completed Wise pilot. TASK-094 adds Wise-only regular
@@ -95,7 +105,9 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 - TASK-090..092 and TASK-094 have completed their local iterations. TASK-095
   Stages 1–3 and challenge detection are complete offline; live acceptance is
   blocked/paused and Prepare is default-off. TASK-096 salary autofill is locally
-  verified. TASK-093 scoring evaluation remains unstarted. Automated completion,
+  verified. TASK-093's provisional 20-case audit is complete with data limits;
+  the revised Russian-speaking/CIS/eligibility research extension is documented,
+  with corrections and new-source implementation awaiting approval. Automated completion,
   supervised acceptance and production activation are separate checkpoints.
 - No automatic submission, CAPTCHA bypass, Workday/HH expansion, broad refactor,
   production cache reset or whole-backlog reanalysis is authorized in this phase.
@@ -1884,6 +1896,9 @@ manual Submit, existing caches and the drained-backlog behavior intact.
 - **Depends on:** TASK-092 pilot checkpoint, per the user's approved order.
 - **Goal:** Validate 15–20 representative historical vacancies against reviewed
   relevance/eligibility labels, keeping evidence separate from production state.
+  Revised priority: viable Russian-speaking/CIS cross-border employment and NZ
+  sponsorship, not international employer prestige or raw match volume. The old
+  cohort remains historical; fresh Habr/Uzum controls are not invented past scores.
 - **Acceptance criteria:** Include suitable Java/backend, meaningful AI
   integration, irrelevant stacks, generic software/platform titles, senior IC
   versus management, unknown sponsorship versus refusal/existing rights, and
@@ -1904,6 +1919,13 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   raw-text AI-resume evidence/scope edge cases. Actual numeric scores,
   historical resume choices and broad false-positive/negative rates remain
   unknown. No threshold/filter changes, LLM calls or cache replay.
+- **Revised-strategy extension:** shared synthetic replays confirm country-limit
+  conflict can become worldwide/APPLY_NOW, and relocation cash can override
+  UNLIKELY/no-sponsorship into APPLY_NOW. Recommend scoped conflict corrections
+  without manufacturing country authorization or erasing Wise safeguards. Extend
+  future fixtures for Russian abroad/region/contract/resident/timezone wording,
+  prohibited industries and missing descriptions. Keep F1 Senior/Engineer I high
+  priority and all four resume rules unchanged; implementation needs approval.
 
 ## Deferred and historical tasks
 
@@ -1941,19 +1963,38 @@ later corrections and current supervised acceptance notes take precedence.
 
 ## Recommended next implementation priorities — approval required
 
-These recommendations prioritize employment yield and evidence-backed fixes.
-Effort ranges are estimates. None of the following is implemented by Tasks B/C.
+The revised [employment strategy](docs/employment-discovery-strategy-2026-11-26.md)
+supersedes the earlier Datacom/Xero/Endava-first international expansion order.
+Effort ranges are estimates, not vacancy/interview forecasts. None of these
+recommendations is implemented or authorized for production by this report.
 
 | Priority | Bounded task | Practical value / gap | Estimated effort |
 | --- | --- | --- | --- |
-| 1 | Correct explicit-Senior versus generic Engineer I precedence | Reproducible misclassification can gate relevant roles across existing sources; preserve junior/manager/staff rules, no broad threshold change or replay | 0.5 day |
-| 2 | Datacom standalone read-only Workable discovery pilot | Concrete NZ Java/API integration contracts; validate unique shortcode/multiple-location handling and relevance before runtime integration | 1–2 days |
-| 3 | Xero company-scoped Ashby discovery pilot | Existing adapter reuse and missing NZ remote/AI builder roles; review C#/.NET/Python scope and geography instead of admitting every Engineer title | 0.5–1 day |
+| 1 | Shared eligibility conflict regressions/correction | Specific country limits must defeat generic worldwide marketing; relocation money must not imply sponsorship or override contradictory feasibility. Preserve unknown/manual and candidate factual boundaries, plus Wise corrections | 1–2 days bounded correction; richer country/contract schema and delivery lanes another 2–3 days, separately approved |
+| 2 | Correct explicit-Senior versus generic Engineer I precedence | Confirmed 12/49 title replay defect; smallest independent code task. Preserve junior/manager/staff guards, no broad threshold change or replay | 0.5 day |
+| 3 | Explicit domain policy and uncertain-delivery priority | Curated excluded employer/project identities with evidence, separate from immigration rejection. Actual priority wiring, no blanket fintech/gaming ban; preserve history and supported exceptions. Digest/caps require product approval | 0.5–1 day policy gate; priority/manual queue another 1–2 days, separately approved |
+| 4 | Habr Career advertised RSS discovery-only pilot | Working public feed and Russian JVM shortlist; stable IDs, snippet completeness, Russian role/QA/mobile/domain filtering and bounded manual links | 1–2 days pilot; approved detail/runtime integration another 1–2 days |
+| 5 | HH supported access and data normalization, then regular-run promotion | Current CLI-only client lacks host/area/work-format parameters and newer metadata; unauthenticated probe 403. Registered API access first, no workaround; preserve dedup/history and polling | 0.5 day access feasibility; 1–2 days client/normalizer; 2–3 days regular integration after access |
+| 6 | Employer/source outcome attribution and manual response/interview tracking | Existing stats do not measure response/interview rates; do not invent low-performing companies from totals. Additive design only, preserve application history/undo | 0.5–1 day sanitized aggregate design; 1–2 days minimal event tracking after approval |
+| 7 | Small employer pilots: Uzum, then verified Russian-speaking JVM teams | Current Uzum worldwide-remote Java lead; actual entity/country/Senior scope needs confirmation. Prefer verified existing ATS over new custom breadth | 0.5–1 day existing-ATS pilot; 1–3 days custom source per employer |
+| Parallel NZ lane | Datacom and Xero | Prior concrete evidence retained; not deferred until all CIS sources are exhausted. Datacom Java/API contracts; Xero low-cost Ashby/AI breadth with scope/geography checks | Datacom 1–2 days pilot; Xero 0.5–1 day; runtime integration separate |
 
-Separate smaller follow-ups: fix misleading lead-warning evidence/source
-classification, and capture mandatory-vs-optional AI-resume regression fixtures
-before any bounded policy correction. Endava discovery reuses an existing family;
-EROAD-first Workday comes after the cheaper measured opportunities. Retained
-health summaries remain a lower-priority proposal requiring storage/retention
-scope approval. No SmartRecruiters Prepare browser work, automated submissions
-or automatic filter loosening is proposed.
+Immediate manual-source value: review current Uzum and a small Habr/getmatch
+shortlist; no automatic application or recruiter message. Fastest independent
+code task remains Senior/Engineer I; highest delivery-quality impact is the
+shared eligibility-conflict correction. Fastest evidenced new collector input
+is Habr RSS; HH reuse is conditional on legitimate API access. getmatch/Geekjob
+supported-input validation and LinkedIn manual email alerts can complement this;
+Telegram scraping/LLM aggregation and LinkedIn site automation are not proposed.
+
+No blanket fintech ban. Propose explicit domain-policy exclusions for clear
+speculative-trading businesses and vacancy-level route checks elsewhere. Unknown
+eligibility gets bounded manual attention; exact caps need a separate product
+decision. Preserve explicitly feasible remote/NZ/relocation exceptions and all
+history. Company delivery concentration/response rankings remain unmeasured
+without a sanitized employer-level join. Outcomes should be measured on mature
+application cohorts using human responses, screens, interviews and viable offers.
+
+F2 lead-warning and F3/F4 AI evidence fixes remain separate bounded follow-ups.
+Endava and EROAD/Workday move below this revised employment roadmap. No new
+SmartRecruiters Prepare browser work, submission, cache reset or broad refactor.

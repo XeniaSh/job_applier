@@ -2,6 +2,11 @@
 
 Date: 2026-11-26. **Research only. No source/configuration/filter implementation,
 production collection, cache reset, LLM reanalysis, notification or submission.**
+**Roadmap superseded:** the later
+[Russian-speaking/CIS-first employment strategy](employment-discovery-strategy-2026-11-26.md)
+now governs priorities. Keep the dated source measurements below; do not treat
+the old ranked list as the current implementation order. Datacom and Xero remain
+promising protected NZ candidates. No completed source investigation was repeated.
 Public job feeds/searches were queried through ordinary HTTP; no browser session,
 candidate configuration, account, CAPTCHA bypass or candidate-submission API was
 used. One public Xero Apply link was resolved with a read-only GET to verify its
@@ -55,7 +60,7 @@ three IDs are absent from that old export and two older IDs have changed text;
 five are therefore new/changed **relative to that export**, not proven unseen
 by the user. Normal hash-aware cache behavior, not a reset/replay, is appropriate.
 
-## Ranked expansions
+## Earlier ranked expansions — historical comparison, superseded
 
 Ranking balances relevant employment opportunities, NZ priority, existing
 interfaces and observed implementation risks. Effort is an estimate for a
@@ -170,7 +175,7 @@ trusted source/URL and callback mapping plus provider funnel counters; it does
   with the authenticated recruiter/candidate APIs. Preserve shortcode identity,
   multiple locations, publication state and trusted public job URLs.
 
-## Roadmap recommendation and evidence retention
+## Earlier roadmap recommendation and evidence retention
 
 First address the confirmed, small explicit-Senior classification issue from
 the [scoring audit](vacancy-scoring-audit-2026-11-26.md), without a global scoring
@@ -191,3 +196,23 @@ under ignored `data/discovery-research-20261126/`. Full job descriptions and
 raw historical exports are not added to Git. This report does not claim
 legal eligibility, fresh production yield, universal source availability or
 that source expansion recommendations have been implemented.
+
+## Revised discovery direction
+
+The new strategy prioritizes viable cross-border Russian-speaking/CIS employment
+over raw international stock. Habr's advertised RSS is the fastest newly verified
+supported discovery input: HTTP 200, 50 items, 12 development-title candidates before
+qualification/geography/domain checks. HH exists but is CLI-only and its current
+unauthenticated API probe returned 403; regular integration requires supported
+registered access, better query scopes/metadata and shared delivery semantics.
+Public indexed Kazakhstan/Uzbekistan search counts are not API or eligible-volume
+evidence. getmatch/Geekjob/manual Telegram and employer pages are reviewed in the
+new report with access, salary, dedup and maintenance limits. No private API,
+Telegram userbot or LinkedIn scraper is proposed.
+
+Uzum supplies a concrete current Java/global-remote lead; other company lists
+need team/contract/country verification. Existing-source eligibility contradictions
+and Senior/Engineer I classification stay ahead of a large collector expansion.
+Datacom/Xero remain in a protected NZ lane; Endava/Workday and broader global
+fintech coverage move below the new measured employment priorities. No collector,
+production source configuration or eligibility policy was changed by this update.

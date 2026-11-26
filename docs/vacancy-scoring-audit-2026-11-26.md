@@ -1,6 +1,10 @@
 # TASK-093 — Provisional vacancy scoring quality audit
 
 Date: 2026-11-26. **Research only; no scoring/filter/policy changes.**
+The later [employment strategy](employment-discovery-strategy-2026-11-26.md)
+supersedes the international-first roadmap. The historical 20-case findings and
+their limits below remain unchanged; the addendum extends TASK-093 for the new
+Russian-speaking/CIS-first objective without pretending to add production scores.
 Task A's independent lifecycle-fixture repair is `f4a17af93e280803adf4c7452a1c0eb87c9239f3`
 (76 focused regressions passed). No Claude, LLM reanalysis, production DB/cache
 access, candidate-profile access, application preparation or submission was used
@@ -162,3 +166,56 @@ evidence for texts that changed or disappeared.
 half an engineering day including focused tests and review. It is smaller and
 better evidenced than a score/model rewrite. F2 and F3/F4 are separate proposed
 follow-ups. None is implemented or authorized by this research report.
+
+## TASK-093 extension — revised employment priorities
+
+The user now prioritizes Senior/Middle+ JVM backend (approximately 7+ years),
+substantive AI-backend integration, Russian/English teams, legitimate abroad
+remote work and CIS employers, with NZ visa-supported employment protected.
+The earlier cohort is not a representative sample of this newly emphasized
+market. Preserve its labels; do not reinterpret every unknown visa as rejection.
+
+New public Habr RSS sampling returned 50 distinct records, 12 plausible JVM
+development titles before scope/eligibility checks. These are fresh source
+controls, **not historically scored cases or twelve accepted matches**. Uzum's
+current Russian Java ad offers worldwide remote; current SENSE Java wording
+combines remote/company-level abroad claims with a Russian employment contract.
+Archived getmatch examples show outside-RF permission/requirements, timezone
+limits and a resident-status condition. They must not be promoted as active
+vacancies. Exact source links and access limits are in the employment strategy.
+
+**F5 — shared eligibility conflicts reproduced with synthetic inputs.**
+Using existing `assess_application_feasibility` and `recommend_application`,
+synthetic Senior Java/STRONG inputs demonstrate:
+
+- Generic work-from-anywhere text overrides extracted country_limited plus
+  US-only restriction, yielding worldwide/LIKELY/APPLY_NOW.
+- Relocation assistance plus explicit refusal of sponsorship and required UK
+  work rights yields UNLIKELY feasibility but APPLY_NOW recommendation.
+
+This is evidence of unsafe signal precedence, not measured production
+false-positive incidence. Recommend scoped conflict regressions/correction,
+retaining Wise-specific safeguards; country-specific candidate facts remain
+unknown unless explicitly configured. Existing local-authorization SKIP logic
+also cannot express those facts; no claim is made that an actual candidate is
+authorized or that a particular historic SKIP was wrong.
+
+Future approved evaluation should retain F1–F4 controls and add Russian/English
+equivalents: remote within RF only; abroad allowed/required; contractual country
+whitelist; existing local rights versus new sponsorship versus visa transfer;
+relocation money without immigration support; foreign entity with unknown hiring
+country; timezone overlap; resident-status wording; employee versus contractor
+route; image-only/missing descriptions; undisclosed entertainment client; actual
+AI integration versus coding tools; mixed Senior/Staff versus IC duties.
+
+Evaluate technical fit, domain preference, employer-side employment route,
+candidate compatibility and delivery priority separately. “Explicitly eligible,”
+“potentially eligible/manual” and “explicitly ineligible” require sourced facts;
+unknown candidate status cannot become a legal conclusion. Russian-speaking
+company metadata and employer prestige are not eligibility evidence. The four
+resume families/rules and candidate factual safety remain unchanged. No cache
+reset, profile modification, production filter change or new LLM scoring was run.
+
+F1 remains the smallest independent high-priority implementation. F5 now has
+greater immediate delivery-quality value; the revised roadmap ranks its bounded
+correction first and Habr RSS before broad new international ATS coverage.
