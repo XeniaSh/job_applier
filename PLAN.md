@@ -69,6 +69,10 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 - Bounded Telegram notification retry and deterministic failed-handoff cleanup
   are implemented. Ordinary Done reviewing was user-verified; failure-path and
   duplicate/stale-callback live acceptance remain distinct pending checks.
+- Lifecycle test fixtures are now self-contained (`f4a17af`, 2026-11-26): the
+  five known failures are repaired with a synthetic local overlay in a temporary
+  working directory, retaining the real profile loader and original assertions.
+  Production behavior is unchanged; 76 focused regressions pass.
 - Discovery diagnosis and provider counters are implemented. The 2026-10-26 NZ
   audit joined public feeds to a user-run sanitized export: all nine baseline NZ
   title passes have analysis; no starvation established for those identities.
@@ -1788,8 +1792,9 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   outcomes are explicit and Submit is always blocked for SmartRecruiters.
   58 new checks, 107 existing browser checks and focused provider/salary/phone/
   Telegram/discovery/IMAP regressions pass; Ruff/diff checks pass. Five older
-  review-lifecycle fixtures lack a candidate overlay and reproduce failure with
-  the pre-change service; they are not weakened. Current-main plus approved
+  review-lifecycle fixtures previously lacked a candidate overlay; Task A
+  (`f4a17af`) now supplies synthetic inputs without weakening assertions or
+  changing production behavior. Current-main plus approved
   Stage 1/2 compatibility is checked separately without launcher changes.
   Offline implementation is complete. Live acceptance and further feature work
   are now PAUSED by the user: ordinary Chrome works after manual CAPTCHA, but
@@ -1873,7 +1878,9 @@ manual Submit, existing caches and the drained-backlog behavior intact.
 
 ### TASK-093 — Isolated evaluation of historical scoring/filter decisions
 
-- **Status:** approved, not started
+- **Status:** provisional 20-case research audit complete (2026-11-26), with
+  explicit user approval of the available-data limits. No recommendations
+  implemented; numeric score calibration remains unsupported by the export.
 - **Depends on:** TASK-092 pilot checkpoint, per the user's approved order.
 - **Goal:** Validate 15–20 representative historical vacancies against reviewed
   relevance/eligibility labels, keeping evidence separate from production state.
@@ -1888,6 +1895,15 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   any accepted correction; bounded model use only if necessary and documented.
 - **Acceptance checkpoint:** Human-reviewed labels and model uncertainty must be
   explicit; the evaluation is not proof of visa eligibility or ATS success.
+- **Results:** [Scoring audit](docs/vacancy-scoring-audit-2026-11-26.md): ten
+  persisted NZ decisions plus ten prior manually reviewed Wise pilot cases;
+  separate fresh remote controls are not called historical scores. Only four
+  old NZ description hashes match today's sampled text. Confirmed issues:
+  explicit Senior titles overridden by generic Engineer I (12/49 pilot titles),
+  ordinary architecture triggering misleading lead diagnostics, and two
+  raw-text AI-resume evidence/scope edge cases. Actual numeric scores,
+  historical resume choices and broad false-positive/negative rates remain
+  unknown. No threshold/filter changes, LLM calls or cache replay.
 
 ## Deferred and historical tasks
 
@@ -1900,18 +1916,44 @@ General architecture changes are not approved.
 Historical task acceptance describes its original milestone;
 later corrections and current supervised acceptance notes take precedence.
 
-## Recommended next three tasks — review only, not started
+## Maintenance and research checkpoint — 2026-11-26
 
-These recommendations prioritize current-flow reliability and vacancy yield;
-effort ranges are engineering estimates, not measured usage. They are not an
-instruction to start work during this maintenance request.
+- **Task A done:** standalone fixture-only commit `f4a17af93e280803adf4c7452a1c0eb87c9239f3`;
+  76 tests pass. Its patch also applies independently to current main
+  `715279fe9cba35597eef21b3bfb98fdab111f9c3`; application code matches the tested
+  branch, and the fixture is the only difference in the focused test files.
+- **Task B research done with limits:** the provisional audit above is complete;
+  it is not a 20-record production-score accuracy estimate. Recommendations
+  require separate approval before code, scoring or filter changes.
+- **Task C research done:** [Discovery expansion analysis](docs/discovery-expansion-analysis-2026-11-26.md).
+  Effective coverage is 67 runtime sources after catalog merging. Refreshed
+  six-board NZ sample: 142 location-metadata matches, nine title passes, not
+  142 backend opportunities. Datacom's documented public Workable feed has 77
+  unique jobs/34 NZ identities and two reviewed Java contracts; Xero now has an
+  Ashby feed, with conditional NZ remote/AI roles. Endava has a small reviewed
+  international JVM subset. EROAD/Westpac Workday public search/detail is
+  technically feasible, but few reviewed JVM IC opportunities and one separate
+  tenant's 429 limit immediate scope. Discovery does not require Prepare.
+- No production source activation, scoring/filter modification, cache reset,
+  new application/browser session, candidate/private configuration access or
+  bulk LLM reanalysis occurred in this phase. SmartRecruiters Prepare remains
+  paused and default-off. Do not start another implementation from this report.
+
+## Recommended next implementation priorities — approval required
+
+These recommendations prioritize employment yield and evidence-backed fixes.
+Effort ranges are estimates. None of the following is implemented by Tasks B/C.
 
 | Priority | Bounded task | Practical value / gap | Estimated effort |
 | --- | --- | --- | --- |
-| 1 | Make the five existing real-review lifecycle fixtures self-contained | Use synthetic candidate overlays/resumes so browser cleanup and failed-notification regressions run in a private-data-free checkout; preserve all assertions | 0.5 day |
-| 2 | TASK-093: evaluate 15–20 sanitized historical relevance/eligibility decisions | Measure false negatives and misleading seniority/eligibility explanations before proposing any filter/scoring change; requires reviewed labels and sanitized input | 1–2 days |
-| 3 | Bounded read-only health summary from existing TASK-089/099 counters | Current per-cycle logs do not provide retained historical health counts; summarize collection failures, IMAP timeouts and analyzed/delivered counts without vacancy/candidate content or unsolicited messages | 1–2 days |
+| 1 | Correct explicit-Senior versus generic Engineer I precedence | Reproducible misclassification can gate relevant roles across existing sources; preserve junior/manager/staff rules, no broad threshold change or replay | 0.5 day |
+| 2 | Datacom standalone read-only Workable discovery pilot | Concrete NZ Java/API integration contracts; validate unique shortcode/multiple-location handling and relevance before runtime integration | 1–2 days |
+| 3 | Xero company-scoped Ashby discovery pilot | Existing adapter reuse and missing NZ remote/AI builder roles; review C#/.NET/Python scope and geography instead of admitting every Engineer title | 0.5–1 day |
 
-The third item is a proposed follow-up, not an approved implementation task;
-storage/retention scope must be agreed before adding persistence. No provider
-expansion, SmartRecruiters browser work or automatic filter loosening is proposed.
+Separate smaller follow-ups: fix misleading lead-warning evidence/source
+classification, and capture mandatory-vs-optional AI-resume regression fixtures
+before any bounded policy correction. Endava discovery reuses an existing family;
+EROAD-first Workday comes after the cheaper measured opportunities. Retained
+health summaries remain a lower-priority proposal requiring storage/retention
+scope approval. No SmartRecruiters Prepare browser work, automated submissions
+or automatic filter loosening is proposed.
