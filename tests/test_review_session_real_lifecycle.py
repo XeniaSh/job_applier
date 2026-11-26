@@ -17,7 +17,9 @@ real chain instead:
 
 Only the leaves that would otherwise need a live browser, network, or LLM
 call are replaced: `DefaultVacancyResolver`, `GreenhouseAdapter`,
-`BrowserSession`, the configured resume profiles, and the LLM client.
+`BrowserSession`, runtime document/submission settings, the configured resume
+profiles, and the LLM client. The real candidate loader reads a synthetic local
+overlay in a temporary working directory, never private candidate configuration.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 
 import app.cli as cli_module
 from app.application.autofill.fields import DiscoveredField
@@ -53,6 +56,19 @@ from tests.pdf_fixtures import write_minimal_valid_pdf
 SOURCE = "target_company:greenhouse:adyen"
 EXTERNAL_ID = "7938074"
 URL = "https://job-boards.greenhouse.io/adyen/jobs/7938074"
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_candidate_runtime(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "candidate_profile.local.yaml").write_text(yaml.safe_dump({
+        "identity": {"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.invalid",
+                     "phone": "+15555550100"},
+        "application_files": {"default_resume": str(tmp_path / "resume.pdf")},
+    }))
+    monkeypatch.setattr("app.application.explicit_prepare_runtime._cover_letter_document_settings",
+                        lambda: ("", "en", None))
+    monkeypatch.setattr("app.application.explicit_prepare_runtime._auto_submit_enabled", lambda: False)
 
 
 @pytest.fixture(autouse=True)
