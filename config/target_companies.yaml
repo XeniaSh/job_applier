@@ -1,7 +1,10 @@
 # JobApplier target companies: Tier A starter list
 # Generated: 2026-09-05
-# Purpose: monitor companies that are more likely than random LinkedIn jobs to hire internationally
-# and work in English or English/Russian environments.
+# Purpose: prioritize viable Russian-speaking/CIS cross-border employment,
+# supported NZ hiring and explicit relocation, not international vacancy volume.
+# priority A/B/C is a secondary ordering hint after vacancy-side hiring evidence.
+# russian_speaking_signal/cis_employer never establish geographic eligibility.
+# cis_employer is optional (default false); set only from reviewed employer facts.
 #
 # relocation_status values:
 #   confirmed_role_based: company/job posts explicitly mention relocation/visa support for some roles

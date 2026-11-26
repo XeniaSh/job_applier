@@ -110,6 +110,7 @@ class TargetCompanyAnalysisCache:
             "language_requirements": list(feasibility.language_requirements),
             "location_restrictions": list(feasibility.location_restrictions),
             "feasibility_warnings": list(feasibility.warnings),
+            "alternative_remote_route": feasibility.alternative_remote_route,
             "application_recommendation": recommendation.label,
             "recommendation_reasons": list(recommendation.reasons),
             "seniority": seniority.label,
@@ -216,6 +217,7 @@ def _record_from_entry(entry: dict[str, object]) -> CachedTargetCompanyAnalysis 
             language_requirements=_string_list(entry.get("language_requirements")),
             location_restrictions=_string_list(entry.get("location_restrictions")),
             warnings=_string_list(entry.get("feasibility_warnings")),
+            alternative_remote_route=entry.get("alternative_remote_route") is True,
         )
         recommendation = ApplicationRecommendation(
             label=str(entry.get("application_recommendation") or "CHECK_MANUALLY"),

@@ -83,6 +83,16 @@ def test_moving_money_does_not_supply_required_visa():
     assert result.reasons == ["required visa sponsorship is explicitly not offered"]
 
 
+@pytest.mark.parametrize("denial", [
+    "Visa sponsorship is not available.", "Visa sponsorship is not provided.",
+    "We cannot offer visa sponsorship.", "Визовая поддержка не предоставляется.",
+])
+def test_explicit_denial_word_order_cannot_turn_into_positive_marketing(denial):
+    assessment, result = recommend("Relocation support. " + denial)
+    assert assessment.visa_sponsorship == "no"
+    assert result.label == "SKIP"
+
+
 def test_visa_unknown_is_not_an_explicit_denial():
     assessment, result = recommend("Candidates must have the right to work in Kazakhstan.")
     assert assessment.visa_sponsorship == "unknown"
@@ -110,6 +120,21 @@ def test_multi_route_rights_question_is_retained_for_manual_review():
         "No visa sponsorship.",
     )
     assert result.label == "CHECK_MANUALLY"  # no rejection of the alternative route
+
+
+def test_geographically_limited_remote_route_is_retained_without_invented_country_rights():
+    assessment, result = recommend("Remote worldwide except Russia. No visa sponsorship.")
+    assert assessment.remote_type == "country_limited"
+    assert assessment.alternative_remote_route is True
+    assert assessment.label == "UNCLEAR"
+    assert result.label == "CHECK_MANUALLY"
+
+
+def test_remote_mention_without_worldwide_scope_cannot_rescue_no_sponsorship_to_apply_now():
+    assessment, result = recommend("Remote role. Relocation package. No visa sponsorship.")
+    assert assessment.alternative_remote_route is True
+    assert assessment.label == "UNCLEAR"
+    assert result.label == "CHECK_MANUALLY"
 
 
 def test_explicit_sponsored_relocation_remains_available():

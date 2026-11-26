@@ -38,6 +38,16 @@ _VISA_NO_MARKERS = (
     "without visa sponsorship",
     "without the need for visa sponsorship",
     "without the need for sponsorship",
+    "visa sponsorship is not available",
+    "visa sponsorship is not provided",
+    "visa sponsorship is not offered",
+    "sponsorship not available",
+    "do not provide visa sponsorship",
+    "cannot offer visa sponsorship",
+    "do not offer relocation support or visa sponsorship",
+    "unable to support relocation or visa sponsorship",
+    "визовая поддержка не предоставляется",
+    "не предоставляем визовую поддержку",
 )
 _RELOCATION_YES_MARKERS = (
     "relocation support",
@@ -105,6 +115,7 @@ class ApplicationFeasibility:
     language_requirements: list[str]
     location_restrictions: list[str]
     warnings: list[str]
+    alternative_remote_route: bool = False
 
 
 def assess_application_feasibility(
@@ -117,6 +128,7 @@ def assess_application_feasibility(
     work_authorization_requirement: str = "unknown",
     language_requirements: list[str] | None = None,
     location_restrictions: list[str] | None = None,
+    alternative_remote_route: bool | None = None,
 ) -> ApplicationFeasibility:
     combined = " ".join(
         part
@@ -137,6 +149,12 @@ def assess_application_feasibility(
     work_auth = _merge_work_auth(work_authorization_requirement, combined)
     languages = [item for item in (language_requirements or []) if item.strip()]
     restrictions = [item for item in (location_restrictions or []) if item.strip()]
+    if alternative_remote_route is None:
+        alternative_remote_route = (
+            _normalize_remote(remote_type) in {"worldwide", "country_limited"}
+            or bool(re.search(r"\bremote (?:worldwide|contractors?|work|role|within|only|from)\b|"
+                              r"\bwork (?:remotely|from anywhere)\b|удал[её]н\w* работ", combined))
+        )
 
     label, warnings = _classify(
         visa=visa,
@@ -146,6 +164,7 @@ def assess_application_feasibility(
         languages=languages,
         location=location,
         location_limited=has_location_limits(restrictions),
+        alternative_remote_route=alternative_remote_route,
     )
     return ApplicationFeasibility(
         label=label,
@@ -156,6 +175,7 @@ def assess_application_feasibility(
         language_requirements=languages,
         location_restrictions=restrictions,
         warnings=warnings,
+        alternative_remote_route=alternative_remote_route,
     )
 
 
@@ -168,9 +188,10 @@ def _classify(
     languages: list[str],
     location: str | None,
     location_limited: bool = False,
+    alternative_remote_route: bool = False,
 ) -> tuple[str, list[str]]:
     warnings: list[str] = []
-    explicit_local_block = visa == "no" and remote != "worldwide"
+    explicit_local_block = visa == "no" and remote != "worldwide" and not alternative_remote_route
 
     if explicit_local_block:
         if work_auth == "required":
@@ -181,11 +202,12 @@ def _classify(
             warnings.append(f"check eligibility for {location.strip()}")
         return FEASIBILITY_UNLIKELY, warnings
 
-    if work_auth == "required" or remote == "country_limited" or location_limited:
+    if (work_auth == "required" or remote == "country_limited" or location_limited
+            or (visa == "no" and alternative_remote_route and remote != "worldwide")):
         # No country-specific candidate facts are available in this layer.
         # Even positive marketing/sponsorship cannot settle a conflicting limit.
         warnings.append(
-            "visa/relocation not mentioned; check manually" if visa == "unknown"
+            "visa/relocation not mentioned; check manually" if visa == "unknown" and relocation == "unknown"
             else "country/work-authorization compatibility requires confirmation"
         )
         if remote == "country_limited":

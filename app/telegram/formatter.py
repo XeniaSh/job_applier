@@ -42,6 +42,8 @@ def format_telegram_card_html(card: TelegramVacancyCard) -> str:
         lines.append(_escape(card.company))
     if card.location:
         lines.append(_escape(card.location))
+    if card.employment_route:
+        lines.append("Employment route: " + _escape(card.employment_route))
 
     why = _clean_limited([card.decision_reason or ""], limit=1)
     if why:

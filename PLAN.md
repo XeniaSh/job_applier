@@ -1990,6 +1990,16 @@ behavior; malformed policy fails visibly. Ordinary fintech is retained. Domain,
 runtime and pipeline regressions pass; deterministic cache-derived policy refresh
 and minimal ordering are next. No collector or production activation occurs.
 
+Minimal ordering and cache-policy refresh are now implemented locally. Supported
+Russian/CIS worldwide remote and NZ visa opportunities precede other supported
+remote/relocation routes, then unclear international roles; A/B/C metadata is a
+secondary tie-breaker. No new quotas/queue or unknown-as-rejection policy. Cards
+show manual confirmation versus vacancy-side support. Target cached scores/CVs
+are reused while current derived policy is recomputed in memory before SKIP
+pruning and delivery, with zero LLM calls or cache-file writes on hits. Normal
+discovery only: no history replay/resends. Remaining steps are final regression,
+main compatibility verification and the Habr RSS proposal (not implementation).
+
 The proposals below are the strategy baseline; the approved subset above now
 takes precedence. Larger schema/queue work still requires separate approval.
 

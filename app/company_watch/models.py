@@ -34,6 +34,7 @@ class TargetCompany(BaseModel):
     watcher_type: str
     category: str | None = None
     russian_speaking_signal: bool | None = None
+    cis_employer: bool = False
     hiring_modes: list[str] = Field(default_factory=list)
     known_hiring_locations: list[str] = Field(default_factory=list)
     remote: str | None = None

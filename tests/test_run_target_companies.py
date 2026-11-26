@@ -388,6 +388,53 @@ def test_domain_policy_blocks_cached_positive_and_project_before_analysis(monkey
     assert b"denied" in before
 
 
+def test_supported_route_wins_selection_across_providers_without_new_quota(monkeypatch, tmp_path):
+    supported = _vacancy(company="JetBrains", board="jetbrains", external_id="supported",
+                         description="Remote worldwide.")
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch, tmp_path,
+        vacancies=[_vacancy(external_id="unknown"), supported],
+        ashby_vacancies=[_ashby_vacancy(external_id="unknown-ashby")], include_ashby_company=True,
+        analyze_limit=1,
+    )
+    assert result.selected == result.sent == 1
+    assert telegram.cards[0].external_id == "supported"
+    assert len(analyzer.calls) == 1
+
+
+def test_cached_policy_is_refreshed_without_llm_or_disk_reset(monkeypatch, tmp_path):
+    geo = _vacancy(external_id="geo", description="Work from anywhere. Must be based in the US.")
+    senior = _vacancy(external_id="senior-i", title="Senior Software Engineer I")
+    junior = _vacancy(external_id="junior-i", title="Software Engineer I")
+    cache = TargetCompanyAnalysisCache(tmp_path / "analysis_cache.json")
+    evaluation = _evaluation(Decision.STRONG_MATCH)
+    for v, label in [(geo, "APPLY_NOW"), (senior, "SKIP"), (junior, "SKIP")]:
+        cache.put(v, evaluation=evaluation, feasibility=_feasibility(),
+                  recommendation=ApplicationRecommendation(label=label, reasons=["previous policy"]),
+                  seniority=SeniorityClassification(label="JUNIOR", reasons=["old Engineer I rule"]))
+    cache.save()
+    before = cache.path.read_bytes()
+    result, analyzer, telegram, _ = _run_cycle(monkeypatch, tmp_path, vacancies=[geo, senior, junior])
+    assert result.dropped_cached_skip == 1
+    assert result.cache_hits == 2
+    assert result.cache_misses == 0
+    assert analyzer.calls == []
+    assert {card.external_id for card in telegram.cards} == {"geo", "senior-i"}
+    assert all(card.employment_route == "Manual confirmation required" for card in telegram.cards)
+    assert all(card.match_percentage == evaluation.match_percentage for card in telegram.cards)
+    assert cache.path.read_bytes() == before
+
+
+def test_priority_happens_before_existing_per_company_cap():
+    from app.company_watch.delivery_priority import employment_priority
+    unknown = _vacancy(external_id="unknown")
+    supported = _vacancy(external_id="supported", description="Remote worldwide.")
+    selected = cli_module._select_target_company_analysis_vacancies(
+        [unknown, supported], analyze_limit=1, analyze_limit_per_company=1, priority_key=employment_priority,
+    )
+    assert selected == [supported]
+
+
 class _FakeTelegram:
     def __init__(self, chat_id: str = "222", *, fail: bool = False) -> None:
         self.chat_id = chat_id

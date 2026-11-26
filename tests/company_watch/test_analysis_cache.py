@@ -25,6 +25,27 @@ def test_analysis_cache_module_is_importable() -> None:
     assert analysis_cache.TargetCompanyAnalysisCache is TargetCompanyAnalysisCache
 
 
+def test_optional_remote_alternative_survives_cache_and_legacy_records(tmp_path):
+    from dataclasses import replace
+    import json
+
+    cache = TargetCompanyAnalysisCache(tmp_path / "cache.json")
+    cache.put(_vacancy(), evaluation=_evaluation(),
+              feasibility=replace(_feasibility(), alternative_remote_route=True),
+              recommendation=ApplicationRecommendation(label="CHECK_MANUALLY", reasons=["route unclear"]),
+              seniority=SeniorityClassification(label="SENIOR", reasons=[]))
+    cache.save()
+    loaded = TargetCompanyAnalysisCache(cache.path)
+    loaded.load()
+    assert loaded.get(_vacancy()).feasibility.alternative_remote_route is True
+    old = json.loads(cache.path.read_text())
+    old["entries"][0].pop("alternative_remote_route")
+    cache.path.write_text(json.dumps(old))
+    loaded.load()
+    assert loaded.get(_vacancy()).feasibility.alternative_remote_route is False
+    assert loaded.get(_vacancy()).recommendation.label == "CHECK_MANUALLY"
+
+
 def _vacancy(
     *,
     title: str = "Java Backend Engineer",

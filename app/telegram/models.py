@@ -27,6 +27,7 @@ class TelegramVacancyCard:
     recommended_resume: str = "java"
     content_completeness: str = "PARTIAL"
     decision_reason: str | None = None
+    employment_route: str | None = None
 
 
 @dataclass(frozen=True)

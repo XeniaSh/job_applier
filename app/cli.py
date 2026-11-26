@@ -55,6 +55,7 @@ from app.company_watch.feasibility import (
 )
 from app.company_watch.models import TargetCompany
 from app.company_watch.domain_policy import DomainPolicy, excluded_domain_reason, load_domain_policy
+from app.company_watch.delivery_priority import employment_priority
 from app.company_watch.preanalysis_ranking import rank_title_for_analysis
 from app.company_watch.seniority import (
     SENIORITY_LABELS,
@@ -1176,13 +1177,9 @@ def _analyze_target_company_vacancy(
     if read_cache and analysis_cache is not None:
         cached = analysis_cache.get(vacancy)
         if cached is not None:
-            return _TargetCompanyAnalysisItem(
-                vacancy=vacancy,
-                evaluation=cached.evaluation,
-                feasibility=cached.feasibility,
-                recommendation=cached.recommendation,
-                seniority=cached.seniority,
-                from_cache=True,
+            return _current_target_company_policy(
+                vacancy, evaluation=cached.evaluation, constraints=constraints,
+                companies_by_name=companies_by_name, from_cache=True,
             )
 
     try:
@@ -1194,6 +1191,22 @@ def _analyze_target_company_vacancy(
         logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
         return _TargetCompanyAnalysisItem(vacancy=vacancy, evaluation=None, error=str(exc))
 
+    item = _current_target_company_policy(
+        vacancy, evaluation=evaluation, constraints=constraints, companies_by_name=companies_by_name,
+    )
+    if write_cache and analysis_cache is not None:
+        analysis_cache.put(vacancy, evaluation=evaluation, feasibility=item.feasibility,
+                           recommendation=item.recommendation, seniority=item.seniority)
+        analysis_cache.save()
+    return item
+
+
+def _current_target_company_policy(
+    vacancy: NormalizedVacancy, *, evaluation: VacancyEvaluation,
+    constraints: CandidateConstraints, companies_by_name: dict[str, TargetCompany],
+    from_cache: bool = False,
+) -> _TargetCompanyAnalysisItem:
+    """Refresh derived policy in memory; preserve cached technical scores/CVs."""
     assessment = assess_application_feasibility(
         vacancy_text=vacancy.to_analysis_text(),
         location=vacancy.location,
@@ -1220,6 +1233,7 @@ def _analyze_target_company_vacancy(
                 remote_type=assessment.remote_type,
                 work_authorization_requirement=assessment.work_authorization_requirement,
                 language_requirements=assessment.language_requirements,
+                alternative_remote_route=assessment.alternative_remote_route,
             )
             assessment = dataclass_replace(corrected, location_restrictions=assessment.location_restrictions)
     target_company = companies_by_name.get((vacancy.company or "").casefold())
@@ -1233,12 +1247,10 @@ def _analyze_target_company_vacancy(
         seniority=seniority_result,
     )
     if wise_correction is not None and recommendation_result.label != RECOMMENDATION_SKIP:
-        if wise_correction.category == CORRECTION_EXPLICIT_REFUSAL and constraints.requires_visa_sponsorship:
-            # The shared hard-blocker only fires on work_authorization_requirement
-            # == "required" (an LLM-extracted field we must not fabricate). This
-            # is a separate, truthful ground for SKIP: the posting itself
-            # explicitly refuses visa sponsorship and the candidate's own
-            # constraints require sponsorship. Existing SKIPs are never replaced.
+        if (wise_correction.category == CORRECTION_EXPLICIT_REFUSAL and constraints.requires_visa_sponsorship
+                and not assessment.alternative_remote_route):
+            # Keep the Wise-specific qualified-refusal guard as well as the
+            # shared policy. Never turn visa transfer into general sponsorship.
             recommendation_result = ApplicationRecommendation(
                 label=RECOMMENDATION_SKIP,
                 reasons=["Wise posting explicitly states visa sponsorship is not offered"],
@@ -1255,21 +1267,13 @@ def _analyze_target_company_vacancy(
                 label=RECOMMENDATION_CHECK_MANUALLY,
                 reasons=["Wise posting is local-candidates/visa-transfer-only; check eligibility manually"],
             )
-    if write_cache and analysis_cache is not None:
-        analysis_cache.put(
-            vacancy,
-            evaluation=evaluation,
-            feasibility=assessment,
-            recommendation=recommendation_result,
-            seniority=seniority_result,
-        )
-        analysis_cache.save()
     return _TargetCompanyAnalysisItem(
         vacancy=vacancy,
         evaluation=evaluation,
         feasibility=assessment,
         recommendation=recommendation_result,
         seniority=seniority_result,
+        from_cache=from_cache,
     )
 
 
@@ -1308,13 +1312,17 @@ def _analyze_target_company_vacancies(
 def _is_unchanged_cached_skip(
     vacancy: NormalizedVacancy,
     analysis_cache: TargetCompanyAnalysisCache | None,
+    *, constraints: CandidateConstraints, companies_by_name: dict[str, TargetCompany],
 ) -> bool:
     if analysis_cache is None:
         return False
     cached = analysis_cache.get(vacancy)
     if cached is None:
         return False
-    return cached.recommendation.label == RECOMMENDATION_SKIP
+    current = _current_target_company_policy(
+        vacancy, evaluation=cached.evaluation, constraints=constraints, companies_by_name=companies_by_name,
+    )
+    return current.recommendation.label == RECOMMENDATION_SKIP
 
 
 def _has_unchanged_cached_analysis(
@@ -1769,7 +1777,8 @@ def _run_target_companies_cycle(
         ):
             dropped_delivered += 1
             continue
-        if _is_unchanged_cached_skip(vacancy, analysis_cache):
+        if _is_unchanged_cached_skip(vacancy, analysis_cache, constraints=constraints,
+                                   companies_by_name=companies_by_name):
             dropped_cached_skip += 1
             continue
         if _has_unconfirmed_application_form(vacancy):
@@ -1783,6 +1792,18 @@ def _run_target_companies_cycle(
         None,
         per_company_limit=analyze_limit_per_company is not None,
     )
+    def current_priority(vacancy: NormalizedVacancy) -> tuple[int, int]:
+        cached = analysis_cache.get(vacancy)
+        assessment = None
+        if cached is not None:
+            assessment = _current_target_company_policy(
+                vacancy, evaluation=cached.evaluation, constraints=constraints,
+                companies_by_name=companies_by_name,
+            ).feasibility
+        return employment_priority(
+            vacancy, company=companies_by_name.get((vacancy.company or "").casefold()), feasibility=assessment,
+        )
+
     to_analyze = _select_target_company_analysis_vacancies(
         candidates,
         analyze_limit=analyze_limit,
@@ -1790,6 +1811,7 @@ def _run_target_companies_cycle(
         selection_order=selection_order,
         deprioritize=lambda vacancy: _has_unchanged_cached_analysis(vacancy, analysis_cache),
         prefer_freshness=True,
+        priority_key=current_priority,
     )
     for vacancy in to_analyze:
         provider_funnels[_target_company_form_provider(vacancy.source)].selected += 1
@@ -1808,7 +1830,9 @@ def _run_target_companies_cycle(
 
     sent = 0
     send_errors = 0
-    for item in analyzed_items:
+    for item in sorted(analyzed_items, key=lambda item: employment_priority(
+        item.vacancy, company=companies_by_name.get((item.vacancy.company or "").casefold()), feasibility=item.feasibility,
+    )):
         if not _should_send_target_company_item(item):
             continue
         if _deliver_target_company_item(
@@ -1958,6 +1982,9 @@ def _deliver_target_company_item(
         warnings=warnings,
         info_items=info_items,
         recommended_resume=evaluation.recommended_resume.value,
+        employment_route=("Manual confirmation required" if item.recommendation is None
+                          or item.recommendation.label == RECOMMENDATION_CHECK_MANUALLY
+                          else "Support stated in posting; verify personal eligibility"),
         content_completeness=vacancy.content_completeness or "FULL",
         decision_reason=evaluation.decision_reason,
     )
@@ -2243,6 +2270,7 @@ def _select_target_company_analysis_vacancies(
     selection_order: str = "source",
     deprioritize: Callable[[NormalizedVacancy], bool] | None = None,
     prefer_freshness: bool = False,
+    priority_key: Callable[[NormalizedVacancy], tuple[int, int]] | None = None,
 ) -> list[NormalizedVacancy]:
     """Pick vacancies to analyze under the global and per-company caps.
 
@@ -2267,11 +2295,12 @@ def _select_target_company_analysis_vacancies(
     providers without any fixed per-provider quota.
     """
     if analyze_limit_per_company is None:
-        if deprioritize is None:
+        if deprioritize is None and priority_key is None:
             return list(vacancies)[:analyze_limit]
         ranked = sorted(
             enumerate(vacancies),
-            key=lambda pair: (bool(deprioritize(pair[1])), pair[0]),
+            key=lambda pair: (priority_key(pair[1]) if priority_key else (0, 0),
+                              bool(deprioritize(pair[1])) if deprioritize else False, pair[0]),
         )
         return [vacancy for _, vacancy in ranked][:analyze_limit]
     grouped_by_provider: dict[str, dict[str, list[tuple[int, NormalizedVacancy]]]] = {}
@@ -2288,6 +2317,7 @@ def _select_target_company_analysis_vacancies(
                 ranked = sorted(
                     items,
                     key=lambda pair: (
+                        priority_key(pair[1]) if priority_key else (0, 0),
                         bool(deprioritize(pair[1])) if deprioritize else False,
                         -rank_title_for_analysis(pair[1].title).score,
                         _target_company_vacancy_freshness_rank(pair[1]) if prefer_freshness else 0,
@@ -2298,6 +2328,7 @@ def _select_target_company_analysis_vacancies(
                 ranked = sorted(
                     items,
                     key=lambda pair: (
+                        priority_key(pair[1]) if priority_key else (0, 0),
                         bool(deprioritize(pair[1])) if deprioritize else False,
                         pair[0],
                     ),
@@ -2306,6 +2337,8 @@ def _select_target_company_analysis_vacancies(
         provider_queues.append(_round_robin_interleave(ranked_by_company))
 
     selected = _round_robin_interleave(provider_queues)
+    if priority_key is not None:
+        selected.sort(key=priority_key)  # stable: retains provider fairness within a priority tier
     return selected[:analyze_limit]
 
 
@@ -3692,6 +3725,7 @@ def _analyze_pipeline_items(
     domain_policy: DomainPolicy | None = None,
 ) -> None:
     policy = domain_policy if domain_policy is not None else load_domain_policy()
+    companies = _priority_companies()
     for item in pipeline.items:
         if item.vacancy is None or item.duplicate:
             continue
@@ -3740,6 +3774,7 @@ def _analyze_pipeline_items(
         item.preanalysis_outcome = "new"
 
     analyzable: list[PipelineItem] = [item for item in pipeline.items if item.preanalysis_outcome == "new"]
+    analyzable.sort(key=lambda item: _pipeline_employment_priority(item, companies))
     for item in analyzable[:limit]:
         item.considered = True
         vacancy = item.vacancy
@@ -3770,6 +3805,28 @@ def _analyze_pipeline_items(
         )
 
 
+def _priority_companies() -> dict[str, TargetCompany]:
+    if not DEFAULT_TARGET_COMPANIES_PATH.exists():
+        return {}
+    return {c.name.casefold(): c for c in load_target_companies_config(DEFAULT_TARGET_COMPANIES_PATH).companies}
+
+
+def _pipeline_employment_priority(item: PipelineItem, companies: dict[str, TargetCompany]) -> tuple[int, int]:
+    if item.vacancy is None:
+        return 4, 3
+    assessment = None
+    if item.analysis_result is not None:
+        evaluation = item.analysis_result
+        assessment = assess_application_feasibility(
+            vacancy_text=item.vacancy.to_analysis_text(), location=item.vacancy.location,
+            visa_sponsorship=evaluation.visa_sponsorship, relocation_support=evaluation.relocation_support,
+            remote_type=evaluation.remote_type, work_authorization_requirement=evaluation.work_authorization_requirement,
+            location_restrictions=evaluation.location_restrictions,
+        )
+    return employment_priority(item.vacancy, company=companies.get((item.vacancy.company or "").casefold()),
+                               feasibility=assessment)
+
+
 # How often to drain Telegram callbacks while sending a vacancy batch.
 # Only used when a caller passes an explicit poll_callbacks hook; `run` now polls
 # on its own thread and does not interleave polls into delivery.
@@ -3796,7 +3853,8 @@ def _deliver_pipeline_items(
     poll_every_n_sent: int = _TELEGRAM_POLL_EVERY_N_SENT_CARDS,
 ) -> None:
     sent_since_poll = 0
-    for item in pipeline.items:
+    companies = _priority_companies()
+    for item in sorted(pipeline.items, key=lambda item: _pipeline_employment_priority(item, companies)):
         if item.vacancy is None:
             continue
         if item.title_filtered:
@@ -3880,6 +3938,8 @@ def _deliver_pipeline_items(
             warnings=warnings,
             info_items=info_items,
             recommended_resume=item.analysis_result.recommended_resume.value,
+            employment_route=("Manual confirmation required" if _pipeline_employment_priority(item, companies)[0] == 3
+                              else "Support stated in posting; verify personal eligibility"),
             content_completeness=getattr(item.vacancy, "content_completeness", None) or "FULL",
             decision_reason=item.analysis_result.decision_reason,
         )

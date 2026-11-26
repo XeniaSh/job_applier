@@ -83,6 +83,7 @@ def recommend_application(
         excluded_seniority=constraints.excluded_seniority,
         requires_sponsorship=constraints.requires_visa_sponsorship,
         remote_type=remote_type,
+        alternative_remote_route=feasibility.alternative_remote_route if feasibility else False,
     )
     if skip_reasons:
         return ApplicationRecommendation(label=RECOMMENDATION_SKIP, reasons=skip_reasons)
@@ -91,6 +92,7 @@ def recommend_application(
         remote_type == "country_limited"
         or work_auth == "required"
         or feasibility_label == "UNLIKELY"
+        or (visa == "no" and remote_type != "worldwide")
         or (feasibility is not None and has_location_limits(feasibility.location_restrictions))
     ):
         return ApplicationRecommendation(
@@ -140,6 +142,7 @@ def _hard_blockers(
     excluded_seniority: list[str],
     requires_sponsorship: bool,
     remote_type: str,
+    alternative_remote_route: bool,
 ) -> list[str]:
     reasons: list[str] = []
     if seniority_label in excluded_seniority:
@@ -149,7 +152,7 @@ def _hard_blockers(
         reasons.append(
             "required language not in known languages: " + ", ".join(missing_languages)
         )
-    if requires_sponsorship and visa == "no" and remote_type != "worldwide":
+    if requires_sponsorship and visa == "no" and remote_type != "worldwide" and not alternative_remote_route:
         reasons.append("required visa sponsorship is explicitly not offered")
     return reasons
 

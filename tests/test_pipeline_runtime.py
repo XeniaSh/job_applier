@@ -83,6 +83,57 @@ def test_domain_exclusion_in_regular_email_pipeline_does_not_mark_seen():
     assert pipeline.eligible() == 0
 
 
+def test_regular_batch_orders_supported_routes_and_keeps_unknowns(monkeypatch):
+    from dataclasses import replace
+    from app.company_watch.domain_policy import DomainPolicy
+
+    unknown = _vacancy(source="linkedin-email", external_id="unknown", title="Senior Java Engineer",
+                       url="https://jobs.example.com/unknown")
+    supported = replace(unknown, external_id="supported", description="Remote worldwide.",
+                        url="https://jobs.example.com/supported")
+    pipeline = cli_module._collect_pipeline_items(
+        collectors=[cli_module.RuntimeCollector(name="linkedin-email", collect_fn=lambda: [unknown, supported])],
+        safe_error_formatter=lambda *args: "error",
+    )
+    monkeypatch.setattr(cli_module, "_priority_companies", lambda: {})
+    calls = []
+    class Analyzer:
+        def analyze(self, text, **kwargs):
+            calls.append(text)
+            return _evaluation(Decision.STRONG_MATCH)
+    class Storage:
+        def is_seen(self, *args):
+            return False
+        def was_sent(self, *args):
+            return False
+        def save_sent(self, **kwargs):
+            pass
+        def mark_history_status(self, **kwargs):
+            pass
+    storage = Storage()
+    cli_module._analyze_pipeline_items(
+        analyzer=Analyzer(), seen_jobs=storage, pipeline=pipeline, limit=20,
+        skip_seen=True, mark_seen=False, domain_policy=DomainPolicy(),
+    )
+    assert len(calls) == 2
+    assert "Remote worldwide" in calls[0]
+    assert "Remote worldwide" not in calls[1]
+    assert pipeline.eligible() == 2
+    cards = []
+    class Client:
+        def send_vacancy_card(self, card):
+            cards.append(card)
+            return type("R", (), {"message_id": len(cards)})()
+    monkeypatch.setattr(cli_module, "_upsert_history_item", lambda *args, **kwargs: None)
+    polls = []
+    cli_module._deliver_pipeline_items(pipeline=pipeline, deliveries=storage, telegram_client=Client(),
+                                       chat_id="synthetic", poll_every_n_sent=1,
+                                       poll_callbacks=lambda: polls.append(True))
+    assert [c.external_id for c in cards] == ["supported", "unknown"]
+    assert cards[1].employment_route == "Manual confirmation required"
+    assert len(polls) == 2
+
+
 def test_pipeline_reporting_is_derived_from_items() -> None:
     pipeline = cli_module.PipelineResult(
         items=[
