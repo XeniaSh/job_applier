@@ -2029,7 +2029,12 @@ supersedes the earlier Datacom/Xero/Endava-first international expansion order.
 Effort ranges are estimates, not vacancy/interview forecasts. None of these
 remaining recommendations is authorized for production by this report. The
 first three rows below record the accepted phase; Habr Phase A is complete and
-its regular integration remains gated by the measured quality gaps.
+its regular integration was gated by the measured quality gaps. The user's
+subsequent Phase B approval supersedes that gate: unknown geography is manual,
+not a source blocker. Bounded public JobPosting text enrichment now verifies
+11/12 FULL and one PARTIAL on the saved JVM cohort, without repeating RSS
+research. Runtime integration is in progress; rollout remains default-off. See
+[Phase B implementation notes](docs/habr-career-phaseb.md).
 
 | Priority | Bounded task | Practical value / gap | Estimated effort |
 | --- | --- | --- | --- |
