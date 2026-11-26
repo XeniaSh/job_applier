@@ -1,0 +1,361 @@
+{
+  "provenance": "Public titles from prior 49 Wise manual pilot reviews and 10 sanitized historical NZ records; no production scores or candidate data",
+  "wise": [
+    {
+      "id": "744000158265079",
+      "title": "Senior Software Engineer I - Pricing Core",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000158264979",
+      "title": "Senior Backend Software Engineer",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000158264339",
+      "title": "Senior Software Engineer II - Wise for Enterprise",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000158242549",
+      "title": "Senior Software Engineer II - Data Onboarding & Reporting",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000158109100",
+      "title": "Senior Software Engineer - Global KYC and Onboarding",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000158109379",
+      "title": "Senior Software Engineer I - Risk Control & Governance",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000158104619",
+      "title": "Senior Backend Engineer - Risk Domain",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000158101614",
+      "title": "Senior Software Engineer I - Account Integrity",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000158102439",
+      "title": "Senior Software Engineer - Java - AML Handling",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000157420370",
+      "title": "Senior Software Engineer I - Product Eligibility",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000157078266",
+      "title": "Senior Software Engineer I - Wise for Enterprise - Banks",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000156862144",
+      "title": "Backend Engineer - Send Experience",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "744000156787429",
+      "title": "Senior Software Engineer - Rules Platform",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000156752984",
+      "title": "Senior Software Engineer I - Risk Control & Governance",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000156563169",
+      "title": "Senior Software Engineer II - Account Integrity",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000156559959",
+      "title": "Platform Engineer - Compute",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "744000156558844",
+      "title": "Senior Full-Stack Software Engineer - Account Integrity - Java, React",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000156558804",
+      "title": "Senior Software Engineer - AML - Java",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000156524929",
+      "title": "Senior Backend Engineer – Contacts",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000156324639",
+      "title": "Backend Engineer - North America Risk Prevention",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "744000156244029",
+      "title": "Senior Software Engineer - Contact Automation - AI",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000155997469",
+      "title": "Senior Software Engineer II - Contacts Team - Java",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000155988185",
+      "title": "Senior Software Engineer - Send High Volume",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000155933663",
+      "title": "Senior Software Engineer - Recommend Team (Java)",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000155771274",
+      "title": "Senior Software Engineer (IC3 - Backend)",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000155375829",
+      "title": "Senior Software Engineer II - FX Markets",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000155375749",
+      "title": "Europe Risk And Controls Senior Software Engineer II",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000154612149",
+      "title": "Senior Backend Engineer - Payin Platform",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000153669609",
+      "title": "Software Engineer - AML Risk",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "744000153155714",
+      "title": "Software Engineer - Recurring Payin",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "744000152862917",
+      "title": "Senior Software Engineer - Wise Platform - API Experience",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000152127649",
+      "title": "Senior Software Engineer I - Business Onboarding and Verification",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000151810217",
+      "title": "Senior Software Engineer II- Regional Expansion",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000151610329",
+      "title": "Backend Software Engineer - Product Eligibility",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "744000151565965",
+      "title": "Senior Software Engineer II - Engineering Experience",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000151430506",
+      "title": "Senior Software Engineer II - Backend (Java) - Account Sharing",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000150313159",
+      "title": "Senior Software Engineer - Risk Intelligence Platform",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000150224729",
+      "title": "Senior Backend Software Engineer I - Personal & Business Pricing Team",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000148210500",
+      "title": "Senior Backend Engineer",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000147911819",
+      "title": "Senior Software Engineer (Backend)",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000145759379",
+      "title": "Senior II Software Engineer - Machine Learning Platform",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000145736524",
+      "title": "Software Engineer - ERP Developer (Microsoft BC)",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "744000143268808",
+      "title": "Backend Engineer - Feature Platform",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "744000141541057",
+      "title": "Senior Software Engineer I - Fincrime Requests",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000139108668",
+      "title": "Senior Software Engineer I - Servicing Platform",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000137863319",
+      "title": "Senior Software Engineer II - Payin Platform - Backend (Java)",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000127948469",
+      "title": "Senior Software Engineer I - Receive",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "744000123620242",
+      "title": "Sr Software Engineer - Screening Engine",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "744000108484376",
+      "title": "Senior Software Engineer I - Payment Processing Platform",
+      "before": "JUNIOR",
+      "expected": "SENIOR"
+    }
+  ],
+  "nz": [
+    {
+      "id": "407391fe-3484-4396-84e2-949987ff3025",
+      "title": "Software Engineer, Peoeple Ecosystem",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "8eafdca9-3003-4730-b2ae-d1ddf9b7b7ce",
+      "title": "Senior Software Engineer - Platform",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "e1fe638b-8fde-4071-86e6-6b47f5747f61",
+      "title": "Intermediate Software Engineer - Field Operations",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "e49ed481-13f2-4b26-b195-69a93aba3840",
+      "title": "Technical Specialist/Software Engineer - Network",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "e6c21fb9-7257-466b-8c03-fba7938a6dd1",
+      "title": "Senior Software Engineer - Production Test Systems",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "f8b4cf6e-78d0-46ea-af8a-01dd9a8d9893",
+      "title": "Lead Software Engineer - Platform",
+      "before": "LEAD_MANAGER",
+      "expected": "LEAD_MANAGER"
+    },
+    {
+      "id": "3bf14081-16d2-4ecf-a2d6-05ac2be81d75",
+      "title": "Software Engineer, NZ",
+      "before": "UNKNOWN",
+      "expected": "UNKNOWN"
+    },
+    {
+      "id": "843134db-a865-4c36-8482-eb9d5b4b1b9e",
+      "title": "Senior Software Engineer, NZ",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "ba7f90a3-8cb9-466e-a609-08fee6748e50",
+      "title": "Senior Software Engineer, NZ",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    },
+    {
+      "id": "0e7dd2e6-aeea-426c-b46c-f1293da08bd0",
+      "title": "Senior Software Engineer",
+      "before": "SENIOR",
+      "expected": "SENIOR"
+    }
+  ]
+}

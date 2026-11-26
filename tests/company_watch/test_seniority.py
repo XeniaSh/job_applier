@@ -1,4 +1,8 @@
 from app.company_watch.seniority import classify_seniority
+import json
+from pathlib import Path
+
+import pytest
 
 
 def test_senior_backend_engineer_is_senior() -> None:
@@ -61,3 +65,34 @@ def test_lead_software_engineer_backend_is_lead_manager() -> None:
         "Lead Software Engineer - Back End (FinTech) (Bangkok based - Relocation provided)"
     )
     assert result.label == "LEAD_MANAGER"
+
+
+@pytest.mark.parametrize("title,expected", [
+    ("Senior Software Engineer I - Pricing", "SENIOR"),
+    ("Senior Backend Engineer I", "SENIOR"),
+    ("Junior Senior Software Engineer I", "JUNIOR"),
+    ("Graduate Software Engineer I", "JUNIOR"),
+    ("Senior Engineering Manager I", "LEAD_MANAGER"),
+    ("Senior Staff Engineer I", "STAFF_PLUS"),
+    ("Senior Software Engineer Intern", "INTERN"),
+    ("Software Engineer III", "SENIOR"),
+    ("Software Engineer II", "MID"),
+    ("Software Engineer I", "JUNIOR"),
+])
+def test_mixed_title_precedence(title, expected):
+    assert classify_seniority(title).label == expected
+
+
+def test_historical_public_title_replay_changes_only_explicit_senior_i():
+    data = json.loads((Path(__file__).parents[1] / "fixtures/discovery/seniority_replay.json").read_text())
+    assert len(data["wise"]) == 49
+    changed = []
+    for row in data["wise"] + data["nz"]:
+        assert classify_seniority(row["title"]).label == row["expected"], row
+        if row["before"] != row["expected"]:
+            changed.append(row)
+            assert row["before"] == "JUNIOR"
+            assert row["expected"] == "SENIOR"
+            assert "senior" in row["title"].lower()
+    assert len(changed) == 12
+    assert all(x["before"] == x["expected"] for x in data["nz"])

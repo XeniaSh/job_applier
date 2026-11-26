@@ -1976,6 +1976,12 @@ fixture; explicit refusals stay rejected. See
 include deterministic cache-policy refresh, seniority, domain rules and bounded
 ordering. No production activation or Habr/HH collector is authorized.
 
+Seniority is also verified locally: explicit Senior/Engineer I precedence fixed,
+with manager/staff/junior/intern guards retained. Public-title replay:12/49 Wise
+labels JUNIOR=>SENIOR,37 unchanged; all ten historical NZ titles unchanged.
+70 focused tests pass. Remaining domain, cache-policy refresh and ordering work
+continues within the approved phase; no production state is modified.
+
 The proposals below are the strategy baseline; the approved subset above now
 takes precedence. Larger schema/queue work still requires separate approval.
 

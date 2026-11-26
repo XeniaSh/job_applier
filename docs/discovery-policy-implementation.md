@@ -32,3 +32,13 @@ Focused verification: 78 tests pass across eligibility conflicts, feasibility,
 recommendations and Wise integration. Ruff passes. Cache-derived recommendation
 refresh will be handled with the policy integration changes later in this phase;
 the technical evaluation must remain reusable without an LLM call.
+
+## Seniority correction
+
+Explicit Senior now precedes the generic Engineer I band. Intern, management,
+staff/principal and explicit junior guards still precede Senior. The committed
+public-title fixture replays all49 Wise pilot titles and ten sanitized NZ titles:
+12 Wise titles change JUNIOR => SENIOR; the other37 and all ten NZ titles remain
+unchanged. This is not12 proven lost notifications or a retrospective score.
+Genuine Engineer I stays JUNIOR and its existing exclusion test remains intact.
+70 focused seniority/recommendation/conflict tests pass; Ruff passes.

@@ -22,8 +22,8 @@ SENIORITY_LABELS = (
 
 # First matching rule wins. Lead/manager is checked before senior so
 # "Senior Engineering Manager" is LEAD_MANAGER, not SENIOR.
-# Software Engineer I is JUNIOR: Roman numeral I is the entry band, not a
-# mid/senior IC target.
+# An unqualified Engineer I is junior. Explicit Senior wins over that generic
+# band, while intern/manager/staff/explicit Junior guards still win over Senior.
 _RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
         re.compile(r"\bintern(?:ship)?s?\b"),
@@ -49,14 +49,14 @@ _RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "title contains junior/entry-level signal",
     ),
     (
-        re.compile(r"\b(?:software\s+)?engineers?\s+i\b"),
-        SENIORITY_JUNIOR,
-        "Software Engineer I is treated as junior/entry band",
-    ),
-    (
         re.compile(r"\bseniors?\b"),
         SENIORITY_SENIOR,
         "title contains senior",
+    ),
+    (
+        re.compile(r"\b(?:software\s+)?engineers?\s+i\b"),
+        SENIORITY_JUNIOR,
+        "Software Engineer I is treated as junior/entry band",
     ),
     (
         re.compile(r"\b(?:software\s+)?engineers?\s+iii\b"),
