@@ -3,7 +3,58 @@
 Date: **2026-11-26 Pacific/Auckland**. Result: **blocked by anti-bot access;
 acceptance incomplete**. The user requested browser closure after manual
 intervention was unavailable. The isolated browser and acceptance process are
-closed. No further live attempt was made after that request.
+closed. No further preparation attempt was made in that acceptance run.
+
+**Current status: live acceptance and SmartRecruiters feature development are
+paused by the user.** `SMARTRECRUITERS_PREPARE_ENABLED` defaults to false. It
+blocks Prepare buttons, previously generated Prepare callbacks, registered
+resolver routing and default adapter selection. All implemented Prepare code is
+retained. Wise discovery/analysis/deduplication/vacancy delivery operate with the
+flag either false or true. Existing Done callbacks are not disabled.
+
+The sections below retain the first acceptance attempt. A separately authorized
+read-only follow-up established the additional confirmed findings below; it did
+not fill forms, upload files or submit applications.
+
+## Confirmed follow-up and conditions to resume
+
+- The user reported CAPTCHA on both previously inspected URLs in ordinary
+  Chrome, then successfully completed it manually in one tab and saw Personal
+  information / First name*. Normal Chrome access succeeds after legitimate
+  verification; it was also gated before that verification.
+- Read-only application-owned Chromium probes encountered the challenge on both
+  Rules Platform and active Send Experience (posting 744000163670972). The user
+  inspected the retained Send Experience window and reported **“Access is
+  temporarily restricted.”** A visible challenge iframe is not proof that a
+  solvable verification is available. The exact external policy/cause of the
+  difference between these sessions remains unknown; do not attribute it solely
+  to automation, IP address or browser profile without evidence.
+- London Recurring Payin, posting 744000163269949, is now inactive according to
+  its public detail and is not an active-vacancy acceptance control.
+- One sampled Greenhouse, Lever and Ashby public form each returned HTTP 200 and
+  was recognized with no detected blocking challenge in separate fresh contexts.
+  This is an access comparison, not full preparation/submission verification.
+- The shared browser handoff retained the challenged window for several minutes
+  until explicit closure; no new premature-close defect was demonstrated. The
+  registry waits without a timeout. Failed/unsupported results and undeliverable
+  review handoffs deliberately close. No automatic Resume Preparation action
+  exists: manual work can continue in a verified open session, but the fill
+  pipeline has already returned its manual result, and Done closes that session.
+  A new Prepare normally creates a fresh context.
+- All probe windows/processes were closed. No cookies were transferred, browser
+  fingerprints/settings manipulated, challenge bypass attempted or production
+  state changed. No product change followed this read-only investigation.
+
+Resume only after **new explicit user approval**, normal supported access or a
+legitimately completable human verification in the actual isolated test context,
+a current approved Wise posting and rechecked candidate/resume paths. Keep
+AUTO_SUBMIT_ENABLED=false and production polling/state isolated. Enabling
+SMARTRECRUITERS_PREPARE_ENABLED=true must be an explicit test-runtime decision,
+not a production configuration change. Any automated continuation after manual
+verification needs a separately scoped, explicit same-context revalidation path;
+the current Done control does not resume filling. No further browser experiments
+or anti-bot diagnostics are authorized while paused, and production activation
+requires its own approval even after acceptance succeeds.
 
 Baseline: Stages 1, 2 and 3 (`1e3835f`, `813862e`, `bb16b18`). Direct Codex;
 no Claude invocation, subagent, production activation or change to main.
@@ -106,7 +157,8 @@ and no APPLIED write. Nine affected cases passed again after strengthening the
 hydration short-circuit, incomplete-heading and actual Done-handoff assertions
 (3.76 s). The Chromium availability probe emitted a Playwright shutdown warning;
 pytest exited zero. Scoped Ruff and diff checks pass. No full suite run and
-no post-fix live attempt. The correction's commit hash is in the completion
+no post-fix live preparation run. Later read-only access comparisons are recorded
+above. The correction's commit hash is in the completion
 report; this document is part of that commit.
 
 ## Readiness and next supervised step
@@ -125,5 +177,7 @@ Submit. No deployment/restart is authorized by this checkpoint.
 Required feature order on the previously checked main baseline: Stage 1
 `1e3835fc61d6059fbc30ab91ed4ac0627e3a8f2c`, Stage 2
 `813862e220a70fde8bfff5819b6d6b43bf3f6105`, Stage 3
-`bb16b18a1bd8213986e0e62a26543c65ba910eb2`, then this checkpoint/fix commit.
+`bb16b18a1bd8213986e0e62a26543c65ba910eb2`, challenge correction
+`991a6254cd3dd120c865afa5cb4d407d14d3db2f`, then the default-off maintenance
+commit from the completion report. See Stage 3 documentation for the full order.
 Exclude launcher `57e30f53a1063b8c812548420d79786e1fe32e6c`.

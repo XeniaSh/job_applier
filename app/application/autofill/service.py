@@ -34,6 +34,7 @@ from app.application.autofill.models import (
 from app.application.autofill.options import match_option, match_option_exact_normalized, match_yes_no
 from app.application.autofill.smartrecruiters import SmartRecruitersAdapter, SmartRecruitersFormError
 from app.application.autofill.smartrecruiters_url import supports_prepare_source
+from app.config import smartrecruiters_prepare_enabled
 from app.application.autofill.questions import QuestionKind
 from app.application.autofill.resolver import (
     TARGET_COMPANY_ASHBY_PREFIX,
@@ -111,6 +112,8 @@ def default_adapter_for_source(source: str) -> AutofillAdapter:
     """Source-aware ATS adapter selection. Unknown sources keep the historical Greenhouse default."""
     cleaned = source.strip()
     if supports_prepare_source(cleaned):
+        if not smartrecruiters_prepare_enabled():
+            raise SmartRecruitersFormError("SmartRecruiters Prepare is disabled.")
         logger.info("autofill_adapter_dispatch provider=smartrecruiters company=wise")
         return SmartRecruitersAdapter(prepare_screening=True, require_posting_identity=True)
     if cleaned.startswith("target_company:smartrecruiters:"):

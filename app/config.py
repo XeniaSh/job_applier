@@ -2,7 +2,7 @@ import math
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from pydantic_settings import NoDecode
 from typing import Annotated
 
@@ -40,7 +40,29 @@ class TelegramSettings(BaseModel):
     job_feed: TelegramChannelSettings = Field(default_factory=TelegramChannelSettings)
 
 
-class Settings(BaseSettings):
+class PrepareFeatureSettings(BaseSettings):
+    """Read Prepare rollout flags without requiring unrelated LLM credentials."""
+
+    smartrecruiters_prepare_enabled: bool = False
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+        env_nested_delimiter="__",
+    )
+
+
+def smartrecruiters_prepare_enabled() -> bool:
+    """Check current configuration at each routing boundary; fail closed."""
+    try:
+        return PrepareFeatureSettings().smartrecruiters_prepare_enabled
+    except (ValidationError, OSError):
+        return False
+
+
+class Settings(PrepareFeatureSettings):
     llm_api_url: str
     llm_api_key: str
     llm_model: str
@@ -99,11 +121,3 @@ class Settings(BaseSettings):
                     cleaned.append(item.strip())
             return cleaned
         return []
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-        env_nested_delimiter="__",
-    )

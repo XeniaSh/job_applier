@@ -18,15 +18,17 @@ ref, or operate on the main working tree.
 
 ## Roles
 
-You are the project manager, architect, and reviewer for this repository.
+Codex is the primary implementation agent, project manager, architect, and
+reviewer for this repository. Implement directly with Codex by default.
 
-Claude Code is the implementation engineer.
-
-For implementation tasks, do not act as the primary coder. Delegate implementation to Claude using:
+Claude Code delegation is optional. Use it selectively when a bounded
+implementation or review task provides clear additional value, through:
 
 ~/.local/bin/job-claude "<prompt>"
 
-You may make tiny mechanical changes yourself only when delegation would clearly be wasteful. For substantive implementation, use Claude.
+Claude permission failures or quota exhaustion must not block development.
+Continue directly with Codex within the approved scope and existing permissions;
+do not broaden permissions or repeatedly retry a blocked delegation.
 
 ## Workflow
 
@@ -35,13 +37,15 @@ For each implementation request:
 1. Read the relevant repository code and project documentation.
 2. Understand the current implementation before proposing changes.
 3. Define a bounded task and clear acceptance criteria.
-4. Delegate the implementation to Claude through `job-claude`.
-5. After Claude finishes:
+4. Implement directly with Codex; optionally delegate a bounded task to Claude
+   when it provides clear additional value.
+5. After implementation:
    - inspect `git status`;
    - inspect the complete relevant `git diff`;
    - run or independently verify appropriate tests;
    - review the implementation against the acceptance criteria and existing architecture.
-6. If there are defects, regressions, missing tests, unnecessary changes, or unmet acceptance criteria, delegate a precise fix request to Claude.
+6. Correct defects, regressions, missing tests, unnecessary changes, or unmet
+   acceptance criteria directly, or optionally delegate a precise fix request.
 7. Repeat review/fix as necessary.
 8. Report completion only after the implementation and relevant tests have been verified.
 
@@ -60,12 +64,13 @@ For each iteration:
    full repository audit without a concrete reason.
 2. Select the next bounded task that is represented in the existing plan, is
    not blocked on user or live input, and has clear acceptance criteria.
-3. Establish the concrete scope, root cause, and design. Delegate substantive
-   implementation to Claude with one bounded prompt. Claude implements; it
-   does not choose roadmap priorities.
+3. Establish the concrete scope, root cause, and design. Codex implements;
+   optional Claude delegation uses one bounded prompt and does not delegate
+   roadmap priorities.
 4. Review the relevant diff, run focused tests, and check the invariants and
-   architecture directly affected by the change. If a defect remains, send
-   Claude only a targeted fix prompt and review that local area again.
+   architecture directly affected by the change. If a defect remains, fix it
+   directly or optionally send Claude a targeted fix prompt, then review that
+   local area again.
 5. After the task passes review, update ignored `PROGRESS.md`, make one local
    commit in `agent-work` for the accepted task, and record its hash. Do not
    include unrelated changes.
@@ -102,7 +107,7 @@ the plan, progress file, code, or tests.
 
 For an ordinary bounded task, start with the relevant files, tests, and directly connected interfaces. Do not reread the whole repository, `PLAN.md`, or `PROGRESS.md` for every task unless the task needs project-wide or architecture context.
 
-When delegating, pass Claude the scoped context already established by Codex:
+When choosing optional delegation, pass Claude the scoped context already established by Codex:
 - the concrete problem;
 - acceptance criteria;
 - relevant files and symbols;
@@ -110,7 +115,7 @@ When delegating, pass Claude the scoped context already established by Codex:
 
 Do not ask Claude to re-investigate the whole repository for an ordinary local task. On a fix iteration, pass only the specific review defect and the local context needed to fix it; do not repeat the general task analysis.
 
-## Claude delegation
+## Optional Claude delegation
 
 A Claude prompt should contain enough context to work autonomously:
 - the concrete goal;
@@ -139,7 +144,10 @@ Do not tell Claude how to implement something in unnecessary detail when reposit
 
 ## Testing and review efficiency
 
-For ordinary changes, Claude runs the smallest relevant regression test set for the changed behavior. After Claude finishes, Codex independently runs the focused tests needed for the acceptance criteria and inspects the relevant diff and absence of unrelated changes.
+For ordinary changes, Codex runs the smallest relevant regression test set for
+the changed behavior and inspects the relevant diff and absence of unrelated
+changes. When Claude implements, it runs focused tests and Codex independently
+verifies the acceptance criteria and actual diff.
 
 Do not run the full test suite after every iteration. Run it at most once per task, and only when the change has broad cross-cutting impact, touches shared/core interfaces with a large blast radius, focused tests provide a concrete reason to suspect a regression, the user explicitly requests it, or Codex can state a specific reason it is needed. Documentation-only changes do not require pytest.
 
@@ -147,7 +155,11 @@ Do not repeat a large unchanged test set without a new code change relevant to t
 
 For small local changes, review proportionally: inspect the relevant diff, check the acceptance criteria, run focused tests, and verify that unrelated files were not changed. Use a deep architecture review only for architectural, security-sensitive, cross-cutting, or explicitly complex changes.
 
-If review finds a concrete defect, first delegate a targeted fix request to Claude. After the fix, inspect the changed area and its related tests rather than repeating the entire initial review. Do not impose an artificial limit on fix iterations, but keep each iteration scoped to the defects actually found.
+If review finds a concrete defect, fix it directly or optionally delegate a
+targeted fix request. After the fix, inspect the changed area and its related
+tests rather than repeating the entire initial review. Keep each iteration
+scoped to the defects actually found; blocked Claude access never requires
+another delegation attempt.
 
 Start ordinary tasks with the minimum sufficient analysis. Expand repository research or testing only when uncertainty, regression risk, or architectural impact is discovered.
 
@@ -211,11 +223,12 @@ If implementation requires a secret or private runtime value, implement against 
 
 ## Claude boundaries
 
-Claude is the implementation engineer. It does not select the next task,
-change the roadmap, access private credentials or data, perform real
-submissions, or commit, push, or merge. Codex gives Claude one bounded
-implementation or targeted-fix prompt per iteration, then independently
-accepts or rejects the result.
+Claude is an optional implementation or review assistant. It does not select
+the next task, change the roadmap, access private credentials or data, perform
+real submissions, or commit, push, or merge. When used, Codex gives Claude one
+bounded implementation or targeted-fix prompt, then independently accepts or
+rejects the result. Permission failures or quota exhaustion return the work to
+Codex without blocking development.
 
 ## Review standard
 

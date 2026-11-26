@@ -15,6 +15,7 @@ from app.collectors.greenhouse_collector import (
 )
 from app.application.autofill.ashby_url import is_canonical_ashby_hosted_url, is_same_job_apply_url
 from app.application.autofill.smartrecruiters_url import WISE_PREPARE_SOURCE, parse_posting_url
+from app.config import smartrecruiters_prepare_enabled
 from app.collectors.vacancy_collector import NormalizedVacancy
 from app.company_watch.watchers.ashby import (
     AshbyCollectionError,
@@ -324,6 +325,8 @@ class DefaultVacancyResolver:
         if cleaned.startswith(TARGET_COMPANY_ASHBY_PREFIX):
             return self._ashby.resolve(cleaned, external_id)
         if cleaned == WISE_PREPARE_SOURCE:
+            if not smartrecruiters_prepare_enabled():
+                raise VacancyResolveError("SmartRecruiters Prepare is disabled.")
             return self._smartrecruiters.resolve(cleaned, external_id)
         raise VacancyResolveError(f"Unsupported vacancy source: {source}")
 
@@ -340,6 +343,8 @@ class SmartRecruitersTargetVacancyResolver:
         self._user_agent = user_agent
 
     def resolve(self, source: str, external_id: str) -> ResolvedVacancy:
+        if not smartrecruiters_prepare_enabled():
+            raise VacancyResolveError("SmartRecruiters Prepare is disabled.")
         wanted = str(external_id).strip()
         reference = parse_posting_url(f"https://jobs.smartrecruiters.com/Wise/{wanted}")
         if source != WISE_PREPARE_SOURCE or reference is None or reference.posting_id != wanted:

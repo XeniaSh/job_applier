@@ -361,7 +361,9 @@ def test_target_company_smartrecruiters_callback_round_trip() -> None:
     assert map_source_to_code(full_wise) != map_source_to_code("target_company:ashby:wise")
 
 
-def test_prepare_is_not_offered_for_unconfirmed_smartrecruiters_posting_identity() -> None:
+@pytest.mark.parametrize("enabled", [False, True])
+def test_prepare_is_not_offered_for_unconfirmed_smartrecruiters_posting_identity(monkeypatch, enabled) -> None:
+    monkeypatch.setenv("SMARTRECRUITERS_PREPARE_ENABLED", str(enabled))
     # Wise now supports Prepare, but this short/unverified posting identity
     # must still expose only Applied/Skip/Open. Source support alone is not enough.
     url = "https://jobs.smartrecruiters.com/Wise/901"
@@ -370,8 +372,8 @@ def test_prepare_is_not_offered_for_unconfirmed_smartrecruiters_posting_identity
 
     assert source_supports_prepare("target_company:smartrecruiters:wise") is False
     assert source_supports_prepare("tcs.wise") is False
-    assert source_supports_application_prepare("target_company:smartrecruiters:wise") is True
-    assert source_supports_application_prepare("tcs.wise") is True
+    assert source_supports_application_prepare("target_company:smartrecruiters:wise") is enabled
+    assert source_supports_application_prepare("tcs.wise") is enabled
 
     for buttons in (target_full, target_code):
         labels = [button.text for row in buttons for button in row]

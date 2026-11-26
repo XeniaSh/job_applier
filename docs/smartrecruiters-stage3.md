@@ -1,6 +1,8 @@
 # SmartRecruiters Prepare Stage 3
 
 Status: **implemented and verified offline**, 2026-11-26 Pacific/Auckland.
+Prepare is now **default-off** behind `SMARTRECRUITERS_PREPARE_ENABLED=false`.
+Live acceptance and further SmartRecruiters feature work are paused by the user.
 Not deployed or activated in production. Live acceptance requires separate
 approval. No live application, Telegram send, profile/configuration change,
 cache reset, database migration, filtering change or submission was performed.
@@ -16,6 +18,14 @@ results, verified private input paths, isolation and the remaining blocker.
 ## Registered workflow
 
 Only `target_company:smartrecruiters:wise` (`tcs.wise` in Telegram) is supported.
+Registered Prepare routing and buttons additionally require the explicit rollout
+flag. Disabled means old Prepare callbacks also fail before worker/session
+creation; direct registered resolution and default adapter dispatch fail closed.
+The flag is read from the existing environment/`.env` settings with environment
+precedence, without requiring unrelated LLM configuration. Existing Done
+callbacks still release already-owned sessions. Discovery, analysis, deduplication
+and vacancy delivery do not depend on it. Offline adapter primitives remain
+available for tests; enabling the flag alone is not live-acceptance approval.
 The button also requires a trusted HTTPS public Wise numeric posting URL matching
 the card ID. Credentials, ports, query/fragment, API/referral/application paths,
 other employers and mismatched IDs are rejected. The callback repeats this
@@ -63,6 +73,14 @@ not bypass existing gates.
 
 ## Verification
 
+- Default-off maintenance: **275 focused checks passed** across three disjoint
+  runs (100 flag/Telegram/Wise-discovery/resolver, 158 existing settings/IMAP/
+  provider/policy/formatting, 17 enabled-path intercepted-browser cases). Includes
+  19 new flag checks and the Wise discovery/delivery suite under both flag
+  values. Old callbacks stop before worker creation; disabled resolver routes
+  stop before network/profile/browser access; Done still cleans up. No live
+  browser experiment, production configuration or launcher change. Ruff/diff
+  checks pass. The older fixture limitations below were not repaired here.
 - **58 new checks:** 28 resolver/identity/error, 16 Telegram/card/policy/polling,
   14 production-wiring integration cases. Real profile loading uses a synthetic
   overlay; API, browser and Telegram network leaves are mocked/intercepted.
@@ -96,7 +114,9 @@ order, only after integration approval:
 ```text
 1e3835fc61d6059fbc30ab91ed4ac0627e3a8f2c  Stage 1
 813862e220a70fde8bfff5819b6d6b43bf3f6105  Stage 2
-<Stage 3 hash from completion report>     this change
+bb16b18a1bd8213986e0e62a26543c65ba910eb2  Stage 3 integration
+991a6254cd3dd120c865afa5cb4d407d14d3db2f  challenge detection/checkpoint
+<default-off maintenance commit>          rollout flag and workflow updates
 ```
 
 Exclude `57e30f53a1063b8c812548420d79786e1fe32e6c` (launcher diagnostics).

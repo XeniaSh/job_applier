@@ -6,6 +6,7 @@ import httpx
 import threading
 from pathlib import Path
 from app.application.autofill.smartrecruiters_url import supports_prepare_source, supports_prepare_vacancy
+from app.config import smartrecruiters_prepare_enabled
 
 from app.telegram.formatter import (
     format_application_ready_card_html,
@@ -536,7 +537,7 @@ def source_supports_application_prepare(source: str) -> bool:
         canonical.startswith(_TARGET_COMPANY_GREENHOUSE_SOURCE_PREFIX)
         or canonical.startswith(_TARGET_COMPANY_LEVER_SOURCE_PREFIX)
         or canonical.startswith(_TARGET_COMPANY_ASHBY_SOURCE_PREFIX)
-        or supports_prepare_source(canonical)
+        or (supports_prepare_source(canonical) and smartrecruiters_prepare_enabled())
     )
 
 

@@ -36,7 +36,7 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
 
 ---
 
-## Current capability and acceptance checkpoint — 2026-10-31
+## Current capability and acceptance checkpoint — 2026-11-26
 
 - Greenhouse, Lever and Ashby have runtime discovery, resolver, Telegram Prepare
   routing and autofill implementations. SmartRecruiters has verified standalone
@@ -44,15 +44,18 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   discovery with manual employer-site applications; the user now reports Wise
   cards delivered in production. TASK-095 form evidence is complete
   (`docs/smartrecruiters-form-inspection.md`); Stage 1/2 and Wise-only Stage 3
-  registration are locally verified. Updated code offers Prepare only for
-  canonical matching Wise numeric postings and uses the shared worker/review
-  lifecycle. Live acceptance and production activation remain pending; no
-  deployment or unsolicited message was performed. See `docs/smartrecruiters-stage3.md`.
-  Supervised live acceptance subsequently reached the approved Wise application
-  URL but was blocked by an anti-bot HTTP 403 before any candidate writes/upload.
-  The user requested browser closure. A narrow challenge-detection fix passes
-  15 offline checks; remaining live criteria and activation are blocked. See
-  `docs/smartrecruiters-live-acceptance.md`.
+  registration and challenge detection are complete and verified offline.
+  `SMARTRECRUITERS_PREPARE_ENABLED` defaults to **false**: no Prepare buttons,
+  old Prepare callbacks or registered resolver/adapter routes are available
+  while disabled. Discovery, analysis, deduplication and vacancy delivery remain
+  operational with either flag value. All Prepare functionality is retained.
+  Live acceptance and further SmartRecruiters feature work are **paused by the
+  user** on an external anti-bot restriction. Ordinary Chrome opened a form after
+  human CAPTCHA verification; the test Chromium showed “Access is temporarily
+  restricted.” Multiple Wise vacancies were gated; sampled GH/Lever/Ashby forms
+  opened. No new browser experiments, anti-bot diagnosis or production activation
+  are authorized. See `docs/smartrecruiters-live-acceptance.md` and
+  `docs/smartrecruiters-stage3.md` for evidence and resumption conditions.
   Workday has no collector; HH remains CLI-only.
 - TASK-097 (same employer-facing resume basename, separate per-profile dirs):
   locally verified (110 focused tests, Ruff and diff checks); private PDF
@@ -85,12 +88,11 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   is manual" note above for that case; TASK-091 status stays historical. See
   `docs/greenhouse-country-control-evidence.md`; supervised no-Submit smoke
   check pending.
-- TASK-090..092 and TASK-094 have completed their local iterations. The current
-  request is TASK-095 SmartRecruiters Prepare and independent TASK-096 desired
-  salary autofill, with separate commits. TASK-095 has complete form evidence and
-  a locally verified Stage 1 adapter (Stages 2/3 not started, live
-  acceptance pending); TASK-096 is locally verified. TASK-093 scoring
-  remains unstarted. Automated and supervised acceptance stay separate.
+- TASK-090..092 and TASK-094 have completed their local iterations. TASK-095
+  Stages 1–3 and challenge detection are complete offline; live acceptance is
+  blocked/paused and Prepare is default-off. TASK-096 salary autofill is locally
+  verified. TASK-093 scoring evaluation remains unstarted. Automated completion,
+  supervised acceptance and production activation are separate checkpoints.
 - No automatic submission, CAPTCHA bypass, Workday/HH expansion, broad refactor,
   production cache reset or whole-backlog reanalysis is authorized in this phase.
 
@@ -1789,8 +1791,16 @@ manual Submit, existing caches and the drained-backlog behavior intact.
   review-lifecycle fixtures lack a candidate overlay and reproduce failure with
   the pre-change service; they are not weakened. Current-main plus approved
   Stage 1/2 compatibility is checked separately without launcher changes.
-  STOP after offline commit/report: supervised acceptance and production
-  activation await separate approval. See `docs/smartrecruiters-stage1.md`,
+  Offline implementation is complete. Live acceptance and further feature work
+  are now PAUSED by the user: ordinary Chrome works after manual CAPTCHA, but
+  the test Chromium remains temporarily restricted. The default-false
+  SMARTRECRUITERS_PREPARE_ENABLED flag blocks buttons, stale Prepare callbacks
+  and registered routing while preserving Wise discovery/delivery. Do not run
+  more access experiments or enable the flag until the explicit resumption
+  conditions in `docs/smartrecruiters-live-acceptance.md` are met. Existing Done
+  callbacks remain available to release already-owned review sessions.
+  STOP after maintenance verification/report; no production activation or next
+  roadmap implementation is authorized. See `docs/smartrecruiters-stage1.md`,
   `docs/smartrecruiters-stage2.md` and `docs/smartrecruiters-stage3.md`.
 - **Historical (superseded) blocker:** the first attempt was blocked on rendered
   form evidence, now captured; the notes below describe that earlier state.
@@ -1884,7 +1894,24 @@ manual Submit, existing caches and the drained-backlog behavior intact.
 TASK-045 Workday and HH promotion are not authorized in this phase. TASK-050
 remains deferred pending a demonstrated live-resolver need. TASK-047/048 exist
 locally, but auto-submit stays disabled/manual; no enablement or submission is
-part of this phase. SmartRecruiters Prepare is authorized only under the
-evidence boundary in TASK-095; general architecture changes are not approved.
+part of this phase. SmartRecruiters Prepare live work is paused and its rollout
+flag remains false; TASK-095 documents the evidence/resumption boundary.
+General architecture changes are not approved.
 Historical task acceptance describes its original milestone;
 later corrections and current supervised acceptance notes take precedence.
+
+## Recommended next three tasks — review only, not started
+
+These recommendations prioritize current-flow reliability and vacancy yield;
+effort ranges are engineering estimates, not measured usage. They are not an
+instruction to start work during this maintenance request.
+
+| Priority | Bounded task | Practical value / gap | Estimated effort |
+| --- | --- | --- | --- |
+| 1 | Make the five existing real-review lifecycle fixtures self-contained | Use synthetic candidate overlays/resumes so browser cleanup and failed-notification regressions run in a private-data-free checkout; preserve all assertions | 0.5 day |
+| 2 | TASK-093: evaluate 15–20 sanitized historical relevance/eligibility decisions | Measure false negatives and misleading seniority/eligibility explanations before proposing any filter/scoring change; requires reviewed labels and sanitized input | 1–2 days |
+| 3 | Bounded read-only health summary from existing TASK-089/099 counters | Current per-cycle logs do not provide retained historical health counts; summarize collection failures, IMAP timeouts and analyzed/delivered counts without vacancy/candidate content or unsolicited messages | 1–2 days |
+
+The third item is a proposed follow-up, not an approved implementation task;
+storage/retention scope must be agreed before adding persistence. No provider
+expansion, SmartRecruiters browser work or automatic filter loosening is proposed.

@@ -968,7 +968,8 @@ def test_default_resume_policy_selects_the_variant_without_an_override(
     run.assert_closed()
 
 
-def test_production_wise_prepare_gate_and_other_adapters_are_unchanged() -> None:
+def test_production_wise_prepare_gate_and_other_adapters_are_unchanged(monkeypatch) -> None:
+    monkeypatch.setenv("SMARTRECRUITERS_PREPARE_ENABLED", "true")
     assert source_supports_application_prepare("target_company:smartrecruiters:wise") is True
     adapter = default_adapter_for_source("target_company:smartrecruiters:wise")
     assert isinstance(adapter, SmartRecruitersAdapter)

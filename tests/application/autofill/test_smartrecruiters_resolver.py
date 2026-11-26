@@ -18,6 +18,11 @@ POSTING = f"https://jobs.smartrecruiters.com/Wise/{ID}-engineer"
 ENDPOINT = smartrecruiters_posting_endpoint("Wise", ID)
 
 
+@pytest.fixture(autouse=True)
+def enable_prepare(monkeypatch):
+    monkeypatch.setenv("SMARTRECRUITERS_PREPARE_ENABLED", "true")
+
+
 def detail(**changes):
     return {
         "id": ID, "uuid": "11111111-2222-3333-4444-555555555555", "active": True,

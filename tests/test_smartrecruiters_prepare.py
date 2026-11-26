@@ -22,7 +22,8 @@ from app.company_watch.watchers.smartrecruiters import SmartRecruitersTargetWatc
 
 
 @pytest.fixture(autouse=True)
-def registry_cleanup():
+def registry_cleanup(monkeypatch):
+    monkeypatch.setenv("SMARTRECRUITERS_PREPARE_ENABLED", "true")
     registry = default_review_registry()
     registry.close_all()
     assert registry.wait_all_discarded(timeout=3)

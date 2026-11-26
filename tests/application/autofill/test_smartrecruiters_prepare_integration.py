@@ -39,6 +39,7 @@ def wait_until(predicate, timeout=20):
 @pytest.fixture
 def production_prepare(monkeypatch, tmp_path):
     """Real production builder; replace only configuration, network, headed browser and LLM leaves."""
+    monkeypatch.setenv("SMARTRECRUITERS_PREPARE_ENABLED", "true")
     registry = default_review_registry()
     registry.close_all()
     assert registry.wait_all_discarded(timeout=3)

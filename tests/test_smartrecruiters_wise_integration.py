@@ -47,6 +47,13 @@ BOT_TOKEN = "test-token"
 CHAT_ID = "222"
 WISE_SOURCE = WISE_SMARTRECRUITERS_SOURCE
 
+
+@pytest.fixture(autouse=True, params=[False, True])
+def prepare_enabled(monkeypatch, request):
+    monkeypatch.setenv("SMARTRECRUITERS_PREPARE_ENABLED", str(request.param))
+    return request.param
+
+
 WISE_CONFIG = """
 companies:
   - name: Wise
@@ -471,7 +478,7 @@ def test_real_watcher_pages_and_normalizes_stable_wise_postings(world: _World, t
     assert detail_ids == [job.posting_id for job in _MATCHING_JOBS]
 
 
-def test_first_cycle_counts_labels_and_wise_only_allowlist(world: _World, tmp_path: Path) -> None:
+def test_first_cycle_counts_labels_and_wise_only_allowlist(world: _World, tmp_path: Path, prepare_enabled) -> None:
     analyzer = _StubAnalyzer()
     result = _run_cycle(tmp_path, analyzer, _open_deliveries(tmp_path))
 
@@ -519,9 +526,12 @@ def test_first_cycle_counts_labels_and_wise_only_allowlist(world: _World, tmp_pa
         buttons = [button for row in rows for button in row]
         assert [button.get("url") for button in buttons if "url" in button] == [job.url]
         callbacks = [button["callback_data"] for button in buttons if "callback_data" in button]
-        assert callbacks == [f"prepapp:tcs.wise:{job.posting_id}", f"applied:tcs.wise:{job.posting_id}", f"skip:tcs.wise:{job.posting_id}"]
+        expected = [f"applied:tcs.wise:{job.posting_id}", f"skip:tcs.wise:{job.posting_id}"]
+        if prepare_enabled:
+            expected.insert(0, f"prepapp:tcs.wise:{job.posting_id}")
+        assert callbacks == expected
         assert not any(data.startswith("prepare:") for data in callbacks)
-        assert sum(button["text"] == "Prepare application" for button in buttons) == 1
+        assert sum(button["text"] == "Prepare application" for button in buttons) == int(prepare_enabled)
 
 
 def test_repeat_polls_and_restart_never_reanalyze_or_resend(world: _World, tmp_path: Path) -> None:
@@ -634,10 +644,10 @@ def test_cached_retry_card_keeps_the_same_wise_warning(world: _World, tmp_path: 
     assert html.escape(WISE_UNKNOWN_SPONSORSHIP_WARNING, quote=True) in unknown_text
 
 
-def test_prepare_is_wise_only_and_forged_other_employer_callback_is_inert(monkeypatch) -> None:
+def test_prepare_is_wise_only_and_forged_other_employer_callback_is_inert(monkeypatch, prepare_enabled) -> None:
     for source in (WISE_SOURCE, "tcs.wise", "target_company:smartrecruiters:canva"):
         assert source_supports_prepare(source) is False
-        assert source_supports_application_prepare(source) is (source != "target_company:smartrecruiters:canva")
+        assert source_supports_application_prepare(source) is (prepare_enabled and source != "target_company:smartrecruiters:canva")
     url = "https://jobs.smartrecruiters.com/Wise/744000100001"
     callbacks = [
         button.callback_data
@@ -645,7 +655,7 @@ def test_prepare_is_wise_only_and_forged_other_employer_callback_is_inert(monkey
         for button in row
         if button.callback_data
     ]
-    assert any(data.startswith("prepapp:tcs.wise:") for data in callbacks)
+    assert any(data.startswith("prepapp:tcs.wise:") for data in callbacks) is prepare_enabled
     assert not any(data.startswith("prepare:") for data in callbacks)
 
     def forbidden(*args, **kwargs):
