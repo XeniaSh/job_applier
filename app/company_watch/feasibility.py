@@ -90,14 +90,14 @@ _WORK_AUTH_REQUIRED_MARKERS = (
 _GEOGRAPHIC_RESTRICTIONS = re.compile(
     r"\b(?:must|need to|required to) (?:already |currently )?"
     r"(?:be based|be located|live|reside|be resident|be physically located) (?:in|within)\b|"
-    r"\b(?:only (?:hire|hiring|employ|accept)|hiring is limited to|"
+    r"\b(?:only (?:hire|hiring|employ|accept) (?:candidates |applicants |applications |people )?(?:in|from|within)|hiring is limited to|"
     r"remote (?:work|working) (?:is )?(?:limited|restricted) to)\b|"
     r"\b(?:remote|work(?:ing)? remotely) (?:only (?:in|from)|within)\b|"
     r"\b(?:us|usa|uk|eu|eea|europe|russia|new zealand|australia|canada) (?:residents? )?only\b|"
     r"\b(?:allowed|eligible|excluded|supported) countries\b|"
     r"\b(?:residents|local candidates) only\b|"
     r"\b(?:except|excluding) (?:the )?(?:us|usa|uk|eu|russia|belarus)\b|"
-    r"\b(?:not (?:worldwide|globally remote)|cannot work from anywhere)\b|"
+    r"\b(?:not (?:(?:offer |support )(?:a )?|a )?(?:worldwide|globally remote|work[- ]from[- ]anywhere)|cannot work from anywhere)\b|"
     r"(?:удал[её]н\w* (?:работа )?только (?:из|в|по)|"
     r"только (?:на территории|из|в) (?:рф|россии|казахстана|узбекистана)|"
     r"(?:необходимо|нужно|обязательно) прожива\w*|кроме (?:рф|россии|рб|беларуси))",

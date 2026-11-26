@@ -28,6 +28,8 @@ def recommend(text="", *, needs_visa=True, **evidence):
     "Удаленная работа только из РФ.", "Удалённо только в России.",
     "Необходимо проживать в Казахстане.", "Не из любой страны: только из РФ.",
     "This role is not worldwide.",
+    "This is not a work-from-anywhere role.",
+    "We do not offer work from anywhere.",
 ])
 def test_explicit_limit_defeats_worldwide_marketing(restriction):
     assessment, result = recommend(
@@ -145,6 +147,12 @@ def test_explicit_sponsored_relocation_remains_available():
 
 def test_employer_address_does_not_restrict_worldwide_remote():
     assessment, result = recommend("Work from anywhere.", location="London, UK")
+    assert assessment.remote_type == "worldwide"
+    assert result.label == "APPLY_NOW"
+
+
+def test_only_hiring_great_engineers_is_not_a_geographic_restriction():
+    assessment, result = recommend("We only hire great engineers. Remote worldwide.")
     assert assessment.remote_type == "worldwide"
     assert result.label == "APPLY_NOW"
 
