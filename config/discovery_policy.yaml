@@ -1,0 +1,16 @@
+# Explicit employment preferences, independent of ATS/technical score.
+# Missing file => no exclusions for legacy/custom configurations.
+# Exact identities only; add aliases deliberately. No broad fintech keyword ban.
+excluded_domains:
+  - speculative_trading
+  - crypto_exchange
+  - gambling
+  - defense
+  - adult_entertainment
+employer_domains:
+  Exness: [speculative_trading]
+  Binance: [crypto_exchange]
+  Coinbase: [crypto_exchange]
+source_domains:
+  target_company:lever:binance: [crypto_exchange]
+  target_company:greenhouse:coinbase: [crypto_exchange]

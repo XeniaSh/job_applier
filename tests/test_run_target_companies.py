@@ -357,6 +357,37 @@ class _CountingAnalyzer:
         return self.evaluation
 
 
+def test_domain_policy_blocks_cached_positive_and_project_before_analysis(monkeypatch, tmp_path):
+    from app.company_watch.domain_policy import DomainPolicy
+
+    policy = DomainPolicy(
+        excluded_domains=["crypto_exchange", "gambling"],
+        source_domains={"target_company:greenhouse:coinbase": ["crypto_exchange"]},
+    )
+    monkeypatch.setattr(cli_module, "load_domain_policy", lambda *args: policy)
+    denied = _vacancy(company="Unknown", board="coinbase", external_id="denied")
+    project = _vacancy(external_id="project", description="Our client is an online casino.")
+    retained = _vacancy(external_id="bank", description="We build banking and payment systems.")
+    cache = TargetCompanyAnalysisCache(tmp_path / "analysis_cache.json")
+    cache.put(denied, evaluation=_evaluation(Decision.STRONG_MATCH), feasibility=_feasibility(),
+              recommendation=ApplicationRecommendation(label="APPLY_NOW", reasons=["old policy"]),
+              seniority=_seniority())
+    cache.save()
+    before = cache.path.read_bytes()
+    result, analyzer, telegram, _ = _run_cycle(
+        monkeypatch, tmp_path, vacancies=[denied, project, retained],
+    )
+    assert result.dropped_domain_policy == 2
+    assert result.selected == result.sent == 1
+    assert len(analyzer.calls) == 1
+    assert telegram.cards[0].external_id == "bank"
+    # Existing excluded analysis is retained, not cleared or invalidated to LLM.
+    reloaded = TargetCompanyAnalysisCache(cache.path)
+    reloaded.load()
+    assert reloaded.get(denied).recommendation.label == "APPLY_NOW"
+    assert b"denied" in before
+
+
 class _FakeTelegram:
     def __init__(self, chat_id: str = "222", *, fail: bool = False) -> None:
         self.chat_id = chat_id
@@ -2283,7 +2314,7 @@ def test_wise_explicit_sponsorship_refusal_skips_when_sponsorship_required(
     )
 
     assert result.outcome_counts.eligible == 0
-    assert result.outcome_counts.other_skip == 1
+    assert result.outcome_counts.work_auth == 1  # shared explicit-sponsorship reason
     assert result.sent == 0
     assert telegram.cards == []
 
@@ -2445,7 +2476,7 @@ def test_wise_visa_refusal_phrasings_skip_when_sponsorship_required(
     assert telegram.cards == []
 
 
-def test_wise_transfer_wording_with_legal_right_to_work_stays_skip(monkeypatch, tmp_path: Path) -> None:
+def test_wise_transfer_wording_with_unknown_legal_right_stays_manual(monkeypatch, tmp_path: Path) -> None:
     vacancy = _smartrecruiters_vacancy(
         external_id="21",
         title="Backend Engineer",
@@ -2460,9 +2491,12 @@ def test_wise_transfer_wording_with_legal_right_to_work_stays_skip(monkeypatch, 
         analyzer=_CountingAnalyzer(_evaluation(Decision.STRONG_MATCH)),
     )
 
-    assert result.outcome_counts.eligible == 0
-    assert result.sent == 0
-    assert telegram.cards == []
+    assert result.outcome_counts.eligible == 1
+    assert result.sent == 1
+    assert len(telegram.cards) == 1
+    cache = TargetCompanyAnalysisCache(tmp_path / "analysis_cache.json")
+    cache.load()
+    assert cache.get(vacancy).recommendation.label == "CHECK_MANUALLY"
 
 
 def test_wise_conditional_with_remote_boost_is_manual_not_skipped(monkeypatch, tmp_path: Path) -> None:

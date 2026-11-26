@@ -1982,6 +1982,14 @@ labels JUNIOR=>SENIOR,37 unchanged; all ten historical NZ titles unchanged.
 70 focused tests pass. Remaining domain, cache-policy refresh and ordering work
 continues within the approved phase; no production state is modified.
 
+Domain exclusions are implemented locally with `config/discovery_policy.yaml`:
+five configurable categories and approved exact Exness/Binance/Coinbase mappings.
+Target and regular email/Greenhouse pipelines gate before analysis/delivery,
+including cached positive target records. Missing custom policy preserves legacy
+behavior; malformed policy fails visibly. Ordinary fintech is retained. Domain,
+runtime and pipeline regressions pass; deterministic cache-derived policy refresh
+and minimal ordering are next. No collector or production activation occurs.
+
 The proposals below are the strategy baseline; the approved subset above now
 takes precedence. Larger schema/queue work still requires separate approval.
 

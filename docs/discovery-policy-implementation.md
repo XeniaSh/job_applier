@@ -42,3 +42,30 @@ public-title fixture replays all49 Wise pilot titles and ten sanitized NZ titles
 unchanged. This is not12 proven lost notifications or a retrospective score.
 Genuine Engineer I stays JUNIOR and its existing exclusion test remains intact.
 70 focused seniority/recommendation/conflict tests pass; Ruff passes.
+
+## Configurable domain policy
+
+`config/discovery_policy.yaml` contains `excluded_domains`, `employer_domains`
+and `source_domains`. Supported domain values are `speculative_trading`,
+`crypto_exchange`, `gambling`, `defense`, `adult_entertainment`. Empty exclusions
+disable this gate. A missing file preserves legacy behavior; a malformed present
+file fails visibly. For a custom target-company config, place its policy in the
+same directory. Generic regular email/Greenhouse discovery uses the default path.
+
+The approved Exness/Binance/Coinbase identities are configured explicitly;
+Binance/Coinbase canonical source identities also cover renamed card labels.
+Matching is exact/case-insensitive, never a broad “fintech” substring. Add aliases
+deliberately. A narrow English/Russian explicit self-description detector handles
+unmapped excluded companies/projects; incidental experience/customer lists,
+cyber-defense, ordinary games, banking, payments, lending and infrastructure do
+not establish an excluded domain. Ambiguous or unstated industries remain
+unclassified; this is not a comprehensive industry classifier.
+
+Known excluded target employers are removed before watcher calls. Vacancy-level
+checks precede target analysis/cache reuse and regular email/Greenhouse analysis.
+Policy exclusions do not clear analyses, delete history or mark generic jobs seen,
+so later policy changes remain reconsiderable. Standalone diagnostic collectors
+and explicit old-card Prepare are not redefined as a policy security boundary.
+115 focused domain/pipeline/target-runtime tests pass; an existing unrelated
+worker-fixture warning about missing resume_profiles.yaml is recorded. Additional
+narrow wording/invalid-YAML tests are included. No production policy is activated.

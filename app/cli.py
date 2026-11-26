@@ -54,6 +54,7 @@ from app.company_watch.feasibility import (
     assess_application_feasibility,
 )
 from app.company_watch.models import TargetCompany
+from app.company_watch.domain_policy import DomainPolicy, excluded_domain_reason, load_domain_policy
 from app.company_watch.preanalysis_ranking import rank_title_for_analysis
 from app.company_watch.seniority import (
     SENIORITY_LABELS,
@@ -1151,6 +1152,7 @@ class _TargetCompaniesCycleResult:
     dropped_delivered: int = 0
     dropped_cached_skip: int = 0
     dropped_unsupported_form: int = 0
+    dropped_domain_policy: int = 0
     selected: int = 0
     analyzed: int = 0
     cache_hits: int = 0
@@ -1510,7 +1512,7 @@ def _classify_target_company_skip_outcome(reasons: list[str]) -> str:
         return "excluded_seniority"
     if any(reason.startswith(_OUTCOME_MISSING_LANGUAGE_REASON_PREFIX) for reason in reasons):
         return "missing_languages"
-    if _OUTCOME_WORK_AUTH_REASON in reasons:
+    if _OUTCOME_WORK_AUTH_REASON in reasons or "required visa sponsorship is explicitly not offered" in reasons:
         return "work_auth"
     return "other_skip"
 
@@ -1650,12 +1652,23 @@ def _run_target_companies_cycle(
         _run_log(f"Target companies: skipped (failed to load config: {exc})", component="main")
         return _TargetCompaniesCycleResult(enabled=False, skip_reason="config_load_error")
 
-    greenhouse_companies = [item for item in loaded.companies if is_greenhouse_target(item)]
-    lever_companies = [item for item in loaded.companies if is_lever_target(item)]
-    ashby_companies = [item for item in loaded.companies if is_ashby_target(item)]
+    try:
+        domain_policy = load_domain_policy(config_path.parent / "discovery_policy.yaml")
+    except (ValueError, OSError) as exc:
+        _run_log(f"Target companies: skipped (domain policy: {type(exc).__name__})", component="main")
+        return _TargetCompaniesCycleResult(enabled=False, skip_reason="domain_policy_load_error")
+    allowed_companies = [
+        item for item in loaded.companies
+        if not excluded_domain_reason(company=item.name, policy=domain_policy)
+    ]
+    _run_log(f"Target companies domain policy: companies_excluded={len(loaded.companies) - len(allowed_companies)}",
+             component="main")
+    greenhouse_companies = [item for item in allowed_companies if is_greenhouse_target(item)]
+    lever_companies = [item for item in allowed_companies if is_lever_target(item)]
+    ashby_companies = [item for item in allowed_companies if is_ashby_target(item)]
     smartrecruiters_companies = [
         item
-        for item in loaded.companies
+        for item in allowed_companies
         if is_smartrecruiters_target(item) and _is_approved_smartrecruiters_company(item)
     ]
     if not greenhouse_companies and not lever_companies and not ashby_companies and not smartrecruiters_companies:
@@ -1742,7 +1755,12 @@ def _run_target_companies_cycle(
     dropped_delivered = 0
     dropped_cached_skip = 0
     dropped_unsupported_form = 0
+    dropped_domain_policy = 0
     for vacancy in watched_vacancies:
+        if excluded_domain_reason(company=vacancy.company, source=vacancy.source,
+                                  text=vacancy.description or "", policy=domain_policy):
+            dropped_domain_policy += 1
+            continue
         if _target_company_already_delivered(
             deliveries,
             source=vacancy.source,
@@ -1817,6 +1835,7 @@ def _run_target_companies_cycle(
         dropped_delivered=dropped_delivered,
         dropped_cached_skip=dropped_cached_skip,
         dropped_unsupported_form=dropped_unsupported_form,
+        dropped_domain_policy=dropped_domain_policy,
         selected=len(to_analyze),
         analyzed=sum(1 for item in analyzed_items if item.evaluation is not None),
         cache_hits=analyze_stats.cache_hits,
@@ -1832,6 +1851,7 @@ def _run_target_companies_cycle(
         f"dropped_delivered={result.dropped_delivered} "
         f"dropped_cached_skip={result.dropped_cached_skip} "
         f"dropped_unsupported_form={result.dropped_unsupported_form} "
+        f"dropped_domain_policy={result.dropped_domain_policy} "
         f"selected={result.selected} "
         f"analyzed={result.analyzed} "
         f"cache_hits={result.cache_hits} "
@@ -3669,7 +3689,9 @@ def _analyze_pipeline_items(
     mark_seen: bool,
     verbose: bool = False,
     telegram_min_match: str = "STRONG",
+    domain_policy: DomainPolicy | None = None,
 ) -> None:
+    policy = domain_policy if domain_policy is not None else load_domain_policy()
     for item in pipeline.items:
         if item.vacancy is None or item.duplicate:
             continue
@@ -3689,6 +3711,17 @@ def _analyze_pipeline_items(
 
         if item.already_seen and skip_seen:
             item.preanalysis_outcome = "already_seen"
+            continue
+
+        domain_reason = excluded_domain_reason(
+            company=vacancy.company, source=vacancy.source, text=vacancy.description or "", policy=policy,
+        )
+        if domain_reason:
+            item.title_filtered = True
+            item.prefilter_reason = domain_reason
+            item.preanalysis_outcome = "prefiltered"
+            # Do not mark seen for a policy exclusion: a later policy change
+            # can reconsider it without any cache reset or lost history.
             continue
 
         title_gate = evaluate_title(vacancy.title)

@@ -53,6 +53,36 @@ def test_pipeline_merges_multiple_collectors_with_dedupe() -> None:
     assert sum(1 for item in result.items if item.duplicate) == 0
 
 
+def test_domain_exclusion_in_regular_email_pipeline_does_not_mark_seen():
+    from app.company_watch.domain_policy import DomainPolicy
+    from dataclasses import replace
+
+    vacancy = _vacancy(source="linkedin-email", external_id="domain", title="Senior Java Engineer",
+                       url="https://jobs.example.com/domain")
+    vacancy = replace(vacancy, company="Coinbase")
+    pipeline = cli_module._collect_pipeline_items(
+        collectors=[cli_module.RuntimeCollector(name="linkedin-email", collect_fn=lambda: [vacancy])],
+        safe_error_formatter=lambda source, exc: "error",
+    )
+    class NoAnalysis:
+        def analyze(self, *args, **kwargs):
+            raise AssertionError("Excluded domain must not consume LLM quota")
+    class Seen:
+        def is_seen(self, *args):
+            return False
+        def mark_seen(self, *args):
+            raise AssertionError("Policy exclusions must remain reconsiderable")
+    cli_module._analyze_pipeline_items(
+        analyzer=NoAnalysis(), seen_jobs=Seen(), pipeline=pipeline, limit=20, skip_seen=True, mark_seen=True,
+        domain_policy=DomainPolicy(excluded_domains=["crypto_exchange"],
+                                   employer_domains={"Coinbase": ["crypto_exchange"]}),
+    )
+    assert pipeline.items[0].title_filtered
+    assert pipeline.items[0].prefilter_reason == "excluded employer/project domain: crypto_exchange"
+    assert pipeline.items[0].analysis_result is None
+    assert pipeline.eligible() == 0
+
+
 def test_pipeline_reporting_is_derived_from_items() -> None:
     pipeline = cli_module.PipelineResult(
         items=[
