@@ -2007,19 +2007,19 @@ documented, not hidden. No full suite or live acceptance was run. Patches apply
 to an isolated archive of current main `715279f`, with affected files compared
 against the tested worktree; main and production data remain untouched.
 
-The [bounded Habr RSS proposal](docs/habr-career-rss-proposal.md) is complete,
-and its **Phase A pilot is now implemented**. The user conditionally approved
-Phase B if useful supply and supported access pass. Access passes, but practical
-cross-border qualification does not: 335 raw / 191 unique, 12 JVM title candidates
-all with unknown geography, no explicit worldwide support, four AI/backend review
-candidates excluded by existing title rules (two substantively reviewed), and
-new detail checks exposing hidden client domain/image-only duties. **Phase B is
-stopped at the quality gate**, not implemented or activated. See
-[pilot measurements, tests and next conditions](docs/habr-career-rss-pilot-2026-11-26.md).
-No LLM, production DB/cache or Telegram access occurred. Next step is bounded
-manual country/contract qualification and a trusted text-detail proposal, plus
-regressions for demonstrated AI title admission gaps; no broad filter changes.
-HH and larger architecture work remain unapproved.
+Habr **Phase A and Phase B are implemented locally**, with production activation
+default-off. The user's revised acceptance supersedes the earlier stop: unknown
+geography is CHECK_MANUALLY, not a source-integration blocker. Reused the saved
+335-raw/191-unique cohort without repeating RSS research; public textual enrichment
+gives 11/12 FULL and one PARTIAL. Regular discovery uses bounded queries/interval,
+source-local detail/technical cache and persisted initial batch cap three per hour,
+shared analysis/eligibility/domain/history/Telegram mechanisms, and manual-only
+cards/actions. No Habr Prepare path or broad AI/Python admission change.
+No real LLM, production DB/cache writes, live Telegram or application sessions.
+[Phase B measurements, tests, activation and limitations](docs/habr-career-phaseb.md).
+The public QSOFT/AGIMA cases have substantive AI duties but mandatory Python/
+production-integration gaps under versioned candidate facts; separate audit-only
+labeling is proposed, not automatic acceptance. HH/larger architecture remain unapproved.
 
 The proposals below are the strategy baseline; the approved subset above now
 takes precedence. Larger schema/queue work still requires separate approval.
@@ -2028,20 +2028,16 @@ The revised [employment strategy](docs/employment-discovery-strategy-2026-11-26.
 supersedes the earlier Datacom/Xero/Endava-first international expansion order.
 Effort ranges are estimates, not vacancy/interview forecasts. None of these
 remaining recommendations is authorized for production by this report. The
-first three rows below record the accepted phase; Habr Phase A is complete and
-its regular integration was gated by the measured quality gaps. The user's
-subsequent Phase B approval supersedes that gate: unknown geography is manual,
-not a source blocker. Bounded public JobPosting text enrichment now verifies
-11/12 FULL and one PARTIAL on the saved JVM cohort, without repeating RSS
-research. Runtime integration is in progress; rollout remains default-off. See
-[Phase B implementation notes](docs/habr-career-phaseb.md).
+first three rows below record the accepted employment-policy phase. Habr regular
+integration is now locally complete under revised acceptance, with default-off
+rollout and an estimated 0–3 initial cards conditional on actual technical matches.
 
 | Priority | Bounded task | Practical value / gap | Estimated effort |
 | --- | --- | --- | --- |
 | Done locally | Shared eligibility conflict correction | Limits defeat worldwide marketing; moving assistance cannot replace a required visa. Unknown/manual and supported alternative routes preserved | Richer country/contract schema remains separate |
 | Done locally | Explicit Senior versus generic Engineer I precedence | 12/49 Wise title corrections; genuine junior/manager/staff guards preserved | No bulk replay/resend |
 | Done locally | Explicit domain policy and minimal batch priority | Configured exclusions, supported-route tiers and current cache-policy refresh; no blanket fintech ban | Global queue, digest or quotas not implemented |
-| Phase A done; B gated | Habr Career RSS discovery | Supported feed/pagination; 12 JVM title candidates, abroad eligibility unconfirmed. Pilot implemented; full-text/country and AI admission evidence gaps block regular integration | Manual qualification and bounded text-detail design next; integration estimate remains conditional |
+| Done locally; activation pending review | Habr Career RSS discovery | Bounded enrichment and regular integration; unknown geography/manual cards, stable cache/history dedup, persisted initial cap. 11/12 full descriptions | Production activation and outcome observation remain separate; no Prepare |
 | 5 | HH supported access and data normalization, then regular-run promotion | Current CLI-only client lacks host/area/work-format parameters and newer metadata; unauthenticated probe 403. Registered API access first, no workaround; preserve dedup/history and polling | 0.5 day access feasibility; 1–2 days client/normalizer; 2–3 days regular integration after access |
 | 6 | Employer/source outcome attribution and manual response/interview tracking | Existing stats do not measure response/interview rates; do not invent low-performing companies from totals. Additive design only, preserve application history/undo | 0.5–1 day sanitized aggregate design; 1–2 days minimal event tracking after approval |
 | 7 | Small employer pilots: Uzum, then verified Russian-speaking JVM teams | Current Uzum worldwide-remote Java lead; actual entity/country/Senior scope needs confirmation. Prefer verified existing ATS over new custom breadth | 0.5–1 day existing-ATS pilot; 1–3 days custom source per employer |
@@ -2050,8 +2046,8 @@ research. Runtime integration is in progress; rollout remains default-off. See
 Immediate manual-source value: review current Uzum and a small Habr/getmatch
 shortlist; no automatic application or recruiter message. The bounded
 code corrections to seniority and eligibility are now complete locally.
-The Habr RSS pilot now supplies a manual shortlist; the next step is country/
-contract qualification and bounded detail validation before regular integration.
+Habr now supplies a manual shortlist and a default-off regular integration;
+country/contract qualification remains part of reviewing individual vacancies.
 HH reuse is conditional on legitimate API access. getmatch/Geekjob
 supported-input validation and LinkedIn manual email alerts can complement this;
 Telegram scraping/LLM aggregation and LinkedIn site automation are not proposed.

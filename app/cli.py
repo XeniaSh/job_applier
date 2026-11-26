@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from app.collectors.hh_client import HHClient
 from app.collectors.hh_collector import DEFAULT_HH_QUERIES, HHCollector, HHCollectReport
 from app.collectors.greenhouse_collector import GreenhouseCollectionError, GreenhouseCollector
+from app.collectors.habr_discovery import HabrDiscovery, HabrPolicy, load_habr_config
 from app.company_watch.analysis_cache import (
     DEFAULT_TARGET_COMPANY_ANALYSIS_CACHE_PATH,
     TargetCompanyAnalysisCache,
@@ -399,6 +400,7 @@ def _build_runtime_collectors(
     analyzer: VacancyAnalyzer,
     seen_jobs: SeenJobsStorage,
     email_client: EmailIMAPClient,
+    deliveries: TelegramDeliveryStorage | None = None,
 ) -> list[RuntimeCollector]:
     """Regular-run collectors. LINKEDIN_EMAIL_ENABLED=false only skips email discovery."""
     runtime_collectors: list[RuntimeCollector] = []
@@ -424,6 +426,17 @@ def _build_runtime_collectors(
     if settings.greenhouse_boards:
         greenhouse_collector = GreenhouseCollector(boards=settings.greenhouse_boards)
         runtime_collectors.append(RuntimeCollector(name="greenhouse", collect_fn=greenhouse_collector.collect))
+    if getattr(settings, "habr_discovery_enabled", False):
+        try:
+            if deliveries is None:
+                raise ValueError("Habr requires shared delivery history")
+            habr = HabrDiscovery(load_habr_config(settings.habr_discovery_config_path),
+                was_sent=lambda vacancy: deliveries.was_sent("habr", vacancy.external_id, _telegram_destination_chat_id(settings)),
+                eligible_decision=lambda decision: _meets_telegram_min_match(decision, settings.telegram.job_feed.min_match),
+                log=_component_log("habr"))
+            runtime_collectors.append(RuntimeCollector(name="habr", collect_fn=habr.collect, habr_discovery=habr))
+        except Exception as exc:  # configuration failure must not disable other sources
+            _run_log(f"Habr unavailable: configuration_error={type(exc).__name__}", component="habr")
     return runtime_collectors
 
 
@@ -2779,6 +2792,7 @@ def run_pipeline(
         analyzer=analyzer,
         seen_jobs=seen_jobs,
         email_client=email_client,
+        deliveries=deliveries,
     )
     collectors: list[Collector] = runtime_collectors
     telegram_client = _telegram_client_for(settings, TelegramDestination.LINKEDIN)
@@ -3679,6 +3693,7 @@ def _collect_pipeline_items(
                     identity=identity,
                     storage_source=storage_key[0] if storage_key else None,
                     storage_external_id=storage_key[1] if storage_key else None,
+                    habr_discovery=getattr(collector, "habr_discovery", None),
                 )
             )
 
@@ -3743,12 +3758,12 @@ def _analyze_pipeline_items(
             item.preanalysis_outcome = "error"
             continue
 
-        if item.already_seen and skip_seen:
+        if item.already_seen and skip_seen and item.habr_discovery is None:
             item.preanalysis_outcome = "already_seen"
             continue
 
         domain_reason = excluded_domain_reason(
-            company=vacancy.company, source=vacancy.source, text=vacancy.description or "", policy=policy,
+            company=vacancy.company or "", source=vacancy.source, text=vacancy.description or "", policy=policy,
         )
         if domain_reason:
             item.title_filtered = True
@@ -3789,20 +3804,29 @@ def _analyze_pipeline_items(
                 analysis_text=analysis_text,
             )
         try:
-            evaluation = analyzer.analyze(analysis_text, content_completeness="FULL")
+            if item.habr_discovery is not None:
+                evaluation, item.habr_policy = item.habr_discovery.analyze(vacancy, analyzer)
+                evaluation = evaluation.model_copy(update={
+                    "info_items": list(item.habr_policy.notices) + [s for s in evaluation.info_items if "linkedin" not in s.casefold()],
+                    "warning_signals": [s for s in evaluation.warning_signals if s.get("code") != "incomplete_description"],
+                })
+            else:
+                evaluation = analyzer.analyze(analysis_text, content_completeness="FULL")
         except Exception as exc:  # noqa: BLE001
-            item.error = str(exc)
+            item.error = f"Habr analysis error: {type(exc).__name__}" if item.habr_discovery is not None else str(exc)
             item.error_stage = "analyze"
-            logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, exc)
+            logger.error("%s vacancy %s failed: %s", vacancy.source, vacancy.external_id, item.error)
             continue
 
         item.analysis_result = evaluation
-        if mark_seen:
+        if mark_seen and item.habr_discovery is None:
             seen_jobs.mark_seen(item.storage_source or vacancy.source, item.storage_external_id or vacancy.external_id)
         item.telegram_eligible = _meets_telegram_min_match(
             evaluation.decision.value,
             telegram_min_match,
         )
+        if item.habr_policy is not None and item.habr_policy.recommendation.label == "SKIP":
+            item.telegram_eligible = False
 
 
 def _priority_companies() -> dict[str, TargetCompany]:
@@ -3815,7 +3839,9 @@ def _pipeline_employment_priority(item: PipelineItem, companies: dict[str, Targe
     if item.vacancy is None:
         return 4, 3
     assessment = None
-    if item.analysis_result is not None:
+    if item.habr_policy is not None:
+        assessment = item.habr_policy.feasibility
+    elif item.analysis_result is not None:
         evaluation = item.analysis_result
         assessment = assess_application_feasibility(
             vacancy_text=item.vacancy.to_analysis_text(), location=item.vacancy.location,
@@ -3937,8 +3963,10 @@ def _deliver_pipeline_items(
             nuances=item.analysis_result.nuances,
             warnings=warnings,
             info_items=info_items,
-            recommended_resume=item.analysis_result.recommended_resume.value,
-            employment_route=("Manual confirmation required" if _pipeline_employment_priority(item, companies)[0] == 3
+            recommended_resume=(item.analysis_result.resume_variant or item.analysis_result.recommended_resume.value)
+                if item.habr_policy is not None else item.analysis_result.recommended_resume.value,
+            employment_route=(item.habr_policy.recommendation.label if item.habr_policy is not None else
+                              "Manual confirmation required" if _pipeline_employment_priority(item, companies)[0] == 3
                               else "Support stated in posting; verify personal eligibility"),
             content_completeness=getattr(item.vacancy, "content_completeness", None) or "FULL",
             decision_reason=item.analysis_result.decision_reason,
@@ -4359,6 +4387,8 @@ def _sanitize_text(value: str, *, secrets: list[str]) -> str:
 
 
 def _format_collector_error(*, source: str, exc: Exception, imap_host: str, secrets: list[str]) -> str:
+    if source == "habr":
+        return "Habr collection failed: " + type(exc).__name__
     if source == "linkedin-email":
         if isinstance(exc, EmailAuthenticationError):
             return "IMAP authentication failure."
@@ -5007,6 +5037,11 @@ def _process_callback_update(
     except ValueError:
         if callback_id:
             client.answer_callback_query(callback_id, text="Некорректное действие")
+        return
+
+    if source == "habr" and action not in {"applied", "skip", "undo"}:
+        if callback_id:
+            client.answer_callback_query(callback_id, text="Для Habr доступен только ручной отклик")
         return
 
     message_id = int(message.get("message_id", 0))
@@ -5773,9 +5808,11 @@ def _rebuild_sent_card(
                 nuances=evaluation.nuances,
                 warnings=warnings,
                 info_items=info_items,
-                recommended_resume=evaluation.recommended_resume.value,
+                recommended_resume=(evaluation.resume_variant or evaluation.recommended_resume.value)
+                    if source == "habr" else evaluation.recommended_resume.value,
                 content_completeness=str(cached.get("content_completeness") or "PARTIAL"),
                 decision_reason=evaluation.decision_reason,
+                employment_route="CHECK_MANUALLY" if source == "habr" else None,
             )
             return format_telegram_card_html(card), build_action_buttons(source, external_id, url)
         except Exception:  # noqa: BLE001
@@ -6175,7 +6212,8 @@ def _upsert_history_item(item: LinkedInProcessedVacancy) -> None:
         url=item.url,
         decision=evaluation.decision.value if evaluation else None,
         decision_reason=(evaluation.decision_reason if evaluation else item.decision_reason),
-        recommended_resume=evaluation.recommended_resume.value if evaluation else None,
+        recommended_resume=((evaluation.resume_variant or evaluation.recommended_resume.value) if item.source == "habr"
+                            else evaluation.recommended_resume.value) if evaluation else None,
     )
     analysis_text = item.analysis_text
     if not analysis_text and item.vacancy_json:
@@ -6339,6 +6377,8 @@ class PipelineItem:
     verbose_events: list[str] | None = None
     error: str | None = None
     error_stage: str | None = None
+    habr_discovery: HabrDiscovery | None = None
+    habr_policy: HabrPolicy | None = None
 
     @property
     def title(self) -> str:
@@ -6518,6 +6558,7 @@ class RuntimeCollector:
     name: str
     collect_fn: Callable[[], list[NormalizedVacancy]]
     diagnostics_fn: Callable[[], LinkedInSyncDiagnostics] | None = None
+    habr_discovery: HabrDiscovery | None = None
 
     def collect(self) -> CollectorResult:
         return CollectorResult(source=self.name, vacancies=self.collect_fn())

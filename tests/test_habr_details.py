@@ -77,3 +77,12 @@ def test_budget_reuses_cache_but_does_not_request_missing_detail(tmp_path):
         assert service.fetch("https://career.habr.com/vacancies/1000000001", allow_network=False).completeness == "FULL"
         assert service.fetch("https://career.habr.com/vacancies/1000000002", allow_network=False).status == "budget_limit"
         assert service.requests == 1
+
+
+def test_cached_access_denial_stops_other_urls_after_restart(tmp_path):
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(403, text="denied"))) as client:
+        service = HabrDetailClient(tmp_path / "cache.json", client=client, clock=lambda: 1000)
+        service.fetch("https://career.habr.com/vacancies/1000000001")
+        restarted = HabrDetailClient(tmp_path / "cache.json", client=client, clock=lambda: 1300)
+        assert restarted.fetch("https://career.habr.com/vacancies/1000000002").status == "access_restricted"
+        assert restarted.requests == 0

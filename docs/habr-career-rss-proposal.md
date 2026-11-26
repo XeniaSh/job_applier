@@ -2,7 +2,8 @@
 
 Historical proposal; superseded by the approved
 [Phase A implementation and measured report](habr-career-rss-pilot-2026-11-26.md).
-Phase B is stopped at the practical-quality gate; no runtime activation.
+Phase B subsequently received revised approval and is
+[implemented with default-off activation](habr-career-phaseb.md).
 
 Original proposal status: **no collector implemented or activated**. Uses the
 2026-11-26 research already recorded in the employment strategy; no new live

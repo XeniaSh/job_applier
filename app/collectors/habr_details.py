@@ -108,6 +108,11 @@ class HabrDetailClient:
                     self.entries[key] = detail
         except (OSError, ValueError, TypeError, AttributeError):
             self.entries = {}
+        # A restart/shorter RSS interval must not turn a cached source denial
+        # into probes of other posting URLs during the same cooldown.
+        self.blocked = any(entry.status in {"http_401", "http_403", "http_429"}
+                           and 0 <= self.clock() - entry.checked_at < min(self.ttl, 3600)
+                           for entry in self.entries.values())
 
     def fetch(self, url: str, *, allow_network: bool = True) -> HabrDetail:
         identity = canonical_habr_url(url)

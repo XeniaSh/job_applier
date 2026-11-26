@@ -1,6 +1,10 @@
 # Habr Career RSS pilot — 2026-11-26
 
-**Phase A implemented and verified. Phase B not started: the practical quality
+Historical checkpoint: superseded by the user's revised Phase B acceptance and
+[completed default-off integration](habr-career-phaseb.md). Unknown geography
+remains CHECK_MANUALLY and no longer blocks source integration.
+
+**Original Phase A checkpoint: Phase B not started; the practical quality
 gate is not met.** Supported RSS access works, but this sample does not establish
 a new viable cross-border JVM/backend lead. The shortlist is useful for manual
 qualification; it is not evidence for automatic regular delivery yet.

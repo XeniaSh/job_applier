@@ -555,7 +555,7 @@ def _canonical_source(source: str) -> str:
 
 
 def map_source_to_code(source: str) -> str:
-    mapping = {"linkedin-email": "li", "li": "li", "greenhouse": "gh", "gh": "gh"}
+    mapping = {"linkedin-email": "li", "li": "li", "greenhouse": "gh", "gh": "gh", "habr": "hb", "hb": "hb"}
     mapped = mapping.get(source)
     if mapped is not None:
         return mapped
@@ -571,6 +571,8 @@ def map_source_to_code(source: str) -> str:
 
 def map_code_to_source(code: str) -> str:
     reverse = {
+        "hb": "habr",
+        "habr": "habr",
         "li": "linkedin-email",
         "linkedin-email": "linkedin-email",
         "gh": "greenhouse",

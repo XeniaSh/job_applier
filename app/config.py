@@ -95,6 +95,8 @@ class Settings(PrepareFeatureSettings):
     undo_window_seconds: int = 600
     auto_submit_enabled: bool = False
     greenhouse_boards: Annotated[list[str], NoDecode] = []
+    habr_discovery_enabled: bool = False
+    habr_discovery_config_path: Path = Path("config/habr_discovery.yaml")
 
     @field_validator(
         "linkedin_email_imap_timeout_seconds",
