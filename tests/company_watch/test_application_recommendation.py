@@ -92,7 +92,7 @@ def test_empty_language_requirements_are_not_skip() -> None:
     assert result.label != "SKIP"
 
 
-def test_work_authorization_required_without_sponsorship_is_skip() -> None:
+def test_work_authorization_required_with_unknown_sponsorship_is_manual() -> None:
     result = recommend_application(
         decision=Decision.STRONG_MATCH,
         feasibility=_feasibility(work_authorization_requirement="required"),
@@ -100,8 +100,8 @@ def test_work_authorization_required_without_sponsorship_is_skip() -> None:
         company=_company(),
         location="Chicago",
     )
-    assert result.label == "SKIP"
-    assert any("work authorization" in reason for reason in result.reasons)
+    assert result.label == "CHECK_MANUALLY"
+    assert result.reasons == ["country/work-authorization compatibility requires confirmation"]
 
 
 def test_location_only_requirement_is_not_skip() -> None:
@@ -119,7 +119,7 @@ def test_location_only_requirement_is_not_skip() -> None:
     assert result.label != "SKIP"
 
 
-def test_permanent_residents_only_requirement_is_skip() -> None:
+def test_permanent_residents_only_with_unknown_candidate_status_is_manual() -> None:
     feasibility = assess_application_feasibility(
         vacancy_text="Singapore permanent residents only may apply for this role.",
         location="Singapore",
@@ -131,11 +131,11 @@ def test_permanent_residents_only_requirement_is_skip() -> None:
         company=_company(),
         location="Singapore",
     )
-    assert result.label == "SKIP"
-    assert any("work authorization" in reason for reason in result.reasons)
+    assert result.label == "CHECK_MANUALLY"
+    assert result.reasons == ["country/work-authorization compatibility requires confirmation"]
 
 
-def test_explicit_eligibility_requirement_with_location_is_skip() -> None:
+def test_explicit_eligibility_requirement_with_unknown_candidate_facts_is_manual() -> None:
     feasibility = assess_application_feasibility(
         vacancy_text="Must be based in New Zealand. Applicants must be eligible to work in New Zealand.",
         location="Auckland",
@@ -147,8 +147,8 @@ def test_explicit_eligibility_requirement_with_location_is_skip() -> None:
         company=_company(),
         location="Auckland",
     )
-    assert result.label == "SKIP"
-    assert any("work authorization" in reason for reason in result.reasons)
+    assert result.label == "CHECK_MANUALLY"
+    assert result.reasons == ["country/work-authorization compatibility requires confirmation"]
 
 
 def test_strong_match_with_known_hiring_location_is_check_manually() -> None:

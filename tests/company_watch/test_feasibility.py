@@ -129,7 +129,8 @@ def test_required_when_explicit_eligibility_text_present_regardless_of_location(
     )
 
     assert result.work_authorization_requirement == "required"
-    assert result.label == "UNLIKELY"
+    assert result.visa_sponsorship == "unknown"
+    assert result.label == "UNCLEAR"  # no candidate-country authorization fact
 
 
 def test_required_when_legal_right_to_work_phrase_present() -> None:
@@ -139,7 +140,8 @@ def test_required_when_legal_right_to_work_phrase_present() -> None:
     )
 
     assert result.work_authorization_requirement == "required"
-    assert result.label == "UNLIKELY"
+    assert result.visa_sponsorship == "unknown"
+    assert result.label == "UNCLEAR"
 
 
 def test_unclear_when_only_bare_residents_only_phrase_present() -> None:
@@ -159,4 +161,5 @@ def test_required_when_permanent_residents_only_phrase_present() -> None:
     )
 
     assert result.work_authorization_requirement == "required"
-    assert result.label == "UNLIKELY"
+    assert result.visa_sponsorship == "unknown"
+    assert result.label == "UNCLEAR"

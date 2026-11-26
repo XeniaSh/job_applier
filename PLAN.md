@@ -1963,6 +1963,22 @@ later corrections and current supervised acceptance notes take precedence.
 
 ## Recommended next implementation priorities — approval required
 
+### Approved first implementation phase — local progress
+
+The user authorized eligibility conflicts, Senior/Engineer I, configurable
+domain exclusions and minimal delivery prioritization, with separate commits.
+Strategy documentation is committed separately (`2a8356e`). Eligibility conflict
+corrections are verified locally: 78 focused tests and Ruff pass. Explicit limits
+cannot promote worldwide/APPLY_NOW; moving money cannot replace required visa
+support. Unknown country rights stay manual, including the Wise transfer/right
+fixture; explicit refusals stay rejected. See
+[implementation notes](docs/discovery-policy-implementation.md). Remaining tasks
+include deterministic cache-policy refresh, seniority, domain rules and bounded
+ordering. No production activation or Habr/HH collector is authorized.
+
+The proposals below are the strategy baseline; the approved subset above now
+takes precedence. Larger schema/queue work still requires separate approval.
+
 The revised [employment strategy](docs/employment-discovery-strategy-2026-11-26.md)
 supersedes the earlier Datacom/Xero/Endava-first international expansion order.
 Effort ranges are estimates, not vacancy/interview forecasts. None of these

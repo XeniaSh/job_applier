@@ -171,7 +171,7 @@ EXPECTED_RECOMMENDATIONS = {
     "manager": "SKIP",
     "refusal": "SKIP",
     "conditional": "CHECK_MANUALLY",
-    "work_rights": "SKIP",
+    "work_rights": "CHECK_MANUALLY",  # existing rights unknown, not an explicit candidate denial
 }
 EXPECTED_VISA = {
     "offered": "yes",
@@ -180,7 +180,7 @@ EXPECTED_VISA = {
     "conditional": "unknown",
     "work_rights": "unknown",
 }
-SENT_KEYS = {"offered", "unknown", "conditional"}
+SENT_KEYS = {"offered", "unknown", "conditional", "work_rights"}
 
 
 def _constraints() -> CandidateConstraints:
@@ -486,16 +486,16 @@ def test_first_cycle_counts_labels_and_wise_only_allowlist(world: _World, tmp_pa
     assert (result.watched, result.dropped_delivered, result.dropped_cached_skip) == (7, 0, 0)
     assert result.dropped_unsupported_form == 0
     assert (result.selected, result.analyzed, result.cache_hits, result.cache_misses) == (7, 7, 0, 7)
-    assert (result.sent, result.send_errors) == (3, 0)
+    assert (result.sent, result.send_errors) == (4, 0)
     funnel = result.provider_funnels["smartrecruiters"]
     assert funnel.configured_companies == 1  # Canva is configured but rejected at runtime
     assert (funnel.raw_fetched, funnel.title_prefilter_pass, funnel.post_gate_candidates) == (10, 7, 7)
-    assert (funnel.selected, funnel.analyzed, funnel.sent, funnel.watcher_errors) == (7, 7, 3, 0)
+    assert (funnel.selected, funnel.analyzed, funnel.sent, funnel.watcher_errors) == (7, 7, 4, 0)
     for other in ("greenhouse", "lever", "ashby"):
         assert result.provider_funnels[other].raw_fetched == 0
     counts = result.outcome_counts
-    assert (counts.eligible, counts.sent, counts.llm_ignore, counts.excluded_seniority) == (3, 3, 1, 1)
-    assert counts.work_auth + counts.other_skip == 2
+    assert (counts.eligible, counts.sent, counts.llm_ignore, counts.excluded_seniority) == (4, 4, 1, 1)
+    assert counts.work_auth + counts.other_skip == 1
     assert counts.analysis_error == 0
 
     assert len(analyzer.calls) == 7
@@ -515,10 +515,10 @@ def test_first_cycle_counts_labels_and_wise_only_allowlist(world: _World, tmp_pa
     assert work_rights.feasibility.work_authorization_requirement == "required"
     assert work_rights.feasibility.location_restrictions == [f"{CONDITIONAL_TEXT} {RESTRICTION_TEXT}"]
 
-    # Delivery selection is unchanged; eligible canonical Wise cards now gain
-    # exactly the application Prepare action (never the LinkedIn artifact action).
+    # The unknown-rights case is retained for manual review, not called ineligible.
+    # Every delivered card has exactly the opt-in application Prepare action.
     assert set(world.successful_titles) == {html.escape(title, quote=True) for title in _sent_titles()}
-    assert len(world.successful_titles) == 3
+    assert len(world.successful_titles) == 4
     for key in SENT_KEYS:
         job = _JOBS_BY_KEY[key]
         sent = next(item for item in world.telegram_sends if item.title == html.escape(job.title, quote=True))
@@ -538,10 +538,10 @@ def test_repeat_polls_and_restart_never_reanalyze_or_resend(world: _World, tmp_p
     analyzer = _StubAnalyzer()
     deliveries = _open_deliveries(tmp_path)
     first = _run_cycle(tmp_path, analyzer, deliveries)
-    assert first.sent == 3
+    assert first.sent == 4
 
     second = _run_cycle(tmp_path, analyzer, deliveries)
-    assert (second.watched, second.dropped_delivered, second.dropped_cached_skip) == (7, 3, 4)
+    assert (second.watched, second.dropped_delivered, second.dropped_cached_skip) == (7, 4, 3)
     assert (second.selected, second.analyzed, second.sent, second.send_errors) == (0, 0, 0, 0)
     assert len(analyzer.calls) == 7
 
@@ -549,13 +549,13 @@ def test_repeat_polls_and_restart_never_reanalyze_or_resend(world: _World, tmp_p
     _simulate_restart()
     restarted_analyzer = _StubAnalyzer()
     third = _run_cycle(tmp_path, restarted_analyzer, _open_deliveries(tmp_path))
-    assert (third.watched, third.dropped_delivered, third.dropped_cached_skip) == (7, 3, 4)
+    assert (third.watched, third.dropped_delivered, third.dropped_cached_skip) == (7, 4, 3)
     assert (third.selected, third.analyzed, third.sent, third.send_errors) == (0, 0, 0, 0)
     assert restarted_analyzer.calls == []
 
-    assert len(world.successful_titles) == 3
-    assert len(set(world.successful_titles)) == 3
-    assert len(world.telegram_sends) == 3
+    assert len(world.successful_titles) == 4
+    assert len(set(world.successful_titles)) == 4
+    assert len(world.telegram_sends) == 4
 
 
 def test_failed_send_is_retried_once_from_cache_without_reanalysis(world: _World, tmp_path: Path) -> None:
@@ -564,7 +564,7 @@ def test_failed_send_is_retried_once_from_cache_without_reanalysis(world: _World
     world.fail_next_sends = 1
 
     first = _run_cycle(tmp_path, analyzer, deliveries)
-    assert (first.sent, first.send_errors) == (2, 1)
+    assert (first.sent, first.send_errors) == (3, 1)
     failed = [item for item in world.telegram_sends if not item.ok]
     assert len(failed) == 1
     failed_title = failed[0].title
@@ -572,7 +572,7 @@ def test_failed_send_is_retried_once_from_cache_without_reanalysis(world: _World
     assert len(analyzer.calls) == 7
 
     second = _run_cycle(tmp_path, analyzer, deliveries)
-    assert (second.dropped_delivered, second.dropped_cached_skip) == (2, 4)
+    assert (second.dropped_delivered, second.dropped_cached_skip) == (3, 3)
     assert (second.selected, second.cache_hits, second.cache_misses) == (1, 1, 0)
     assert (second.sent, second.send_errors) == (1, 0)
     assert len(analyzer.calls) == 7  # served from cache
@@ -585,10 +585,10 @@ def test_failed_send_is_retried_once_from_cache_without_reanalysis(world: _World
     _simulate_restart()
     restarted_analyzer = _StubAnalyzer()
     fourth = _run_cycle(tmp_path, restarted_analyzer, _open_deliveries(tmp_path))
-    assert (fourth.dropped_delivered, fourth.selected, fourth.sent, fourth.send_errors) == (3, 0, 0, 0)
+    assert (fourth.dropped_delivered, fourth.selected, fourth.sent, fourth.send_errors) == (4, 0, 0, 0)
     assert restarted_analyzer.calls == []
-    assert len(world.successful_titles) == 3
-    assert len(world.telegram_sends) == 4  # 1 failure + 3 successes, no repeats
+    assert len(world.successful_titles) == 4
+    assert len(world.telegram_sends) == 5  # 1 failure + 4 successes, no repeats
 
 
 def test_rendered_payload_keeps_priority_wise_text_within_formatter_limits(world: _World, tmp_path: Path) -> None:
@@ -631,14 +631,14 @@ def test_rendered_payload_keeps_priority_wise_text_within_formatter_limits(world
 
 
 def test_cached_retry_card_keeps_the_same_wise_warning(world: _World, tmp_path: Path) -> None:
-    world.fail_next_sends = 3
+    world.fail_next_sends = 4
     analyzer = _StubAnalyzer()
     deliveries = _open_deliveries(tmp_path)
     first = _run_cycle(tmp_path, analyzer, deliveries)
-    assert (first.sent, first.send_errors) == (0, 3)
+    assert (first.sent, first.send_errors) == (0, 4)
 
     second = _run_cycle(tmp_path, analyzer, deliveries)
-    assert (second.sent, second.cache_hits) == (3, 3)
+    assert (second.sent, second.cache_hits) == (4, 4)
     assert len(analyzer.calls) == 7
     unknown_text = _card_text(world, _UNKNOWN.title)
     assert html.escape(WISE_UNKNOWN_SPONSORSHIP_WARNING, quote=True) in unknown_text

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 FEASIBILITY_LIKELY = "LIKELY"
 FEASIBILITY_UNCLEAR = "UNCLEAR"
@@ -57,6 +58,7 @@ _REMOTE_WORLDWIDE_MARKERS = (
     "globally remote",
     "remote-first globally",
     "remote globally",
+    "remote contractors worldwide",
 )
 _WORK_AUTH_REQUIRED_MARKERS = (
     "must be authorized to work",
@@ -71,6 +73,25 @@ _WORK_AUTH_REQUIRED_MARKERS = (
     "citizens only",
     "permanent residents only",
     "permanent resident only",
+)
+
+# Only explicit restrictions, never a job's address or the candidate's location.
+# Unknown country compatibility is a manual check, not a factual rejection.
+_GEOGRAPHIC_RESTRICTIONS = re.compile(
+    r"\b(?:must|need to|required to) (?:already |currently )?"
+    r"(?:be based|be located|live|reside|be resident|be physically located) (?:in|within)\b|"
+    r"\b(?:only (?:hire|hiring|employ|accept)|hiring is limited to|"
+    r"remote (?:work|working) (?:is )?(?:limited|restricted) to)\b|"
+    r"\b(?:remote|work(?:ing)? remotely) (?:only (?:in|from)|within)\b|"
+    r"\b(?:us|usa|uk|eu|eea|europe|russia|new zealand|australia|canada) (?:residents? )?only\b|"
+    r"\b(?:allowed|eligible|excluded|supported) countries\b|"
+    r"\b(?:residents|local candidates) only\b|"
+    r"\b(?:except|excluding) (?:the )?(?:us|usa|uk|eu|russia|belarus)\b|"
+    r"\b(?:not (?:worldwide|globally remote)|cannot work from anywhere)\b|"
+    r"(?:удал[её]н\w* (?:работа )?только (?:из|в|по)|"
+    r"только (?:на территории|из|в) (?:рф|россии|казахстана|узбекистана)|"
+    r"(?:необходимо|нужно|обязательно) прожива\w*|кроме (?:рф|россии|рб|беларуси))",
+    re.IGNORECASE,
 )
 
 
@@ -124,6 +145,7 @@ def assess_application_feasibility(
         work_auth=work_auth,
         languages=languages,
         location=location,
+        location_limited=has_location_limits(restrictions),
     )
     return ApplicationFeasibility(
         label=label,
@@ -145,11 +167,10 @@ def _classify(
     work_auth: str,
     languages: list[str],
     location: str | None,
+    location_limited: bool = False,
 ) -> tuple[str, list[str]]:
     warnings: list[str] = []
-    explicit_local_block = work_auth == "required" and visa != "yes" and remote != "worldwide"
-    if visa == "no" and relocation != "yes" and remote != "worldwide":
-        explicit_local_block = True
+    explicit_local_block = visa == "no" and remote != "worldwide"
 
     if explicit_local_block:
         if work_auth == "required":
@@ -159,6 +180,19 @@ def _classify(
         if location:
             warnings.append(f"check eligibility for {location.strip()}")
         return FEASIBILITY_UNLIKELY, warnings
+
+    if work_auth == "required" or remote == "country_limited" or location_limited:
+        # No country-specific candidate facts are available in this layer.
+        # Even positive marketing/sponsorship cannot settle a conflicting limit.
+        warnings.append(
+            "visa/relocation not mentioned; check manually" if visa == "unknown"
+            else "country/work-authorization compatibility requires confirmation"
+        )
+        if remote == "country_limited":
+            warnings.append("explicit geographic hiring restriction; check compatibility manually")
+        if work_auth == "required":
+            warnings.append("existing local work authorization requires confirmation")
+        return FEASIBILITY_UNCLEAR, warnings
 
     likely_signals: list[str] = []
     if visa == "yes":
@@ -176,6 +210,12 @@ def _classify(
     if languages:
         warnings.append("language requirements: " + ", ".join(languages[:3]))
     return FEASIBILITY_UNCLEAR, warnings
+
+
+def has_location_limits(restrictions: list[str]) -> bool:
+    """Unparsed location/timezone limits need confirmation, not invented rights."""
+    unrestricted = {"worldwide", "remote worldwide", "worldwide remote", "global", "anywhere"}
+    return any(item.strip().casefold() not in unrestricted for item in restrictions if item.strip())
 
 
 def _normalize_ternary(value: str | None) -> str:
@@ -244,6 +284,10 @@ def _merge_ternary(extracted: str, scanned: str) -> str:
 
 def _merge_remote(extracted: str, text: str) -> str:
     extracted_norm = _normalize_remote(extracted)
+    if _GEOGRAPHIC_RESTRICTIONS.search(text):
+        return "country_limited"
+    if extracted_norm in {"country_limited", "hybrid", "onsite"}:
+        return extracted_norm
     if extracted_norm == "worldwide" or any(marker in text for marker in _REMOTE_WORLDWIDE_MARKERS):
         return "worldwide"
     if extracted_norm != "unknown":
