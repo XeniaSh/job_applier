@@ -93,14 +93,18 @@ def production_prepare(monkeypatch, tmp_path):
                     return
                 self.requests.append(parts.path)
                 if parts.path == urlsplit(POSTING).path:
-                    if mode == "posting_challenge":
+                    if mode == "datadome_posting_challenge":
+                        body = datadome_shell()
+                    elif mode == "posting_challenge":
                         body = '<title>Verify you are human</title><div class="g-recaptcha"></div>'
                     else:
                         canonical = POSTING.replace(ID, "744000999999999") if mode == "repost" else POSTING
                         href = "https://evil.example/submit" if mode == "untrusted_apply" else APP_URL
                         body = _posting_html(canonical=canonical, links=[("I'm interested", href, "")])
                 elif parts.path == urlsplit(APP_URL).path:
-                    body = "<title>Unknown form</title>" if mode == "unsupported" else PAGE_ONE.read_text() + "<script>" + SCREENING.read_text() + "</script>"
+                    body = (datadome_shell() if mode == "datadome_application_challenge" else
+                            "<title>Unknown form</title>" if mode == "unsupported" else
+                            PAGE_ONE.read_text() + "<script>" + SCREENING.read_text() + "</script>")
                 else:
                     route.abort()
                     return
@@ -202,13 +206,24 @@ def test_registered_two_stage_partial_outcome_is_visible_and_never_submitted(pro
         assert "CAPTCHA" in client.texts[0]["text"]
 
 
-@pytest.mark.parametrize("mode", ["posting_challenge", "application_challenge"])
+def datadome_shell():
+    return ('<title>smartrecruiters.com</title><p>Please enable JS and disable any ad blocker</p>'
+            '<script type="application/json" src="https://ct.captcha-delivery.com/c.js?token=SYNTHETIC-PRIVATE"></script>')
+
+
+@pytest.mark.parametrize("mode", ["posting_challenge", "application_challenge",
+                                  "datadome_posting_challenge", "datadome_application_challenge"])
 def test_challenges_are_handed_off_without_candidate_writes(production_prepare, mode, caplog):
     result, client, _, _ = production_prepare(mode=mode)
     assert result.status is AutofillStatus.NEEDS_MANUAL_INTERVENTION
     assert result.filled_fields == [] and not result.resume_uploaded
+    assert client.review_id  # the real Done callback must own the open browser
+    assert client.texts[0]["text"].startswith("Preparation incomplete")
     assert "challenge" in client.texts[0]["text"].lower() or "CAPTCHA" in client.texts[0]["text"]
     assert "ada@example.invalid" not in caplog.text and "55501234" not in caplog.text
+    assert "SYNTHETIC-PRIVATE" not in caplog.text + client.texts[0]["text"]
+    if mode.startswith("datadome"):
+        assert "CAPTCHA" in client.texts[0]["text"]
 
 
 @pytest.mark.parametrize("mode", ["unsupported", "repost", "untrusted_apply"])

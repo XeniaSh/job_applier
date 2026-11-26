@@ -336,6 +336,15 @@ class SmartRecruitersAdapter:
             for selector in _CHALLENGE_SELECTORS:
                 if page.locator(selector).count():
                     return "captcha"
+            # The observed DataDome 403 shell has no form or challenge title.
+            # Its loader can fail before a visible CAPTCHA iframe is created.
+            # Read only resource hostnames; never return challenge query tokens.
+            hosts = page.locator("script[src], iframe[src]").evaluate_all("""els => els.map(e => {
+                try { return new URL(e.src, document.baseURI).hostname.toLowerCase(); }
+                catch { return ''; }
+            })""")
+            if any(host == "captcha-delivery.com" or host.endswith(".captcha-delivery.com") for host in hosts):
+                return "captcha"
         except PlaywrightError:
             return None
         return None
@@ -479,6 +488,8 @@ class SmartRecruitersAdapter:
     def _wait_hydrated(self, page: Page) -> None:
         waited = 0
         while waited < self._hydration_timeout_ms:
+            if self.detect_challenge(page):
+                return
             if self._hydrated(page):
                 return
             page.wait_for_timeout(self._poll_ms)

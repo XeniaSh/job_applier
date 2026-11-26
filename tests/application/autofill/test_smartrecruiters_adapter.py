@@ -714,6 +714,29 @@ def test_screening_url_hydration_challenge_and_foreign_pages(open_form) -> None:
     assert slow_adapter.recognize(slow.page) is False
 
 
+@pytest.mark.parametrize("src,expected", [
+    ("https://ct.captcha-delivery.com/c.js?token=SYNTHETIC-PRIVATE", "captcha"),
+    ("https://geo.captcha-delivery.com/captcha/", "captcha"),
+    ("https://captcha-delivery.com/c.js", "captcha"),
+    ("https://captcha-delivery.com.evil.invalid/c.js", None),
+    ("https://example.invalid/c.js?redirect=https://ct.captcha-delivery.com/", None),
+])
+def test_datadome_challenge_resource_uses_exact_host_and_sanitized_reason(open_form, monkeypatch, src, expected) -> None:
+    site, adapter = open_form()
+    # An inert resource marker reproduces the blocked loader without network.
+    site.page.evaluate("""src => {
+        const script=document.createElement('script');
+        script.type='application/json'; script.src=src; document.body.append(script);
+    }""", src)
+    assert adapter.detect_challenge(site.page) == expected
+    if expected:
+        def forbidden_hydration(_page):
+            raise AssertionError("A detected challenge must stop hydration inspection.")
+
+        monkeypatch.setattr(adapter, "_hydrated", forbidden_hydration)
+        adapter._wait_hydrated(site.page)
+
+
 # ------------------------------------------------- service (injected adapter)
 class _Resolver:
     def __init__(self, title: str = "Engineer", normalized: NormalizedVacancy | None = None) -> None:

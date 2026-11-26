@@ -6,6 +6,13 @@ approval. No live application, Telegram send, profile/configuration change,
 cache reset, database migration, filtering change or submission was performed.
 Direct Codex implementation; no Claude invocation, subagent or launcher change.
 
+Supervised acceptance was subsequently attempted and is **blocked by an
+anti-bot HTTP 403**, with no candidate writes or attachment upload. The browser
+was closed at the user's request. A narrow challenge-detection correction is
+verified offline; live acceptance and activation remain pending. See the
+[live acceptance checkpoint](smartrecruiters-live-acceptance.md) for per-criterion
+results, verified private input paths, isolation and the remaining blocker.
+
 ## Registered workflow
 
 Only `target_company:smartrecruiters:wise` (`tcs.wise` in Telegram) is supported.

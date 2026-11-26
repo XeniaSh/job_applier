@@ -48,6 +48,11 @@ Blocked or later-stage tasks stay skipped until their dependencies and policy al
   canonical matching Wise numeric postings and uses the shared worker/review
   lifecycle. Live acceptance and production activation remain pending; no
   deployment or unsolicited message was performed. See `docs/smartrecruiters-stage3.md`.
+  Supervised live acceptance subsequently reached the approved Wise application
+  URL but was blocked by an anti-bot HTTP 403 before any candidate writes/upload.
+  The user requested browser closure. A narrow challenge-detection fix passes
+  15 offline checks; remaining live criteria and activation are blocked. See
+  `docs/smartrecruiters-live-acceptance.md`.
   Workday has no collector; HH remains CLI-only.
 - TASK-097 (same employer-facing resume basename, separate per-profile dirs):
   locally verified (110 focused tests, Ruff and diff checks); private PDF
